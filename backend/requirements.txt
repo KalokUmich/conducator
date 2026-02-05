@@ -5,4 +5,5 @@ httpx
 jsonschema
 duckdb
 pyyaml
+pyngrok
 

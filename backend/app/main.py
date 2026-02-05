@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
 
     if config.ngrok.enabled:
         logger.info("Ngrok is enabled in config, starting tunnel...")
-        public_url = await start_ngrok(
+        public_url = start_ngrok(
             port=config.server.port,
             authtoken=config.ngrok.authtoken,
             region=config.ngrok.region
