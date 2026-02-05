@@ -124,12 +124,15 @@
 
     <script>
         // Session config from server (userId will be set after fingerprint generation)
+        // Determine WebSocket protocol based on page protocol (ws for http, wss for https)
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
         const config = {
             roomId: "{{ room_id }}",
             userId: null,  // Will be set by fingerprint
             displayName: "",  // Will be assigned by server
             role: "{{ role }}",
-            wsUrl: "ws://" + window.location.host + "/ws/chat/{{ room_id }}"
+            wsUrl: wsProtocol + "//" + window.location.host + "/ws/chat/{{ room_id }}"
         };
 
         // Users map: userId -> user info
