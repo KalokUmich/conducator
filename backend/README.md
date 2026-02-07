@@ -25,6 +25,10 @@ pip install -r requirements.txt
 #### 2. Start the Server
 
 ```bash
+# Option 1: Using Makefile (recommended, from project root)
+make run-backend
+
+# Option 2: Manual
 cd backend
 uvicorn app.main:app --reload
 ```
@@ -222,6 +226,10 @@ pip install -r requirements.txt
 #### 2. 启动服务器
 
 ```bash
+# 方式一：使用 Makefile（推荐，从项目根目录）
+make run-backend
+
+# 方式二：手动启动
 cd backend
 uvicorn app.main:app --reload
 ```

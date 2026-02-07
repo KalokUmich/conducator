@@ -96,6 +96,10 @@ pip install -r requirements.txt
 
 # Start server
 uvicorn app.main:app --reload
+
+# Or use Makefile (recommended, from project root)
+cd ..
+make run-backend
 ```
 
 #### 3. Set Up Extension
@@ -213,7 +217,11 @@ cd backend
 pip install -r requirements.txt
 
 # 启动服务器
-uvicorn app.main:app --reload
+  uvicorn app.main:app --reload
+
+# 或使用 Makefile（推荐，从项目根目录）
+cd ..
+make run-backend
 ```
 
 #### 3. 设置扩展
