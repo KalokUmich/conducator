@@ -1,7 +1,7 @@
 # Conductor Project Makefile
 # ===========================
 
-.PHONY: all setup setup-backend setup-extension venv install test test-backend test-extension compile clean help
+.PHONY: all setup setup-backend setup-extension venv install run-backend run-backend-prod run-backend-port test test-backend test-extension compile clean help
 
 # Python virtual environment
 VENV_DIR := .venv
@@ -61,6 +61,27 @@ venv:
 
 ## Install all dependencies (alias for setup)
 install: setup
+
+# ===========================
+# Run Servers
+# ===========================
+
+## Start backend server (development mode with auto-reload)
+run-backend: venv
+	@echo "🚀 Starting backend server..."
+	@echo "   Swagger UI: http://localhost:8000/docs"
+	@echo "   ReDoc: http://localhost:8000/redoc"
+	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+## Start backend server (production mode)
+run-backend-prod: venv
+	@echo "🚀 Starting backend server (production)..."
+	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+
+## Start backend with custom port (usage: make run-backend-port PORT=8001)
+run-backend-port: venv
+	@echo "🚀 Starting backend server on port $(PORT)..."
+	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port $(PORT)
 
 # ===========================
 # Testing
@@ -126,22 +147,27 @@ help:
 	@echo "======================================="
 	@echo ""
 	@echo "Setup:"
-	@echo "  make setup          - Create venv and install all dependencies"
-	@echo "  make setup-backend  - Setup backend only (venv + pip install)"
-	@echo "  make setup-extension- Setup extension only (npm install)"
-	@echo "  make venv           - Create Python virtual environment"
+	@echo "  make setup            - Create venv and install all dependencies"
+	@echo "  make setup-backend    - Setup backend only (venv + pip install)"
+	@echo "  make setup-extension  - Setup extension only (npm install)"
+	@echo "  make venv             - Create Python virtual environment"
+	@echo ""
+	@echo "Run Servers:"
+	@echo "  make run-backend      - Start backend server (dev mode, auto-reload)"
+	@echo "  make run-backend-prod - Start backend server (production, 4 workers)"
+	@echo "  make run-backend-port PORT=8001 - Start on custom port"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test           - Run all tests"
-	@echo "  make test-backend   - Run backend tests only"
-	@echo "  make test-extension - Run extension tests only"
+	@echo "  make test             - Run all tests"
+	@echo "  make test-backend     - Run backend tests only"
+	@echo "  make test-extension   - Run extension tests only"
 	@echo ""
 	@echo "Build:"
-	@echo "  make compile        - Compile extension (TypeScript + CSS)"
-	@echo "  make compile-ts     - Compile TypeScript only"
-	@echo "  make compile-css    - Build Tailwind CSS only"
+	@echo "  make compile          - Compile extension (TypeScript + CSS)"
+	@echo "  make compile-ts       - Compile TypeScript only"
+	@echo "  make compile-css      - Build Tailwind CSS only"
 	@echo ""
 	@echo "Other:"
-	@echo "  make clean          - Remove all generated files"
-	@echo "  make help           - Show this help message"
+	@echo "  make clean            - Remove all generated files"
+	@echo "  make help             - Show this help message"
 
