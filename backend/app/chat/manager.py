@@ -10,18 +10,47 @@ Key features:
     - Message history persistence (in-memory, per room)
     - Avatar color assignment
     - Broadcast messaging to all room participants
+    - Concurrent message broadcasting with asyncio.gather()
+    - Automatic dead connection cleanup
+    - Message deduplication with LRU cache
+    - Paginated message history
+    - Read receipts tracking
 
 Thread Safety:
     This implementation is designed for async/await usage with a single event loop.
     It is NOT thread-safe for concurrent access from multiple threads.
+
+Performance Notes:
+    - Broadcasting uses asyncio.gather() for concurrent message delivery
+    - Failed connections are automatically removed during broadcast
+    - Uvicorn handles ping/pong at the protocol level (default 20s interval)
+    - Message deduplication uses OrderedDict as LRU cache (O(1) lookup)
 """
+import asyncio
+import logging
 import time
 import uuid
+from collections import OrderedDict
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import WebSocket
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Maximum number of message IDs to track for deduplication
+MESSAGE_DEDUP_CACHE_SIZE = 10000
+
+# Default page size for message history pagination
+DEFAULT_PAGE_SIZE = 50
+
+# Maximum page size to prevent abuse
+MAX_PAGE_SIZE = 100
 
 
 # =============================================================================
@@ -142,6 +171,12 @@ class ConnectionManager:
 
         # websocket -> (room_id, userId) for disconnect handling
         self.websocket_to_user: Dict[WebSocket, Tuple[str, str]] = {}
+
+        # Message deduplication: room_id -> OrderedDict of message IDs (LRU cache)
+        self.seen_message_ids: Dict[str, OrderedDict] = {}
+
+        # Read receipts: room_id -> {message_id -> set of user_ids who read it}
+        self.message_read_by: Dict[str, Dict[str, Set[str]]] = {}
 
     async def connect(self, websocket: WebSocket, room_id: str) -> List[ChatMessage]:
         """Accept a WebSocket connection and add it to a room.
@@ -287,7 +322,11 @@ class ConnectionManager:
         return message
 
     async def broadcast(self, message: dict, room_id: str) -> None:
-        """Broadcast a message to all connections in a room.
+        """Broadcast a message to all connections in a room concurrently.
+
+        Uses asyncio.gather() for concurrent message delivery, which is
+        significantly faster than sequential iteration for rooms with
+        many connections.
 
         This method safely handles disconnected clients by removing them
         from the connection list if sending fails.
@@ -299,15 +338,92 @@ class ConnectionManager:
         if room_id not in self.active_connections:
             return
 
-        # Copy list to avoid modification during iteration
         connections = self.active_connections[room_id].copy()
-        for connection in connections:
-            try:
-                await connection.send_json(message)
-            except Exception:
-                # Connection closed or errored, remove it
-                if connection in self.active_connections[room_id]:
-                    self.active_connections[room_id].remove(connection)
+        if not connections:
+            return
+
+        # Send to all connections concurrently
+        results = await asyncio.gather(
+            *[self._safe_send(conn, message) for conn in connections],
+            return_exceptions=True
+        )
+
+        # Remove failed connections
+        failed_connections = [
+            conn for conn, success in zip(connections, results)
+            if success is False
+        ]
+        self._cleanup_connections(room_id, failed_connections)
+
+    async def broadcast_except(
+        self, message: dict, room_id: str, exclude_websocket: WebSocket
+    ) -> None:
+        """Broadcast a message to all connections except one concurrently.
+
+        Useful for typing indicators where sender shouldn't see their own.
+        Uses asyncio.gather() for concurrent message delivery.
+
+        Args:
+            message: JSON-serializable message to broadcast.
+            room_id: Room to broadcast to.
+            exclude_websocket: WebSocket connection to exclude from broadcast.
+        """
+        if room_id not in self.active_connections:
+            return
+
+        connections = [
+            conn for conn in self.active_connections[room_id]
+            if conn != exclude_websocket
+        ]
+        if not connections:
+            return
+
+        # Send to all connections concurrently (except excluded)
+        results = await asyncio.gather(
+            *[self._safe_send(conn, message) for conn in connections],
+            return_exceptions=True
+        )
+
+        # Remove failed connections
+        failed_connections = [
+            conn for conn, success in zip(connections, results)
+            if success is False
+        ]
+        self._cleanup_connections(room_id, failed_connections)
+
+    async def _safe_send(self, connection: WebSocket, message: dict) -> bool:
+        """Send a message to a WebSocket connection with error handling.
+
+        Args:
+            connection: The WebSocket to send to.
+            message: JSON-serializable message to send.
+
+        Returns:
+            True if successful, False if connection failed.
+        """
+        try:
+            await connection.send_json(message)
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to send to connection: {e}")
+            return False
+
+    def _cleanup_connections(
+        self, room_id: str, failed_connections: List[WebSocket]
+    ) -> None:
+        """Remove failed connections from a room.
+
+        Args:
+            room_id: Room to clean up.
+            failed_connections: List of WebSocket connections to remove.
+        """
+        if not failed_connections or room_id not in self.active_connections:
+            return
+
+        for conn in failed_connections:
+            if conn in self.active_connections[room_id]:
+                self.active_connections[room_id].remove(conn)
+                logger.debug(f"Removed dead connection from room {room_id}")
 
     def get_room_size(self, room_id: str) -> int:
         """Get the number of active connections in a room."""
@@ -335,6 +451,8 @@ class ConnectionManager:
         self.message_history.pop(room_id, None)
         self.room_users.pop(room_id, None)
         self.guest_counters.pop(room_id, None)
+        self.seen_message_ids.pop(room_id, None)
+        self.message_read_by.pop(room_id, None)
 
         # Clean up websocket-to-user mappings for this room
         to_remove = [
@@ -343,6 +461,132 @@ class ConnectionManager:
         ]
         for ws in to_remove:
             del self.websocket_to_user[ws]
+
+    # =========================================================================
+    # Message Deduplication
+    # =========================================================================
+
+    def is_duplicate_message(self, room_id: str, message_id: str) -> bool:
+        """Check if a message ID has been seen before (for deduplication).
+
+        Uses an LRU cache to track seen message IDs. If the message is new,
+        it is added to the cache.
+
+        Args:
+            room_id: The room ID.
+            message_id: The message ID to check.
+
+        Returns:
+            True if the message has been seen before, False if it's new.
+        """
+        if not message_id:
+            return False  # No ID means we can't dedupe
+
+        if room_id not in self.seen_message_ids:
+            self.seen_message_ids[room_id] = OrderedDict()
+
+        cache = self.seen_message_ids[room_id]
+
+        if message_id in cache:
+            # Move to end (most recently used)
+            cache.move_to_end(message_id)
+            return True
+
+        # Add new message ID
+        cache[message_id] = True
+
+        # Evict oldest if cache is full
+        while len(cache) > MESSAGE_DEDUP_CACHE_SIZE:
+            cache.popitem(last=False)
+
+        return False
+
+    # =========================================================================
+    # Message Pagination
+    # =========================================================================
+
+    def get_messages_since(
+        self, room_id: str, since_ts: float
+    ) -> List[ChatMessage]:
+        """Get messages newer than the given timestamp (for reconnection).
+
+        Args:
+            room_id: The room ID.
+            since_ts: Unix timestamp (seconds). Returns messages with ts > since_ts.
+
+        Returns:
+            List of messages newer than since_ts.
+        """
+        messages = self.message_history.get(room_id, [])
+        return [msg for msg in messages if msg.ts > since_ts]
+
+    def get_paginated_history(
+        self,
+        room_id: str,
+        before_ts: Optional[float] = None,
+        limit: int = DEFAULT_PAGE_SIZE
+    ) -> List[ChatMessage]:
+        """Get paginated message history (for lazy loading).
+
+        Returns messages older than the cursor, limited to `limit` messages.
+        Messages are returned in chronological order (oldest first).
+
+        Args:
+            room_id: The room ID.
+            before_ts: Unix timestamp cursor. Returns messages with ts < before_ts.
+                       If None, returns the most recent messages.
+            limit: Maximum number of messages to return.
+
+        Returns:
+            List of messages, oldest first.
+        """
+        limit = min(limit, MAX_PAGE_SIZE)  # Prevent abuse
+        messages = self.message_history.get(room_id, [])
+
+        if before_ts is not None:
+            # Filter messages before the cursor
+            messages = [msg for msg in messages if msg.ts < before_ts]
+
+        # Return last N messages (most recent before cursor)
+        return messages[-limit:] if messages else []
+
+    # =========================================================================
+    # Read Receipts
+    # =========================================================================
+
+    def mark_message_read(
+        self, room_id: str, message_id: str, user_id: str
+    ) -> Set[str]:
+        """Mark a message as read by a user.
+
+        Args:
+            room_id: The room ID.
+            message_id: The message ID that was read.
+            user_id: The user ID who read the message.
+
+        Returns:
+            Set of all user IDs who have read this message.
+        """
+        if room_id not in self.message_read_by:
+            self.message_read_by[room_id] = {}
+
+        if message_id not in self.message_read_by[room_id]:
+            self.message_read_by[room_id][message_id] = set()
+
+        self.message_read_by[room_id][message_id].add(user_id)
+        return self.message_read_by[room_id][message_id]
+
+    def get_read_by(self, room_id: str, message_id: str) -> Set[str]:
+        """Get the set of user IDs who have read a message.
+
+        Args:
+            room_id: The room ID.
+            message_id: The message ID.
+
+        Returns:
+            Set of user IDs who have read the message.
+        """
+        return self.message_read_by.get(room_id, {}).get(message_id, set())
 
 
 # Global singleton instance used by all WebSocket handlers

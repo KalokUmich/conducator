@@ -66,22 +66,31 @@ install: setup
 # Run Servers
 # ===========================
 
+# WebSocket Configuration
+# - ws-ping-interval: Ping every 20 seconds to check connection health
+# - ws-ping-timeout: Wait 20 seconds for pong response before closing
+WS_PING_INTERVAL := 20.0
+WS_PING_TIMEOUT := 20.0
+WS_OPTIONS := --ws-ping-interval $(WS_PING_INTERVAL) --ws-ping-timeout $(WS_PING_TIMEOUT)
+
 ## Start backend server (development mode with auto-reload)
 run-backend: venv
 	@echo "🚀 Starting backend server..."
 	@echo "   Swagger UI: http://localhost:8000/docs"
 	@echo "   ReDoc: http://localhost:8000/redoc"
-	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	@echo "   WebSocket: ws://localhost:8000/ws/chat/{room_id}"
+	@echo "   WebSocket Ping: $(WS_PING_INTERVAL)s interval, $(WS_PING_TIMEOUT)s timeout"
+	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 $(WS_OPTIONS)
 
 ## Start backend server (production mode)
 run-backend-prod: venv
 	@echo "🚀 Starting backend server (production)..."
-	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 $(WS_OPTIONS)
 
 ## Start backend with custom port (usage: make run-backend-port PORT=8001)
 run-backend-port: venv
 	@echo "🚀 Starting backend server on port $(PORT)..."
-	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port $(PORT)
+	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port $(PORT) $(WS_OPTIONS)
 
 # ===========================
 # Testing

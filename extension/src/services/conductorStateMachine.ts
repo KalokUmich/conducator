@@ -51,7 +51,10 @@ const TRANSITION_TABLE: Record<string, ConductorState> = {
     [`${ConductorState.Idle}:${ConductorEvent.BACKEND_LOST}`]: ConductorState.BackendDisconnected,
 
     // From BackendDisconnected
+    // - Can transition to ReadyToHost if backend becomes available
+    // - Can JOIN_SESSION (join other people's sessions without local backend)
     [`${ConductorState.BackendDisconnected}:${ConductorEvent.BACKEND_CONNECTED}`]: ConductorState.ReadyToHost,
+    [`${ConductorState.BackendDisconnected}:${ConductorEvent.JOIN_SESSION}`]: ConductorState.Joining,
 
     // From ReadyToHost
     [`${ConductorState.ReadyToHost}:${ConductorEvent.START_HOSTING}`]: ConductorState.Hosting,

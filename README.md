@@ -16,12 +16,14 @@ Conductor is a VS Code extension that combines **Live Share**, **real-time chat*
 | Feature | Description |
 |---------|-------------|
 | 🔗 **Live Share Integration** | Share your coding session with teammates in real-time |
-| 💬 **Real-time Chat** | Built-in chat with message history and user presence |
+| 💬 **Real-time Chat** | WhatsApp-style chat with typing indicators and message grouping |
+| 📎 **File Sharing** | Share images, PDFs, audio files (up to 20MB) in chat |
 | 🤖 **AI Code Generation** | Generate code changes using AI (MockAgent for testing) |
 | 👥 **Role-Based Access** | Lead (full control) vs Member (chat only) permissions |
 | 🔄 **Auto Apply** | Automatically apply safe, small changes |
 | 📝 **Diff Preview** | Review AI-generated changes before applying |
 | 📊 **Audit Logging** | Track all applied changes with DuckDB |
+| 📱 **Mobile Support** | Web version works on mobile devices |
 
 ### 🏗️ Architecture
 
@@ -182,12 +184,14 @@ Conductor 是一个 VS Code 扩展，将 **Live Share**、**实时聊天** 和 *
 | 功能 | 描述 |
 |------|------|
 | 🔗 **Live Share 集成** | 与队友实时共享编码会话 |
-| 💬 **实时聊天** | 内置聊天，支持消息历史和用户在线状态 |
+| 💬 **实时聊天** | WhatsApp 风格聊天，支持输入指示器和消息分组 |
+| 📎 **文件共享** | 在聊天中分享图片、PDF、音频文件（最大 20MB） |
 | 🤖 **AI 代码生成** | 使用 AI 生成代码更改（测试用 MockAgent） |
 | 👥 **基于角色的访问控制** | Lead（完全控制）vs Member（仅聊天）权限 |
 | 🔄 **自动应用** | 自动应用安全的小型更改 |
 | 📝 **差异预览** | 在应用之前审查 AI 生成的更改 |
 | 📊 **审计日志** | 使用 DuckDB 跟踪所有应用的更改 |
+| 📱 **移动端支持** | Web 版本支持在手机上使用 |
 
 ### 🚀 快速开始
 

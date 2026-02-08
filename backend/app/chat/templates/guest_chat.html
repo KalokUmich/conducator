@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Guest Chat - Room {{ room_id }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>Conductor Chat</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -49,74 +51,207 @@
             return 'guest-' + hashHex.substring(0, 16);
         }
     </script>
+    <style>
+        /* Custom scrollbar for WebKit browsers */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+
+        /* Ensure proper flex layout */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        /* Scroll to bottom button */
+        #scroll-to-bottom {
+            transition: opacity 0.2s, transform 0.2s;
+        }
+        #scroll-to-bottom:hover {
+            transform: scale(1.1);
+        }
+
+        /* Unread badge animation */
+        .unread-badge {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        /* Mobile optimizations */
+        @media (max-width: 640px) {
+            header {
+                padding: 0.75rem 1rem !important;
+            }
+            header h1 {
+                font-size: 1rem !important;
+            }
+            #messages-container {
+                padding-left: 0.75rem !important;
+                padding-right: 0.75rem !important;
+            }
+            .input-area {
+                padding: 0.75rem 1rem !important;
+            }
+            #btn-send span {
+                display: none;
+            }
+            #btn-send {
+                padding: 0.75rem !important;
+            }
+        }
+
+        /* Hide sidebar on mobile */
+        @media (max-width: 768px) {
+            #users-sidebar {
+                display: none !important;
+            }
+        }
+    </style>
 </head>
 <body class="bg-gray-900 text-gray-100 h-screen overflow-hidden">
     <div class="flex h-full">
         <!-- Main Chat Area -->
-        <div class="flex flex-col flex-1">
-            <!-- Header -->
-            <header class="bg-gray-800 border-b border-gray-700 px-6 py-4 flex-shrink-0">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h1 class="text-xl font-semibold text-white">Conductor Chat</h1>
-                        <p class="text-sm text-gray-400 mt-1">
+        <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+            <!-- Header - compact on mobile -->
+            <header class="bg-gray-800 border-b border-gray-700 px-4 sm:px-6 py-3 sm:py-4 flex-shrink-0">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <h1 class="text-lg sm:text-xl font-semibold text-white truncate">Conductor</h1>
+                        <p class="text-xs sm:text-sm text-gray-400 mt-0.5 truncate">
                             Room: <span class="font-mono text-xs text-gray-500">{{ room_id[:8] }}...</span>
                         </p>
                     </div>
-                    <div class="flex items-center gap-3">
-                        <div id="connection-badge" class="px-3 py-1 rounded-full text-xs font-medium bg-yellow-600 text-white">
+                    <div class="flex items-center gap-2 flex-shrink-0">
+                        <div id="connection-badge" class="px-2 sm:px-3 py-1 rounded-full text-xs font-medium bg-yellow-600 text-white whitespace-nowrap">
                             Connecting...
                         </div>
-                        <div id="my-role-badge" class="px-3 py-1 rounded-full text-xs font-medium bg-purple-600 text-white">
+                        <div id="my-role-badge" class="px-2 sm:px-3 py-1 rounded-full text-xs font-medium bg-purple-600 text-white whitespace-nowrap">
                             {{ role | capitalize }}
                         </div>
                     </div>
                 </div>
             </header>
 
-            <!-- Messages Area -->
-            <div id="messages-container" class="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-                <div id="connection-status" class="flex justify-center">
-                    <div class="bg-gray-800/50 text-gray-400 text-xs px-3 py-1.5 rounded-full border border-gray-700">
-                        <span>Connecting to chat...</span>
+            <!-- Messages Area - WhatsApp-style scrollable container -->
+            <div class="relative flex-1 min-h-0">
+                <div id="messages-container" class="absolute inset-0 overflow-y-auto px-3 sm:px-6 py-3 sm:py-4 space-y-3" style="scrollbar-width: thin; scrollbar-color: #4b5563 transparent;">
+                    <div id="connection-status" class="flex justify-center">
+                        <div class="bg-gray-800/50 text-gray-400 text-xs px-3 py-1.5 rounded-full border border-gray-700">
+                            <span>Connecting to chat...</span>
+                        </div>
                     </div>
                 </div>
+
+                <!-- Scroll to bottom button -->
+                <button id="scroll-to-bottom" class="hidden absolute bottom-4 right-4 bg-gray-700 hover:bg-gray-600 text-white p-2 rounded-full shadow-lg z-10" title="Scroll to bottom">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                    </svg>
+                    <span id="unread-count" class="hidden absolute -top-1 -right-1 bg-blue-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center unread-badge">0</span>
+                </button>
             </div>
 
-            <!-- Input Area -->
-            <div class="flex-shrink-0 border-t border-gray-700 bg-gray-800 px-6 py-4">
-                <div class="flex items-end gap-3">
-                    <div class="flex-1">
+            <!-- Typing Indicator -->
+            <div id="typing-indicator" class="hidden flex-shrink-0 px-3 sm:px-6 py-2 text-xs text-gray-400 italic">
+                <span id="typing-text">Someone is typing...</span>
+            </div>
+
+            <!-- Input Area - responsive padding -->
+            <div class="input-area flex-shrink-0 border-t border-gray-700 bg-gray-800 px-3 sm:px-6 py-3 sm:py-4">
+                <!-- Hidden file input -->
+                <input type="file" id="file-input" class="hidden"
+                       accept="image/*,.pdf,audio/*,.mp3,.wav,.ogg,.m4a,.flac" />
+
+                <!-- File preview area -->
+                <div id="file-preview" class="hidden mb-3 p-3 bg-gray-900 rounded-lg border border-gray-700">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <span id="file-preview-icon" class="text-2xl">📎</span>
+                            <div>
+                                <div id="file-preview-name" class="text-sm text-gray-200 font-medium"></div>
+                                <div id="file-preview-size" class="text-xs text-gray-500"></div>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <!-- Upload button -->
+                            <button id="btn-upload-file" class="bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors">
+                                ⬆️ Upload
+                            </button>
+                            <!-- Cancel button -->
+                            <button id="btn-remove-file" class="text-gray-400 hover:text-red-400 p-1" title="Cancel">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <img id="file-preview-img" class="hidden mt-3 max-h-32 rounded-lg" />
+                    <!-- Optional caption input -->
+                    <div class="mt-2">
+                        <input type="text" id="file-caption" placeholder="Add a caption (optional)..."
+                               class="w-full bg-gray-800 text-gray-100 border border-gray-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500" />
+                    </div>
+                </div>
+
+                <div class="flex items-end gap-2 sm:gap-3">
+                    <!-- Attachment Button -->
+                    <button
+                        id="btn-attach"
+                        class="bg-gray-700 hover:bg-gray-600 text-gray-300 p-2.5 sm:p-3 rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500 flex-shrink-0"
+                        title="Attach file (images, PDF, audio, max 20MB)"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+
+                    <div class="flex-1 min-w-0">
                         <textarea
                             id="chat-input"
                             rows="1"
-                            placeholder="Type your message..."
-                            class="w-full bg-gray-900 text-gray-100 border border-gray-700 rounded-lg px-4 py-3 resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent placeholder-gray-500 text-sm"
+                            placeholder="Type a message..."
+                            class="w-full bg-gray-900 text-gray-100 border border-gray-700 rounded-lg px-3 sm:px-4 py-2.5 sm:py-3 resize-none focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent placeholder-gray-500 text-sm"
                         ></textarea>
                     </div>
                     <button
                         id="btn-send"
-                        class="bg-purple-600 hover:bg-purple-700 text-white font-medium px-6 py-3 rounded-lg transition-colors duration-200 flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        class="bg-purple-600 hover:bg-purple-700 text-white font-medium px-3 sm:px-6 py-2.5 sm:py-3 rounded-lg transition-colors duration-200 flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-purple-500 flex-shrink-0"
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                             <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
                         </svg>
-                        <span class="text-sm">Send</span>
+                        <span class="text-sm hidden sm:inline">Send</span>
                     </button>
                 </div>
-                <div class="mt-2 text-xs text-gray-500">
-                    Press Enter to send, Shift+Enter for new line
+                <div class="mt-2 text-xs text-gray-500 hidden sm:block">
+                    Press Enter to send, Shift+Enter for new line. Paste images directly or click 📎 to attach files.
                 </div>
             </div>
         </div>
 
-        <!-- Users Sidebar -->
-        <aside class="w-64 bg-gray-800 border-l border-gray-700 flex-shrink-0 hidden md:flex flex-col">
-            <div class="px-4 py-4 border-b border-gray-700">
+        <!-- Users Sidebar - hidden on mobile -->
+        <aside id="users-sidebar" class="w-56 bg-gray-800 border-l border-gray-700 flex-shrink-0 hidden md:flex flex-col">
+            <div class="px-4 py-3 border-b border-gray-700">
                 <h2 class="text-sm font-semibold text-gray-300">Participants</h2>
                 <p id="user-count" class="text-xs text-gray-500 mt-1">0 online</p>
             </div>
-            <div id="users-list" class="flex-1 overflow-y-auto p-4 space-y-2">
+            <div id="users-list" class="flex-1 overflow-y-auto p-3 space-y-2">
                 <!-- Users will be rendered here -->
             </div>
         </aside>
@@ -140,9 +275,14 @@
 
         let ws = null;
         let reconnectAttempts = 0;
-        const MAX_RECONNECT_ATTEMPTS = 5;
-        const RECONNECT_DELAY_MS = 2000;
+        const MAX_RECONNECT_ATTEMPTS = 10;
+        const BASE_RECONNECT_DELAY_MS = 1000;
+        const MAX_RECONNECT_DELAY_MS = 30000;
         let sessionEnded = false;
+
+        // Message recovery & deduplication
+        let lastMessageTimestamp = 0;
+        const seenMessageIds = new Set();
 
         const messagesContainer = document.getElementById('messages-container');
         const connectionStatus = document.getElementById('connection-status');
@@ -152,6 +292,51 @@
         const usersList = document.getElementById('users-list');
         const userCount = document.getElementById('user-count');
         const myRoleBadge = document.getElementById('my-role-badge');
+
+        // File upload elements
+        const fileInput = document.getElementById('file-input');
+        const filePreview = document.getElementById('file-preview');
+        const filePreviewIcon = document.getElementById('file-preview-icon');
+        const filePreviewName = document.getElementById('file-preview-name');
+        const filePreviewSize = document.getElementById('file-preview-size');
+        const filePreviewImg = document.getElementById('file-preview-img');
+        const fileCaption = document.getElementById('file-caption');
+        const btnAttach = document.getElementById('btn-attach');
+        const btnRemoveFile = document.getElementById('btn-remove-file');
+        const btnUploadFile = document.getElementById('btn-upload-file');
+
+        // File upload state
+        let pendingFile = null;
+        let isUploading = false;  // Prevent double uploads
+        const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+
+        // Typing indicator state
+        const typingIndicator = document.getElementById('typing-indicator');
+        const typingText = document.getElementById('typing-text');
+        const typingUsers = new Map();  // userId -> displayName
+        let typingTimeout = null;
+        const TYPING_DEBOUNCE_MS = 500;
+        const TYPING_EXPIRE_MS = 3000;
+        let isTyping = false;
+        let lastTypingTime = 0;
+
+        // Message grouping state
+        let lastMessageUserId = null;
+        let lastMessageTime = 0;
+        let lastMessageDate = null;
+        const MESSAGE_GROUP_INTERVAL_MS = 5 * 60 * 1000;  // 5 minutes
+
+        // Scroll to bottom button state
+        const scrollToBottomBtn = document.getElementById('scroll-to-bottom');
+        const unreadCountBadge = document.getElementById('unread-count');
+        let unreadCount = 0;
+        let isUserScrolledUp = false;
+        const SCROLL_THRESHOLD = 100;  // pixels from bottom to consider "at bottom"
+
+        // Pagination state
+        let isLoadingHistory = false;
+        let hasMoreHistory = true;
+        const PAGINATION_THRESHOLD = 100;  // pixels from top to trigger load
 
         // Avatar color mapping
         const avatarColors = {
@@ -166,6 +351,111 @@
             amber: 'bg-amber-500'
         };
 
+        // Intersection Observer for read receipts
+        let messageReadObserver = null;
+        const readMessageIds = new Set();  // Track which messages we've already sent read receipts for
+
+        /**
+         * Initialize Intersection Observer for read receipts.
+         */
+        function initReadReceiptObserver() {
+            if (messageReadObserver) return;
+
+            messageReadObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const messageId = entry.target.getAttribute('data-message-id');
+                        if (messageId && !readMessageIds.has(messageId)) {
+                            readMessageIds.add(messageId);
+                            sendReadReceipt(messageId);
+                            messageReadObserver.unobserve(entry.target);
+                        }
+                    }
+                });
+            }, {
+                root: messagesContainer,
+                threshold: 0.5
+            });
+        }
+
+        // Initialize observer
+        initReadReceiptObserver();
+
+        /**
+         * Calculate reconnection delay with exponential backoff.
+         * @returns {number} Delay in milliseconds.
+         */
+        function getReconnectDelay() {
+            const delay = Math.min(
+                BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttempts),
+                MAX_RECONNECT_DELAY_MS
+            );
+            const jitter = delay * 0.2 * (Math.random() - 0.5);
+            return Math.round(delay + jitter);
+        }
+
+        /**
+         * Check if a message has already been rendered (for deduplication).
+         * @param {string} messageId - The message ID to check.
+         * @returns {boolean} True if duplicate, false if new.
+         */
+        function isDuplicateMessage(messageId) {
+            if (!messageId) return false;
+            if (seenMessageIds.has(messageId)) return true;
+            seenMessageIds.add(messageId);
+            if (seenMessageIds.size > 10000) {
+                const first = seenMessageIds.values().next().value;
+                seenMessageIds.delete(first);
+            }
+            return false;
+        }
+
+        /**
+         * Track the timestamp of the latest message for reconnection recovery.
+         * @param {number} ts - Unix timestamp in seconds.
+         */
+        function updateLastMessageTimestamp(ts) {
+            if (ts > lastMessageTimestamp) {
+                lastMessageTimestamp = ts;
+            }
+        }
+
+        /**
+         * Send a read receipt for a message.
+         * @param {string} messageId - The message ID that was read.
+         */
+        function sendReadReceipt(messageId) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (!messageId) return;
+
+            ws.send(JSON.stringify({
+                type: 'read',
+                messageId: messageId,
+                userId: session.userId
+            }));
+        }
+
+        /**
+         * Handle read receipt from server.
+         * @param {Object} data - Read receipt data with messageId and readBy.
+         */
+        function handleReadReceipt(data) {
+            const { messageId, readBy } = data;
+            if (!messageId || !readBy) return;
+
+            const messageEl = document.querySelector(`[data-message-id="${messageId}"]`);
+            if (messageEl) {
+                const statusEl = messageEl.querySelector('.message-status');
+                if (statusEl) {
+                    const otherReaders = readBy.filter(id => id !== session.userId);
+                    if (otherReaders.length > 0) {
+                        statusEl.textContent = '✓✓';
+                        statusEl.title = `Read by ${otherReaders.length} ${otherReaders.length === 1 ? 'person' : 'people'}`;
+                    }
+                }
+            }
+        }
+
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
@@ -178,6 +468,225 @@
 
         function getInitials(name) {
             return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        function getFileIcon(fileType) {
+            switch (fileType) {
+                case 'image': return '🖼️';
+                case 'pdf': return '📄';
+                case 'audio': return '🎵';
+                default: return '📎';
+            }
+        }
+
+        /**
+         * Format a date for display as a date separator.
+         */
+        function formatDateSeparator(date) {
+            const today = new Date();
+            const yesterday = new Date(today);
+            yesterday.setDate(yesterday.getDate() - 1);
+
+            if (date.toDateString() === today.toDateString()) {
+                return 'Today';
+            } else if (date.toDateString() === yesterday.toDateString()) {
+                return 'Yesterday';
+            } else {
+                return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+            }
+        }
+
+        /**
+         * Render a date separator in the messages container.
+         */
+        function renderDateSeparator(date) {
+            const div = document.createElement('div');
+            div.className = 'flex justify-center my-4';
+            div.innerHTML = `
+                <span class="text-xs text-gray-500 bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
+                    ${formatDateSeparator(date)}
+                </span>
+            `;
+            messagesContainer.appendChild(div);
+        }
+
+        /**
+         * Update the typing indicator display.
+         */
+        function updateTypingIndicator() {
+            if (typingUsers.size === 0) {
+                typingIndicator.classList.add('hidden');
+                return;
+            }
+
+            const names = Array.from(typingUsers.values());
+            let text;
+            if (names.length === 1) {
+                text = `${names[0]} is typing...`;
+            } else if (names.length === 2) {
+                text = `${names[0]} and ${names[1]} are typing...`;
+            } else {
+                text = `${names[0]} and ${names.length - 1} others are typing...`;
+            }
+
+            typingText.textContent = text;
+            typingIndicator.classList.remove('hidden');
+        }
+
+        /**
+         * Handle incoming typing indicator from another user.
+         */
+        function handleTypingEvent(data) {
+            if (data.isTyping) {
+                typingUsers.set(data.userId, data.displayName);
+                setTimeout(() => {
+                    typingUsers.delete(data.userId);
+                    updateTypingIndicator();
+                }, TYPING_EXPIRE_MS);
+            } else {
+                typingUsers.delete(data.userId);
+            }
+            updateTypingIndicator();
+        }
+
+        /**
+         * Send typing indicator to other users.
+         */
+        function sendTypingIndicator(typing) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+            ws.send(JSON.stringify({
+                type: 'typing',
+                userId: config.userId,
+                displayName: config.displayName,
+                isTyping: typing
+            }));
+        }
+
+        /**
+         * Check if user is scrolled near the bottom of messages.
+         * @returns {boolean} True if within SCROLL_THRESHOLD of bottom.
+         */
+        function isNearBottom() {
+            const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+            return scrollHeight - scrollTop - clientHeight < SCROLL_THRESHOLD;
+        }
+
+        /**
+         * Update scroll-to-bottom button visibility and unread count.
+         */
+        function updateScrollButton() {
+            if (isUserScrolledUp) {
+                scrollToBottomBtn.classList.remove('hidden');
+                if (unreadCount > 0) {
+                    unreadCountBadge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+                    unreadCountBadge.classList.remove('hidden');
+                } else {
+                    unreadCountBadge.classList.add('hidden');
+                }
+            } else {
+                scrollToBottomBtn.classList.add('hidden');
+                unreadCount = 0;
+            }
+        }
+
+        /**
+         * Scroll to the bottom of messages container.
+         * @param {boolean} force - Force scroll even if user scrolled up.
+         */
+        function scrollToBottom(force = true) {
+            if (force || !isUserScrolledUp) {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                isUserScrolledUp = false;
+                unreadCount = 0;
+                updateScrollButton();
+            }
+        }
+
+        /**
+         * Smart scroll: scroll to bottom if user is near bottom, otherwise increment unread.
+         * @param {boolean} isOwnMessage - True if this is the current user's message.
+         */
+        function smartScroll(isOwnMessage = false) {
+            if (isOwnMessage || !isUserScrolledUp) {
+                scrollToBottom(true);
+            } else {
+                unreadCount++;
+                updateScrollButton();
+            }
+        }
+
+        /**
+         * Handle scroll event on messages container.
+         * Triggers pagination when scrolled near top.
+         */
+        function handleScroll() {
+            isUserScrolledUp = !isNearBottom();
+            if (!isUserScrolledUp) {
+                unreadCount = 0;
+            }
+            updateScrollButton();
+
+            // Trigger pagination when scrolled near top
+            if (messagesContainer.scrollTop < PAGINATION_THRESHOLD && hasMoreHistory && !isLoadingHistory) {
+                loadMoreHistory();
+            }
+        }
+
+        /**
+         * Handle input event for typing indicator and auto-resize.
+         */
+        function handleInputEvent() {
+            const now = Date.now();
+
+            // Auto-resize textarea
+            chatInput.style.height = 'auto';
+            chatInput.style.height = Math.min(chatInput.scrollHeight, 150) + 'px';
+
+            // Send typing indicator (debounced)
+            if (!isTyping) {
+                isTyping = true;
+                sendTypingIndicator(true);
+            }
+            lastTypingTime = now;
+
+            if (typingTimeout) clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {
+                if (Date.now() - lastTypingTime >= TYPING_DEBOUNCE_MS && isTyping) {
+                    isTyping = false;
+                    sendTypingIndicator(false);
+                }
+            }, TYPING_DEBOUNCE_MS);
+        }
+
+        /**
+         * Check if a message should be grouped with the previous message.
+         */
+        function shouldGroupMessage(msg) {
+            const msgTime = msg.ts * 1000;
+            const sameUser = msg.userId === lastMessageUserId;
+            const withinInterval = (msgTime - lastMessageTime) < MESSAGE_GROUP_INTERVAL_MS;
+            return sameUser && withinInterval;
+        }
+
+        /**
+         * Check if a date separator is needed before this message.
+         */
+        function needsDateSeparator(msg) {
+            const msgDate = new Date(msg.ts * 1000);
+            const msgDateStr = msgDate.toDateString();
+
+            if (lastMessageDate !== msgDateStr) {
+                lastMessageDate = msgDateStr;
+                return true;
+            }
+            return false;
         }
 
         function renderUsersList(users) {
@@ -208,9 +717,23 @@
         }
 
         function renderMessage(msg) {
+            // Check if we need a date separator
+            if (needsDateSeparator(msg)) {
+                renderDateSeparator(new Date(msg.ts * 1000));
+            }
+
             const isOwnMessage = msg.userId === config.userId;
+            const isGrouped = shouldGroupMessage(msg);
+
+            // Update grouping state for next message
+            lastMessageUserId = msg.userId;
+            lastMessageTime = msg.ts * 1000;
+
             const div = document.createElement('div');
-            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2`;
+            div.setAttribute('data-message-id', msg.id || '');
+            div.setAttribute('data-timestamp', msg.ts || '');
+            // Reduce spacing for grouped messages
+            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2 ${isGrouped ? 'mt-1' : ''}`;
 
             const bubbleColor = isOwnMessage
                 ? 'bg-purple-600 text-white rounded-2xl rounded-tr-sm'
@@ -224,25 +747,39 @@
             const userInfo = usersMap.get(msg.userId);
             const colorClass = userInfo ? (avatarColors[userInfo.avatarColor] || 'bg-purple-600') : 'bg-gray-600';
 
-            const avatarHtml = !isOwnMessage ? `
+            // Hide avatar and name for grouped messages
+            const avatarHtml = (!isOwnMessage && !isGrouped) ? `
                 <div class="w-8 h-8 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
                     ${getInitials(displayName)}
                 </div>
-            ` : '';
+            ` : (!isOwnMessage && isGrouped) ? '<div class="w-8 flex-shrink-0"></div>' : '';
+
+            // Status indicator for own messages (✓ = sent, ✓✓ = read)
+            const statusHtml = isOwnMessage ? '<span class="message-status text-purple-300 ml-1">✓</span>' : '';
+
+            // Show name only for first message in group
+            const showName = !isOwnMessage && !isGrouped;
 
             div.innerHTML = `
                 ${avatarHtml}
                 <div class="max-w-[75%] min-w-0">
-                    ${!isOwnMessage ? `<div class="text-xs text-gray-400 mb-1 ml-1">${roleLabel}${escapeHtml(displayName)}</div>` : ''}
-                    <div class="${bubbleColor} px-4 py-3 shadow-lg overflow-hidden">
+                    ${showName ? `<div class="text-xs text-gray-400 mb-1 ml-1">${roleLabel}${escapeHtml(displayName)}</div>` : ''}
+                    <div class="${bubbleColor} px-4 py-2 shadow-lg overflow-hidden">
                         <p class="text-sm leading-relaxed break-words whitespace-pre-wrap">${escapeHtml(msg.content)}</p>
                     </div>
-                    <div class="text-xs text-gray-500 mt-1 ${timeAlign} ${isOwnMessage ? 'mr-1' : 'ml-1'}">${formatTime(msg.ts)}</div>
+                    <div class="text-xs text-gray-500 mt-0.5 ${timeAlign} ${isOwnMessage ? 'mr-1' : 'ml-1'} flex items-center ${isOwnMessage ? 'justify-end' : ''}">
+                        <span>${formatTime(msg.ts)}</span>${statusHtml}
+                    </div>
                 </div>
             `;
 
             messagesContainer.appendChild(div);
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            smartScroll(isOwnMessage);
+
+            // Observe for read receipts (only for messages from others)
+            if (!isOwnMessage && msg.id && messageReadObserver) {
+                messageReadObserver.observe(div);
+            }
         }
 
         function renderSystemMessage(text) {
@@ -254,7 +791,243 @@
                 </div>
             `;
             messagesContainer.appendChild(div);
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            scrollToBottom(false);  // System messages don't force scroll
+        }
+
+        /**
+         * Load more message history (pagination).
+         * Fetches older messages from the server and prepends them.
+         */
+        async function loadMoreHistory() {
+            if (isLoadingHistory || !hasMoreHistory) {
+                return;
+            }
+
+            isLoadingHistory = true;
+
+            // Find the oldest message timestamp
+            const oldestTs = getOldestMessageTimestamp();
+            if (!oldestTs) {
+                isLoadingHistory = false;
+                hasMoreHistory = false;
+                return;
+            }
+
+            try {
+                const url = `/chat/${session.roomId}/history?before=${oldestTs}&limit=50`;
+                console.log('[Guest] Loading more history from:', url);
+
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                console.log('[Guest] Loaded history:', data.messages?.length, 'messages, hasMore:', data.hasMore);
+
+                if (data.messages && data.messages.length > 0) {
+                    // Save scroll position
+                    const scrollHeight = messagesContainer.scrollHeight;
+
+                    // Prepend messages (oldest first, so sort by timestamp)
+                    const sortedMessages = data.messages.sort((a, b) => a.ts - b.ts);
+                    sortedMessages.forEach(msg => {
+                        if (!isDuplicateMessage(msg.id)) {
+                            prependMessage(msg);
+                        }
+                    });
+
+                    // Restore scroll position
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight - scrollHeight;
+                }
+
+                hasMoreHistory = data.hasMore === true;
+            } catch (err) {
+                console.error('[Guest] Failed to load history:', err);
+            } finally {
+                isLoadingHistory = false;
+            }
+        }
+
+        /**
+         * Get the timestamp of the oldest visible message.
+         * @returns {number|null} Unix timestamp or null if no messages.
+         */
+        function getOldestMessageTimestamp() {
+            const messages = messagesContainer.querySelectorAll('[data-timestamp]');
+            if (messages.length === 0) return null;
+            return parseFloat(messages[0].getAttribute('data-timestamp'));
+        }
+
+        /**
+         * Prepend a message to the top of the messages container.
+         * @param {Object} msg - Message object.
+         */
+        function prependMessage(msg) {
+            const isOwnMessage = msg.userId === config.userId;
+
+            const div = document.createElement('div');
+            div.setAttribute('data-message-id', msg.id || '');
+            div.setAttribute('data-timestamp', msg.ts || '');
+            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2`;
+
+            const bubbleColor = isOwnMessage
+                ? 'bg-purple-600 text-white rounded-2xl rounded-tr-sm'
+                : 'bg-gray-800 text-gray-100 rounded-2xl rounded-tl-sm border border-gray-700';
+
+            const roleLabel = msg.role === 'host' ? '👑 ' : '';
+            const displayName = msg.displayName || usersMap.get(msg.userId)?.displayName || 'Unknown';
+            const userInfo = usersMap.get(msg.userId);
+            const colorClass = userInfo ? (avatarColors[userInfo.avatarColor] || 'bg-purple-600') : 'bg-gray-600';
+
+            const avatarHtml = !isOwnMessage ? `
+                <div class="w-8 h-8 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
+                    ${getInitials(displayName)}
+                </div>
+            ` : '';
+
+            const statusHtml = isOwnMessage ? '<span class="message-status text-purple-300 ml-1">✓</span>' : '';
+            const timeAlign = isOwnMessage ? 'text-right' : '';
+
+            div.innerHTML = `
+                ${avatarHtml}
+                <div class="max-w-[75%] min-w-0">
+                    ${!isOwnMessage ? `<div class="text-xs text-gray-400 mb-1 ml-1">${roleLabel}${escapeHtml(displayName)}</div>` : ''}
+                    <div class="${bubbleColor} px-4 py-2 shadow-lg overflow-hidden">
+                        <p class="text-sm leading-relaxed break-words whitespace-pre-wrap">${escapeHtml(msg.content)}</p>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-0.5 ${timeAlign} ${isOwnMessage ? 'mr-1' : 'ml-1'} flex items-center ${isOwnMessage ? 'justify-end' : ''}">
+                        <span>${formatTime(msg.ts)}</span>${statusHtml}
+                    </div>
+                </div>
+            `;
+
+            // Insert at the beginning
+            messagesContainer.insertBefore(div, messagesContainer.firstChild);
+
+            // Observe for read receipts
+            if (!isOwnMessage && msg.id && messageReadObserver) {
+                messageReadObserver.observe(div);
+            }
+        }
+
+        function renderFileMessage(msg) {
+            const isOwnMessage = msg.userId === config.userId;
+            const div = document.createElement('div');
+            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2`;
+
+            const timeAlign = isOwnMessage ? 'text-right' : '';
+            const roleLabel = msg.role === 'host' ? '👑 ' : '';
+            const displayName = msg.displayName || usersMap.get(msg.userId)?.displayName || 'Unknown';
+
+            const userInfo = usersMap.get(msg.userId);
+            const colorClass = userInfo ? (avatarColors[userInfo.avatarColor] || 'bg-purple-600') : 'bg-gray-600';
+
+            const avatarHtml = !isOwnMessage ? `
+                <div class="w-8 h-8 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
+                    ${getInitials(displayName)}
+                </div>
+            ` : '';
+
+            let fileContentHtml = '';
+            const filename = escapeHtml(msg.originalFilename || 'file');
+            const fileSize = formatFileSize(msg.sizeBytes || 0);
+            const downloadUrl = msg.downloadUrl || '';
+
+            if (msg.fileType === 'image') {
+                fileContentHtml = `
+                    <div class="file-attachment">
+                        <img src="${downloadUrl}" alt="${filename}"
+                             class="max-w-full max-h-64 rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
+                             onclick="window.open('${downloadUrl}', '_blank')" />
+                        <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
+                            <span>${filename} (${fileSize})</span>
+                            <span class="text-blue-400 cursor-pointer hover:underline file-download-btn"
+                                  data-url="${escapeHtml(downloadUrl)}"
+                                  data-filename="${escapeHtml(msg.originalFilename || 'file')}">📥 Download</span>
+                        </div>
+                    </div>
+                `;
+            } else {
+                const icon = getFileIcon(msg.fileType);
+                fileContentHtml = `
+                    <div class="file-attachment flex items-center gap-3 p-3 bg-gray-700/50 rounded-lg hover:bg-gray-700 transition-colors cursor-pointer file-download-btn"
+                         data-url="${escapeHtml(downloadUrl)}"
+                         data-filename="${escapeHtml(msg.originalFilename || 'file')}">
+                        <span class="text-2xl">${icon}</span>
+                        <div class="flex-1 min-w-0">
+                            <div class="text-sm text-gray-200 truncate">${filename}</div>
+                            <div class="text-xs text-gray-500">${fileSize}</div>
+                        </div>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                `;
+            }
+
+            const captionHtml = msg.caption ? `<p class="text-sm text-gray-300 mt-2">${escapeHtml(msg.caption)}</p>` : '';
+
+            div.innerHTML = `
+                ${avatarHtml}
+                <div class="max-w-[75%] min-w-0">
+                    ${!isOwnMessage ? `<div class="text-xs text-gray-400 mb-1 ml-1">${roleLabel}${escapeHtml(displayName)}</div>` : ''}
+                    <div class="bg-gray-800 border border-gray-700 rounded-2xl ${isOwnMessage ? 'rounded-tr-sm' : 'rounded-tl-sm'} px-4 py-3 shadow-lg">
+                        ${fileContentHtml}
+                        ${captionHtml}
+                    </div>
+                    <div class="text-xs text-gray-500 mt-1 ${timeAlign} ${isOwnMessage ? 'mr-1' : 'ml-1'}">${formatTime(msg.ts)}</div>
+                </div>
+            `;
+
+            messagesContainer.appendChild(div);
+            smartScroll(isOwnMessage);
+
+            // Attach click handlers to download buttons
+            div.querySelectorAll('.file-download-btn').forEach(el => {
+                el.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const url = el.getAttribute('data-url');
+                    const filename = el.getAttribute('data-filename');
+                    downloadFile(url, filename);
+                });
+            });
+        }
+
+        /**
+         * Download a file by fetching it and triggering a browser download
+         */
+        async function downloadFile(url, filename) {
+            try {
+                console.log('[Guest] Downloading file:', filename);
+
+                // Fetch the file
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`Download failed: HTTP ${response.status}`);
+                }
+
+                // Create blob and download link
+                const blob = await response.blob();
+                const blobUrl = URL.createObjectURL(blob);
+
+                // Create temporary link and trigger download
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+
+                // Clean up blob URL
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
+
+                console.log('[Guest] Download started:', filename);
+            } catch (error) {
+                console.error('[Guest] Download failed:', error);
+                alert(`Download failed: ${error.message}`);
+            }
         }
 
         function updateConnectionStatus(status, isError = false) {
@@ -279,10 +1052,16 @@
         }
 
         function connectWebSocket() {
-            console.log('[Guest] Connecting to:', config.wsUrl);
-            updateConnectionStatus('Connecting...');
+            // Build WebSocket URL with optional `since` parameter for reconnection
+            let wsUrl = config.wsUrl;
+            if (lastMessageTimestamp > 0 && reconnectAttempts > 0) {
+                wsUrl += `?since=${lastMessageTimestamp}`;
+                console.log('[Guest] Reconnecting with message recovery since:', lastMessageTimestamp);
+            }
+            console.log('[Guest] Connecting to:', wsUrl);
+            updateConnectionStatus(reconnectAttempts > 0 ? 'Reconnecting...' : 'Connecting...');
 
-            ws = new WebSocket(config.wsUrl);
+            ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
                 console.log('[Guest] WebSocket connected');
@@ -300,23 +1079,40 @@
                     console.log('[Guest] Received:', data);
 
                     if (data.type === 'history') {
-                        if (connectionStatus) connectionStatus.remove();
-                        // Render existing users
+                        if (connectionStatus) connectionStatus.style.display = 'none';
+
+                        // Render existing users (always update on history)
                         if (data.users) {
                             renderUsersList(data.users);
                         }
-                        // Render message history
-                        data.messages.forEach(msg => renderMessage(msg));
 
-                        // Send join message to register ourselves
-                        ws.send(JSON.stringify({
-                            type: 'join',
-                            userId: config.userId,
-                            displayName: config.displayName,
-                            role: config.role
-                        }));
+                        // Render message history (with deduplication)
+                        data.messages.forEach(msg => {
+                            if (!isDuplicateMessage(msg.id)) {
+                                renderMessage(msg);
+                                updateLastMessageTimestamp(msg.ts);
+                            }
+                        });
+
+                        // Only send join if this is not a recovery (reconnect)
+                        if (!data.isRecovery) {
+                            ws.send(JSON.stringify({
+                                type: 'join',
+                                userId: config.userId,
+                                displayName: config.displayName,
+                                role: config.role
+                            }));
+                        }
                     } else if (data.type === 'message') {
-                        renderMessage(data);
+                        if (!isDuplicateMessage(data.id)) {
+                            renderMessage(data);
+                            updateLastMessageTimestamp(data.ts);
+                        }
+                    } else if (data.type === 'file') {
+                        if (!isDuplicateMessage(data.id)) {
+                            renderFileMessage(data);
+                            updateLastMessageTimestamp(data.ts);
+                        }
                     } else if (data.type === 'user_joined') {
                         renderUsersList(data.users);
                         renderSystemMessage(`${data.user.displayName} joined the chat`);
@@ -342,6 +1138,10 @@
                         // Clear users list
                         usersList.innerHTML = '';
                         userCount.textContent = '0 online';
+                    } else if (data.type === 'typing') {
+                        handleTypingEvent(data);
+                    } else if (data.type === 'read_receipt') {
+                        handleReadReceipt(data);
                     }
                 } catch (err) {
                     console.error('[Guest] Failed to parse message:', err);
@@ -358,8 +1158,10 @@
                 }
                 if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                     reconnectAttempts++;
+                    const delay = getReconnectDelay();
+                    console.log(`[Guest] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
                     updateConnectionStatus(`Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-                    setTimeout(connectWebSocket, RECONNECT_DELAY_MS);
+                    setTimeout(connectWebSocket, delay);
                 } else {
                     updateConnectionStatus('❌ Connection lost', true);
                 }
@@ -377,6 +1179,16 @@
                 return;
             }
 
+            // Stop typing indicator when sending message
+            if (isTyping) {
+                isTyping = false;
+                sendTypingIndicator(false);
+            }
+            if (typingTimeout) {
+                clearTimeout(typingTimeout);
+                typingTimeout = null;
+            }
+
             const message = {
                 userId: config.userId,
                 displayName: config.displayName,
@@ -387,15 +1199,198 @@
             console.log('[Guest] Sending:', message);
             ws.send(JSON.stringify(message));
             chatInput.value = '';
+            chatInput.style.height = 'auto';  // Reset textarea height
+        }
+
+        function showFilePreview(file) {
+            pendingFile = file;
+            filePreviewName.textContent = file.name;
+            filePreviewSize.textContent = formatFileSize(file.size);
+
+            if (file.type.startsWith('image/')) {
+                filePreviewIcon.textContent = '🖼️';
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    filePreviewImg.src = e.target.result;
+                    filePreviewImg.classList.remove('hidden');
+                };
+                reader.readAsDataURL(file);
+            } else if (file.type === 'application/pdf') {
+                filePreviewIcon.textContent = '📄';
+                filePreviewImg.classList.add('hidden');
+            } else if (file.type.startsWith('audio/')) {
+                filePreviewIcon.textContent = '🎵';
+                filePreviewImg.classList.add('hidden');
+            } else {
+                filePreviewIcon.textContent = '📎';
+                filePreviewImg.classList.add('hidden');
+            }
+
+            filePreview.classList.remove('hidden');
+        }
+
+        function clearFilePreview() {
+            pendingFile = null;
+            isUploading = false;
+            filePreview.classList.add('hidden');
+            filePreviewImg.classList.add('hidden');
+            filePreviewImg.src = '';
+            fileInput.value = '';
+            fileCaption.value = '';
+            btnUploadFile.disabled = false;
+            btnUploadFile.textContent = '⬆️ Upload';
+        }
+
+        async function uploadFile(file, caption = null) {
+            // Prevent double uploads
+            if (isUploading) {
+                console.log('[Guest] Upload already in progress, ignoring');
+                return;
+            }
+
+            if (!config.roomId) {
+                console.error('[Guest] Cannot upload: missing roomId');
+                return;
+            }
+
+            if (file.size > MAX_FILE_SIZE) {
+                alert(`File size exceeds 20MB limit. Your file is ${formatFileSize(file.size)}`);
+                return;
+            }
+
+            // Mark as uploading
+            isUploading = true;
+            btnUploadFile.disabled = true;
+            btnUploadFile.textContent = '⏳ Uploading...';
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('user_id', config.userId);
+            formData.append('display_name', config.displayName || 'Guest');
+            if (caption) {
+                formData.append('caption', caption);
+            }
+
+            try {
+                console.log('[Guest] Uploading file:', file.name, file.size, 'bytes');
+
+                // Use relative URL for same-origin request
+                const response = await fetch(`/files/upload/${config.roomId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json().catch(() => ({ detail: 'Upload failed' }));
+                    throw new Error(error.detail || `HTTP ${response.status}`);
+                }
+
+                const result = await response.json();
+                console.log('[Guest] Upload result:', result);
+
+                // Send file message via WebSocket
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    const fileMessage = {
+                        type: 'file',
+                        id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+                        userId: config.userId,
+                        displayName: config.displayName || 'Guest',
+                        role: config.role,
+                        fileId: result.id,
+                        originalFilename: result.original_filename,
+                        fileType: result.file_type,
+                        mimeType: result.mime_type,
+                        sizeBytes: result.size_bytes,
+                        downloadUrl: result.download_url,
+                        caption: caption,
+                        ts: Date.now() / 1000
+                    };
+
+                    console.log('[Guest] Sending file message:', fileMessage);
+                    ws.send(JSON.stringify(fileMessage));
+                } else {
+                    console.warn('[Guest] WebSocket not open, cannot send file message. State:', ws?.readyState);
+                }
+
+                clearFilePreview();
+                console.log('[Guest] File upload complete, preview cleared');
+            } catch (error) {
+                console.error('[Guest] File upload failed:', error);
+                alert(`File upload failed: ${error.message}`);
+                // Reset upload state but keep preview so user can retry
+                isUploading = false;
+                btnUploadFile.disabled = false;
+                btnUploadFile.textContent = '⬆️ Upload';
+            }
         }
 
         // Event listeners
-        btnSend.addEventListener('click', sendMessage);
+        // Send button click handler (text messages only)
+        btnSend.addEventListener('click', () => {
+            sendMessage();
+        });
 
+        // Enter key handler (Shift+Enter for new line)
         chatInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
+            }
+        });
+
+        // Input event handler for typing indicator and auto-resize
+        chatInput.addEventListener('input', handleInputEvent);
+
+        // Scroll event handler for scroll-to-bottom button
+        messagesContainer.addEventListener('scroll', handleScroll);
+
+        // Scroll to bottom button click handler
+        scrollToBottomBtn.addEventListener('click', () => scrollToBottom(true));
+
+        // Attachment button click handler
+        btnAttach.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        // Upload button click handler (explicit upload action)
+        btnUploadFile.addEventListener('click', async () => {
+            if (pendingFile && !isUploading) {
+                const caption = fileCaption.value.trim() || null;
+                await uploadFile(pendingFile, caption);
+            }
+        });
+
+        // File input change handler
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            if (file.size > MAX_FILE_SIZE) {
+                alert(`File size exceeds 20MB limit. Your file is ${formatFileSize(file.size)}`);
+                fileInput.value = '';
+                return;
+            }
+
+            showFilePreview(file);
+        });
+
+        // Remove file button handler
+        btnRemoveFile.addEventListener('click', clearFilePreview);
+
+        // Handle paste event for images
+        chatInput.addEventListener('paste', async (e) => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    if (file) {
+                        showFilePreview(file);
+                    }
+                    break;
+                }
             }
         });
 
