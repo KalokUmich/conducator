@@ -66,6 +66,11 @@ describe('ConductorStateMachine', () => {
             assert.equal(fsm.transition(E.BACKEND_CONNECTED), S.ReadyToHost);
         });
 
+        it('BackendDisconnected → Joining on JOIN_SESSION (join-only mode)', () => {
+            fsm.transition(E.BACKEND_LOST);
+            assert.equal(fsm.transition(E.JOIN_SESSION), S.Joining);
+        });
+
         it('ReadyToHost → Hosting on START_HOSTING', () => {
             fsm.transition(E.BACKEND_CONNECTED);
             assert.equal(fsm.transition(E.START_HOSTING), S.Hosting);

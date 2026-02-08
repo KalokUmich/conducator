@@ -304,6 +304,12 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 case 'leaveSession':
                     this._handleLeaveSession();
                     return;
+                case 'uploadFile':
+                    this._handleUploadFile(message);
+                    return;
+                case 'downloadFile':
+                    this._handleDownloadFile(message);
+                    return;
             }
         });
 
@@ -528,19 +534,16 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         try {
             const currentState = this._controller.getState();
 
-            // If in Idle or BackendDisconnected, run health check first
-            if (
-                currentState === ConductorState.Idle ||
-                currentState === ConductorState.BackendDisconnected
-            ) {
-                const afterHealth = await this._controller.start();
-                if (afterHealth !== ConductorState.ReadyToHost) {
-                    // Health check failed — state already moved to BackendDisconnected
-                    return;
-                }
+            // If in Idle, run health check first to determine state
+            // If in BackendDisconnected, we can still join (no local backend needed)
+            if (currentState === ConductorState.Idle) {
+                await this._controller.start();
+                // Regardless of health check result (ReadyToHost or BackendDisconnected),
+                // we can proceed with joining since JOIN_SESSION is valid in both states
             }
 
             // Parse and transition to Joining
+            // This works from both ReadyToHost and BackendDisconnected states
             const parsed = this._controller.startJoining(inviteUrl);
             console.log(
                 `[Conductor] Joining session: roomId=${parsed.roomId}, ` +
@@ -596,6 +599,168 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             const msg = error instanceof Error ? error.message : String(error);
             console.warn('[Conductor] leaveSession failed:', msg);
             vscode.window.showWarningMessage(`Cannot leave session: ${msg}`);
+        }
+    }
+
+    /**
+     * Handle file upload from WebView.
+     * WebView cannot make fetch requests due to CORS restrictions,
+     * so we proxy the upload through the extension host.
+     */
+    private async _handleUploadFile(message: {
+        backendUrl: string;
+        roomId: string;
+        userId: string;
+        displayName: string;
+        fileData: string;  // Base64 encoded file data
+        fileName: string;
+        mimeType: string;
+        caption?: string;
+    }): Promise<void> {
+        try {
+            console.log('[Conductor] Uploading file:', message.fileName);
+
+            // Decode base64 file data
+            const fileBuffer = Buffer.from(message.fileData, 'base64');
+            console.log('[Conductor] File buffer size:', fileBuffer.length, 'bytes');
+
+            // Create form data using Node.js compatible approach
+            const boundary = '----FormBoundary' + Math.random().toString(36).substring(2);
+            const formParts: Buffer[] = [];
+
+            // Encode filename for Content-Disposition header (RFC 5987)
+            // Use ASCII-safe filename and UTF-8 encoded filename*
+            const safeFileName = message.fileName.replace(/[^\x20-\x7E]/g, '_');
+            const encodedFileName = encodeURIComponent(message.fileName);
+
+            // Add file part with both filename and filename* for Unicode support
+            formParts.push(Buffer.from(
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="file"; filename="${safeFileName}"; filename*=UTF-8''${encodedFileName}\r\n` +
+                `Content-Type: ${message.mimeType}\r\n\r\n`
+            ));
+            formParts.push(fileBuffer);
+            formParts.push(Buffer.from('\r\n'));
+
+            // Add user_id part
+            formParts.push(Buffer.from(
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="user_id"\r\n\r\n` +
+                `${message.userId}\r\n`
+            ));
+
+            // Add display_name part
+            formParts.push(Buffer.from(
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="display_name"\r\n\r\n` +
+                `${message.displayName}\r\n`
+            ));
+
+            // Add caption part if provided
+            if (message.caption) {
+                formParts.push(Buffer.from(
+                    `--${boundary}\r\n` +
+                    `Content-Disposition: form-data; name="caption"\r\n\r\n` +
+                    `${message.caption}\r\n`
+                ));
+            }
+
+            // Add closing boundary
+            formParts.push(Buffer.from(`--${boundary}--\r\n`));
+
+            const formBody = Buffer.concat(formParts);
+
+            const response = await fetch(`${message.backendUrl}/files/upload/${message.roomId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': `multipart/form-data; boundary=${boundary}`
+                },
+                body: formBody
+            });
+
+            console.log('[Conductor] Upload response status:', response.status);
+
+            if (!response.ok) {
+                const responseText = await response.text();
+                console.error('[Conductor] Upload error response:', responseText);
+                let errorDetail = `HTTP ${response.status}`;
+                try {
+                    const errorData = JSON.parse(responseText) as { detail?: string };
+                    errorDetail = errorData.detail || errorDetail;
+                } catch {
+                    errorDetail = responseText || errorDetail;
+                }
+                throw new Error(errorDetail);
+            }
+
+            const result = await response.json();
+            console.log('[Conductor] File uploaded successfully:', result);
+
+            // Send result back to WebView
+            this._view?.webview.postMessage({
+                command: 'uploadFileResult',
+                success: true,
+                result: result
+            });
+
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] File upload failed:', msg);
+            console.error('[Conductor] Error details:', error);
+
+            // Send error back to WebView
+            this._view?.webview.postMessage({
+                command: 'uploadFileResult',
+                success: false,
+                error: msg
+            });
+        }
+    }
+
+    /**
+     * Handle file download request from WebView.
+     * Downloads file from backend and prompts user to save locally.
+     */
+    private async _handleDownloadFile(message: {
+        fileId: string;
+        fileName: string;
+        downloadUrl: string;
+    }): Promise<void> {
+        try {
+            console.log('[Conductor] Downloading file:', message.fileName);
+
+            // Prompt user for save location
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(message.fileName),
+                filters: {
+                    'All Files': ['*']
+                }
+            });
+
+            if (!uri) {
+                console.log('[Conductor] Download cancelled by user');
+                return;
+            }
+
+            // Fetch file from backend
+            const response = await fetch(message.downloadUrl);
+            if (!response.ok) {
+                throw new Error(`Download failed: HTTP ${response.status}`);
+            }
+
+            const arrayBuffer = await response.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+
+            // Write to file
+            await vscode.workspace.fs.writeFile(uri, buffer);
+
+            vscode.window.showInformationMessage(`File saved: ${uri.fsPath}`);
+            console.log('[Conductor] File saved to:', uri.fsPath);
+
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] File download failed:', msg);
+            vscode.window.showErrorMessage(`Download failed: ${msg}`);
         }
     }
 

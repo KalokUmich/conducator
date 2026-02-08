@@ -6,4 +6,5 @@ jsonschema
 duckdb
 pyyaml
 pyngrok
+python-multipart
 

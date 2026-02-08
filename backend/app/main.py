@@ -20,6 +20,7 @@ from app.agent.router import router as agent_router
 from app.audit.router import router as audit_router
 from app.chat.router import router as chat_router
 from app.config import get_config
+from app.files.router import router as files_router
 from app.ngrok_service import get_public_url, start_ngrok, stop_ngrok
 from app.policy.router import router as policy_router
 from app.summary.router import router as summary_router
@@ -85,6 +86,7 @@ app.include_router(summary_router)
 app.include_router(agent_router)
 app.include_router(policy_router)
 app.include_router(audit_router)
+app.include_router(files_router)
 
 
 @app.get("/health")

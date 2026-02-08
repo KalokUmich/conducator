@@ -187,6 +187,72 @@ class ChatMessage(BaseModel):
     ts: float            # Unix timestamp
 ```
 
+**WhatsApp-Style Features:**
+
+| Feature | Description |
+|---------|-------------|
+| 💬 **Typing Indicator** | Shows "User is typing..." when someone is composing |
+| ✓ **Message Status** | Checkmarks (✓ sent) for message delivery status |
+| 📅 **Date Separators** | "Today", "Yesterday", or date for message grouping |
+| 👤 **Message Grouping** | Consecutive messages from same user within 5 min are grouped |
+| 📎 **File Sharing** | Images, PDFs, audio files up to 20MB |
+| 📥 **File Download** | Click to download files in VS Code or web browser |
+| 📱 **Mobile Support** | Web version responsive design for mobile devices |
+
+**WebSocket Message Types:**
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `history` | Server→Client | Initial message with chat history and users |
+| `join` | Client→Server | Register user in room |
+| `message` | Bidirectional | Chat text message |
+| `file` | Server→Client | File upload notification |
+| `typing` | Bidirectional | Typing indicator (isTyping: true/false) |
+| `user_joined` | Server→Client | User joined notification |
+| `user_left` | Server→Client | User left notification |
+| `session_ended` | Server→Client | Host ended session |
+| `end_session` | Client→Server | Host ends session |
+
+**WebSocket Optimization:**
+| Optimization | Description |
+|--------------|-------------|
+| 🚀 **Concurrent Broadcasting** | Uses `asyncio.gather()` to send messages to all clients concurrently instead of sequentially |
+| 💓 **Ping/Pong Heartbeat** | Uvicorn handles ping/pong at protocol level (20s interval, 20s timeout) |
+| 🔄 **Auto-Cleanup** | Failed connections are automatically removed during broadcast |
+| 📊 **Efficient Serialization** | JSON messages are serialized once and sent to all clients |
+
+**Uvicorn WebSocket Configuration:**
+```bash
+# Configure via Makefile or command line
+uvicorn app.main:app --ws-ping-interval 20.0 --ws-ping-timeout 20.0
+```
+
+**Advanced Chat Features:**
+| Feature | Description |
+|---------|-------------|
+| 🔄 **Smart Reconnection** | Exponential backoff (1s base, 30s max) with ±20% jitter to prevent thundering herd |
+| 📨 **Message Recovery** | On reconnect, client sends `?since=<timestamp>` to recover missed messages |
+| 🔁 **Message Deduplication** | Server uses LRU cache (10,000 messages), client uses Set to prevent duplicates |
+| 📄 **Message Pagination** | `GET /chat/{room_id}/history?before=<ts>&limit=50` for lazy loading old messages |
+| ✓✓ **Read Receipts** | Intersection Observer detects visible messages (50% threshold), broadcasts `read_receipt` |
+
+**WebSocket Message Types (Extended):**
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `read` | Client→Server | Client sends when message becomes visible |
+| `read_receipt` | Server→Client | Server broadcasts with `messageId` and `readBy` array |
+
+**Pagination API:**
+```bash
+# Get older messages (cursor-based pagination)
+GET /chat/{room_id}/history?before=1707321600.123&limit=50
+
+# Response
+{
+  "messages": [...],
+  "hasMore": true
+}
+```
+
 #### 3. Policy System (`policy/`)
 
 Safety evaluation for auto-apply feature.
@@ -272,7 +338,7 @@ Pure FSM with no external dependencies, fully unit-testable.
 **States:**
 ```
 Idle → BackendDisconnected ← (any state on BACKEND_LOST)
-  ↓
+  ↓           ↓ (join-only mode)
 ReadyToHost ←→ Hosting
   ↓
 Joining → Joined
@@ -284,18 +350,20 @@ Joining → Joined
 │ Idle │─────────────────▶│ ReadyToHost │
 └──────┘                   └──────┬──────┘
     │                             │
-    │ BACKEND_LOST        START_HOSTING
+    │ BACKEND_LOST        START_HOSTING / JOIN_SESSION
     ▼                             │
 ┌────────────────────┐            ▼
 │ BackendDisconnected│◀───────┌─────────┐
-└────────────────────┘        │ Hosting │
-         ▲                    └────┬────┘
-         │                         │
-    BACKEND_LOST             STOP_HOSTING
-         │                         │
-    ┌────┴────┐                    │
+└─────────┬──────────┘        │ Hosting │
+          │                   └────┬────┘
+          │                        │
+    JOIN_SESSION             STOP_HOSTING
+    (join-only)                    │
+          │                        │
+          ▼                        │
+    ┌─────────┐                    │
     │ Joining │◀───────────────────┘
-    └────┬────┘     JOIN_SESSION
+    └────┬────┘
          │
   JOIN_SUCCEEDED
          │
@@ -305,6 +373,8 @@ Joining → Joined
     └────────┘
 ```
 
+> **Note:** The `BackendDisconnected` state supports "Join Only Mode". Users can still join other people's sessions even without a local backend running. Only the "Start Session" (hosting) feature requires a local backend.
+
 **Event Table:**
 | Event | From States | To State |
 |-------|-------------|----------|
@@ -312,7 +382,7 @@ Joining → Joined
 | BACKEND_LOST | Any (except Idle) | BackendDisconnected |
 | START_HOSTING | ReadyToHost | Hosting |
 | STOP_HOSTING | Hosting | ReadyToHost |
-| JOIN_SESSION | ReadyToHost | Joining |
+| JOIN_SESSION | ReadyToHost, **BackendDisconnected** | Joining |
 | JOIN_SUCCEEDED | Joining | Joined |
 | JOIN_FAILED | Joining | ReadyToHost |
 | LEAVE_SESSION | Joined | ReadyToHost |
@@ -797,6 +867,72 @@ class ChatMessage(BaseModel):
     ts: float            # Unix 时间戳
 ```
 
+**WhatsApp 风格功能:**
+
+| 功能 | 描述 |
+|------|------|
+| 💬 **输入指示器** | 显示"用户正在输入..."当有人正在输入时 |
+| ✓ **消息状态** | 勾号（✓ 已发送）表示消息发送状态 |
+| 📅 **日期分隔符** | "今天"、"昨天"或日期用于消息分组 |
+| 👤 **消息分组** | 同一用户在 5 分钟内的连续消息会被分组 |
+| 📎 **文件共享** | 支持图片、PDF、音频文件，最大 20MB |
+| 📥 **文件下载** | 在 VS Code 或 Web 浏览器中点击下载文件 |
+| 📱 **移动端支持** | Web 版本响应式设计，支持移动设备 |
+
+**WebSocket 消息类型:**
+| 类型 | 方向 | 描述 |
+|------|------|------|
+| `history` | 服务器→客户端 | 初始消息，包含聊天历史和用户列表 |
+| `join` | 客户端→服务器 | 在房间中注册用户 |
+| `message` | 双向 | 聊天文本消息 |
+| `file` | 服务器→客户端 | 文件上传通知 |
+| `typing` | 双向 | 输入指示器 (isTyping: true/false) |
+| `user_joined` | 服务器→客户端 | 用户加入通知 |
+| `user_left` | 服务器→客户端 | 用户离开通知 |
+| `session_ended` | 服务器→客户端 | Host 结束会话 |
+| `end_session` | 客户端→服务器 | Host 结束会话 |
+
+**WebSocket 优化:**
+| 优化 | 描述 |
+|------|------|
+| 🚀 **并发广播** | 使用 `asyncio.gather()` 并发发送消息到所有客户端，而非顺序发送 |
+| 💓 **Ping/Pong 心跳** | Uvicorn 在协议层处理 ping/pong（20 秒间隔，20 秒超时） |
+| 🔄 **自动清理** | 广播时自动移除失败的连接 |
+| 📊 **高效序列化** | JSON 消息只序列化一次，发送给所有客户端 |
+
+**Uvicorn WebSocket 配置:**
+```bash
+# 通过 Makefile 或命令行配置
+uvicorn app.main:app --ws-ping-interval 20.0 --ws-ping-timeout 20.0
+```
+
+**高级聊天功能:**
+| 功能 | 描述 |
+|------|------|
+| 🔄 **智能重连** | 指数退避（1秒基础，30秒上限）+ ±20% 抖动，防止惊群效应 |
+| 📨 **消息恢复** | 重连时客户端发送 `?since=<timestamp>` 恢复错过的消息 |
+| 🔁 **消息去重** | 服务器使用 LRU 缓存（10,000 条），客户端使用 Set 防止重复 |
+| 📄 **消息分页** | `GET /chat/{room_id}/history?before=<ts>&limit=50` 懒加载历史消息 |
+| ✓✓ **读取回执** | Intersection Observer 检测可见消息（50% 阈值），广播 `read_receipt` |
+
+**WebSocket 消息类型（扩展）:**
+| 类型 | 方向 | 描述 |
+|------|------|------|
+| `read` | 客户端→服务器 | 客户端发送当消息可见时 |
+| `read_receipt` | 服务器→客户端 | 服务器广播 `messageId` 和 `readBy` 数组 |
+
+**分页 API:**
+```bash
+# 获取更早的消息（游标分页）
+GET /chat/{room_id}/history?before=1707321600.123&limit=50
+
+# 响应
+{
+  "messages": [...],
+  "hasMore": true
+}
+```
+
 #### 3. 策略系统 (`policy/`)
 
 自动应用功能的安全评估。
@@ -882,7 +1018,7 @@ extension/media/
 **状态:**
 ```
 Idle → BackendDisconnected ← (任何状态在 BACKEND_LOST 时)
-  ↓
+  ↓           ↓ (仅加入模式)
 ReadyToHost ←→ Hosting
   ↓
 Joining → Joined
@@ -894,18 +1030,20 @@ Joining → Joined
 │ Idle │─────────────────▶│ ReadyToHost │
 └──────┘                   └──────┬──────┘
     │                             │
-    │ BACKEND_LOST        START_HOSTING
+    │ BACKEND_LOST        START_HOSTING / JOIN_SESSION
     ▼                             │
 ┌────────────────────┐            ▼
 │ BackendDisconnected│◀───────┌─────────┐
-└────────────────────┘        │ Hosting │
-         ▲                    └────┬────┘
-         │                         │
-    BACKEND_LOST             STOP_HOSTING
-         │                         │
-    ┌────┴────┐                    │
+└─────────┬──────────┘        │ Hosting │
+          │                   └────┬────┘
+          │                        │
+    JOIN_SESSION             STOP_HOSTING
+    (仅加入模式)                   │
+          │                        │
+          ▼                        │
+    ┌─────────┐                    │
     │ Joining │◀───────────────────┘
-    └────┬────┘     JOIN_SESSION
+    └────┬────┘
          │
   JOIN_SUCCEEDED
          │
@@ -915,6 +1053,8 @@ Joining → Joined
     └────────┘
 ```
 
+> **注意:** `BackendDisconnected` 状态支持"仅加入模式"。即使本地后端未运行，用户仍可以加入其他人的会话。只有"启动会话"（托管）功能需要本地后端。
+
 **事件表:**
 | 事件 | 源状态 | 目标状态 |
 |------|--------|----------|
@@ -922,7 +1062,7 @@ Joining → Joined
 | BACKEND_LOST | 任何 (除 Idle) | BackendDisconnected |
 | START_HOSTING | ReadyToHost | Hosting |
 | STOP_HOSTING | Hosting | ReadyToHost |
-| JOIN_SESSION | ReadyToHost | Joining |
+| JOIN_SESSION | ReadyToHost, **BackendDisconnected** | Joining |
 | JOIN_SUCCEEDED | Joining | Joined |
 | JOIN_FAILED | Joining | ReadyToHost |
 | LEAVE_SESSION | Joined | ReadyToHost |
