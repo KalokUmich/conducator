@@ -397,6 +397,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
      */
     private async _startLiveShareAndGenerateInvite(): Promise<void> {
         try {
+            // Ensure ngrok URL is detected before generating invite link
+            // This handles the case where user clicks "Start Session" quickly
+            // before the async ngrok detection at startup completes
+            if (!getSessionService().getNgrokUrl()) {
+                console.log('[Conductor] Re-checking for ngrok URL...');
+                await getSessionService().detectNgrokUrl();
+            }
+
             console.log('[Conductor] Starting Live Share session...');
 
             // Start Live Share session
