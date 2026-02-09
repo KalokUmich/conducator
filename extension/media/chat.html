@@ -1613,6 +1613,9 @@
                 <p class="text-sm leading-relaxed break-words whitespace-pre-wrap mb-2">${escapeHtml(msg.content)}</p>
             ` : '';
 
+            // Generate unique ID for the navigate button
+            const navigateBtnId = `nav-btn-${msg.id || Date.now()}`;
+
             div.innerHTML = `
                 ${avatarHtml}
                 <div class="max-w-[85%] min-w-0">
@@ -1627,6 +1630,11 @@
                                 <span class="text-xs text-gray-300 font-mono truncate max-w-[180px]" title="${escapeHtml(snippet.filename || '')}">${escapeHtml(snippet.relativePath || snippet.filename || 'code')}</span>
                                 <span class="text-xs text-gray-500">${lineInfo}</span>
                             </div>
+                            <button id="${navigateBtnId}" class="navigate-to-code-btn p-1 rounded hover:bg-gray-600 transition-colors" title="Go to code location">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400 hover:text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
                         </div>
                         <pre class="p-3 text-xs font-mono text-gray-300 overflow-x-auto max-h-48 overflow-y-auto bg-gray-900/50"><code>${escapeHtml(snippet.code || '')}</code></pre>
                     </div>
@@ -1636,7 +1644,22 @@
                 </div>
             `;
 
+            // Add click handler for navigate button after element is added to DOM
             messagesContainer.appendChild(div);
+
+            const navigateBtn = document.getElementById(navigateBtnId);
+            if (navigateBtn) {
+                navigateBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    vscode.postMessage({
+                        command: 'navigateToCode',
+                        relativePath: snippet.relativePath || snippet.filename,
+                        startLine: snippet.startLine,
+                        endLine: snippet.endLine
+                    });
+                });
+            }
+
             smartScroll(isOwnMessage);
 
             // Observe for read receipts (only for messages from others)
