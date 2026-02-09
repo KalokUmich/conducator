@@ -1,4 +1,4 @@
-# AI Collab VS Code Extension
+# Conductor VS Code Extension
 
 [English](#english) | [中文](#中文)
 
@@ -7,26 +7,32 @@
 <a name="english"></a>
 ## English
 
-A VS Code extension that provides an AI collaboration panel with role-based permissions.
+A VS Code extension that combines **Live Share**, **real-time chat**, and **AI-powered code generation** for seamless team collaboration.
 
-## Features
+## ✨ Features
 
-- **Chat UI**: Modern, responsive chat interface built with Tailwind CSS
-- **Role-Based Permissions**: Lead and Member roles with different UI capabilities
-  - **Lead**: Full access (Create Summary, Generate Changes, Auto Apply)
-  - **Member**: Chat only
-- **Real-time Updates**: UI updates automatically when settings change
+### Core Features
+- **🔗 Live Share Integration**: Automatically starts Live Share when hosting a session
+- **💬 Real-time Chat**: WhatsApp-style chat with typing indicators and message grouping
+- **📎 File Sharing**: Share images, PDFs, audio files (up to 20MB) in chat
+- **📝 Code Snippet Sharing**: Select code in editor and share with context (file name, line numbers)
+- **👥 User List**: See who's online with real-time status indicators
+
+### Role-Based Access Control
+- **Host**: Full access - can end sessions, execute AI features
+- **Guest**: Chat and file sharing only
+- **Lead/Member**: Local configuration for UI permissions
+
+### AI Features (Requires Lead Role)
 - **Generate Changes**: Generate code modifications via AI agent
 - **Diff Preview**: Preview proposed changes before applying
 - **Apply Changes**: Apply generated changes to workspace files
 - **Auto Apply Toggle**: Enable/disable automatic application of safe changes
 - **Policy Evaluation**: Automatic safety checks before applying changes
-  - Max 2 files per change
-  - Max 50 lines changed
-  - Forbidden paths: `infra/`, `db/`, `security/`
-- **Join Only Mode**: Even without a local backend running, users can still join other people's sessions
-  - "Start Session" button is disabled (requires local backend)
-  - "Join Session" button remains functional
+
+### Smart Session Management
+- **Live Share Conflict Detection**: Automatically detects if Live Share is already active and prompts user to close it before starting a new session
+- **Join Only Mode**: Even without a local backend, users can join other people's sessions
 
 ## Quick Start
 
@@ -43,18 +49,23 @@ Then press `F5` in VS Code to launch the extension.
 ```
 extension/
 ├── src/
-│   ├── extension.ts          # Main extension entry point
+│   ├── extension.ts              # Main extension entry point & WebView provider
 │   └── services/
-│       ├── permissions.ts    # Role-based permission logic
-│       └── diffPreview.ts    # Diff preview & apply changes
+│       ├── permissions.ts        # Role-based permission logic
+│       ├── session.ts            # Session management (roomId, backendUrl, etc.)
+│       ├── conductorStateMachine.ts  # FSM for session states
+│       ├── conductorController.ts    # Controller for FSM transitions
+│       ├── backendHealthCheck.ts     # Backend health check service
+│       └── diffPreview.ts        # Diff preview & apply changes
 ├── media/
-│   ├── chat.html             # Chat UI with pending changes card
-│   ├── tailwind.css          # Compiled Tailwind CSS
-│   └── input.css             # Tailwind source
-├── out/                      # Compiled JavaScript (generated)
-├── package.json              # Extension manifest
-├── tsconfig.json             # TypeScript configuration
-└── tailwind.config.js        # Tailwind configuration
+│   ├── chat.html                 # Chat UI (WebView)
+│   ├── tailwind.css              # Compiled Tailwind CSS
+│   └── input.css                 # Tailwind source
+├── out/                          # Compiled JavaScript (generated)
+│   └── tests/                    # Compiled test files
+├── package.json                  # Extension manifest
+├── tsconfig.json                 # TypeScript configuration
+└── tailwind.config.js            # Tailwind configuration
 ```
 
 ## Building & Installation
@@ -85,14 +96,13 @@ npm run watch
 ### Step 3: Build VSIX Package
 
 ```bash
-# Install vsce tool (first time only)
-npm install -g @vscode/vsce
-
-# Build the package
-vsce package
+# Build the package (no global install needed)
+npx @vscode/vsce package
 ```
 
 This creates `ai-collab-0.0.1.vsix` in the extension folder.
+
+> **Note**: If you encounter errors about missing dependencies, make sure to run `npm install` first.
 
 ### Step 4: Install the Extension
 
@@ -144,23 +154,32 @@ unzip ai-collab-0.0.1.vsix -d ~/.vscode/extensions/ai-collab-0.0.1
 <a name="中文"></a>
 ## 中文
 
-一个提供 AI 协作面板和基于角色权限的 VS Code 扩展。
+一个将 **Live Share**、**实时聊天** 和 **AI 代码生成** 结合在一起的 VS Code 扩展，实现无缝团队协作。
 
-## 功能特性
+## ✨ 功能特性
 
-- **聊天界面**: 使用 Tailwind CSS 构建的现代响应式聊天界面
-- **基于角色的权限**: Lead 和 Member 角色具有不同的 UI 功能
-  - **Lead**: 完全访问权限（创建摘要、生成更改、自动应用）
-  - **Member**: 仅聊天
-- **实时更新**: 设置更改时 UI 自动更新
+### 核心功能
+- **🔗 Live Share 集成**: 启动会话时自动启动 Live Share
+- **💬 实时聊天**: WhatsApp 风格聊天，支持输入指示器和消息分组
+- **📎 文件共享**: 在聊天中分享图片、PDF、音频文件（最大 20MB）
+- **📝 代码片段分享**: 选择编辑器中的代码并分享（包含文件名、行号）
+- **👥 用户列表**: 实时查看在线用户状态
+
+### 基于角色的访问控制
+- **Host**: 完全访问权限 - 可以结束会话、执行 AI 功能
+- **Guest**: 仅聊天和文件共享
+- **Lead/Member**: 本地配置的 UI 权限
+
+### AI 功能（需要 Lead 角色）
 - **生成更改**: 通过 AI 代理生成代码修改
 - **差异预览**: 应用前预览建议的更改
 - **应用更改**: 将生成的更改应用到工作区文件
 - **自动应用开关**: 启用/禁用安全更改的自动应用
 - **策略评估**: 应用更改前的自动安全检查
-- **仅加入模式**: 即使本地后端未运行，用户仍可以加入其他人的会话
-  - "启动会话"按钮被禁用（需要本地后端）
-  - "加入会话"按钮仍然可用
+
+### 智能会话管理
+- **Live Share 冲突检测**: 自动检测 Live Share 是否已激活，并提示用户在启动新会话前关闭它
+- **仅加入模式**: 即使没有本地后端，用户仍可以加入其他人的会话
 
 ## 编译与安装
 
@@ -190,14 +209,13 @@ npm run watch
 ### 第三步：构建 VSIX 包
 
 ```bash
-# 安装 vsce 工具（仅首次需要）
-npm install -g @vscode/vsce
-
-# 构建包
-vsce package
+# 构建包（无需全局安装）
+npx @vscode/vsce package
 ```
 
 这会在 extension 文件夹中创建 `ai-collab-0.0.1.vsix`。
+
+> **注意**: 如果遇到依赖缺失错误，请确保先运行 `npm install`。
 
 ### 第四步：安装扩展
 
@@ -299,21 +317,23 @@ npm run build:css  # 重建 Tailwind CSS
 ```
 extension/
 ├── src/
-│   ├── extension.ts          # 主扩展入口点
+│   ├── extension.ts              # 主扩展入口点 & WebView 提供者
 │   └── services/
-│       ├── permissions.ts    # 基于角色的权限逻辑
-│       ├── session.ts        # 会话管理
-│       ├── conductorStateMachine.ts  # 状态机
-│       ├── conductorController.ts    # 控制器
-│       └── diffPreview.ts    # 差异预览和应用更改
+│       ├── permissions.ts        # 基于角色的权限逻辑
+│       ├── session.ts            # 会话管理（roomId、backendUrl 等）
+│       ├── conductorStateMachine.ts  # 会话状态的有限状态机
+│       ├── conductorController.ts    # FSM 转换控制器
+│       ├── backendHealthCheck.ts     # 后端健康检查服务
+│       └── diffPreview.ts        # 差异预览和应用更改
 ├── media/
-│   ├── chat.html             # 聊天 UI
-│   ├── tailwind.css          # 编译后的 Tailwind CSS
-│   └── input.css             # Tailwind 源文件
-├── out/                      # 编译后的 JavaScript（生成的）
-├── package.json              # 扩展清单
-├── tsconfig.json             # TypeScript 配置
-└── tailwind.config.js        # Tailwind 配置
+│   ├── chat.html                 # 聊天 UI（WebView）
+│   ├── tailwind.css              # 编译后的 Tailwind CSS
+│   └── input.css                 # Tailwind 源文件
+├── out/                          # 编译后的 JavaScript（生成的）
+│   └── tests/                    # 编译后的测试文件
+├── package.json                  # 扩展清单
+├── tsconfig.json                 # TypeScript 配置
+└── tailwind.config.js            # Tailwind 配置
 ```
 
 ## License
