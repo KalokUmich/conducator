@@ -168,22 +168,29 @@ export class ConductorController {
     }
 
     /**
-     * Parse an invite URL and transition from ReadyToHost to Joining.
+     * Parse an invite URL and transition to Joining.
+     *
+     * Can be called from:
+     * - {@link ConductorState.ReadyToHost}: normal case with local backend running
+     * - {@link ConductorState.BackendDisconnected}: allows joining others without local backend
      *
      * Expected URL format:
      *   `{backendUrl}/invite?roomId={roomId}&liveShareUrl={encodedLiveShareUrl}`
      *
      * @param inviteUrl - The full invite URL to parse.
      * @returns Parsed invite data (roomId, backendUrl, optional liveShareUrl).
-     * @throws {Error} If the FSM is not in {@link ConductorState.ReadyToHost}.
+     * @throws {Error} If the FSM is not in a valid state for joining.
      * @throws {Error} If the invite URL is malformed or missing required fields.
      */
     startJoining(inviteUrl: string): ParsedInvite {
         const current = this._fsm.getState();
-        if (current !== ConductorState.ReadyToHost) {
+        if (
+            current !== ConductorState.ReadyToHost &&
+            current !== ConductorState.BackendDisconnected
+        ) {
             throw new Error(
                 `Cannot join session from state '${current}'. ` +
-                `Expected '${ConductorState.ReadyToHost}'.`,
+                `Expected '${ConductorState.ReadyToHost}' or '${ConductorState.BackendDisconnected}'.`,
             );
         }
 

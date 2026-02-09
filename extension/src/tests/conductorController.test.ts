@@ -384,6 +384,43 @@ describe('ConductorController', () => {
                 /Cannot join session from state/,
             );
         });
+
+        it('transitions from BackendDisconnected to Joining (no local backend)', async () => {
+            // Start with unhealthy backend to reach BackendDisconnected
+            const ctrl = new ConductorController(fsm, unhealthyCheck, urlProvider);
+            await ctrl.start();
+            assert.equal(ctrl.getState(), S.BackendDisconnected);
+
+            // Should be able to join another session without local backend
+            ctrl.startJoining(INVITE_URL);
+            assert.equal(ctrl.getState(), S.Joining);
+        });
+
+        it('parses invite correctly from BackendDisconnected state', async () => {
+            const ctrl = new ConductorController(fsm, unhealthyCheck, urlProvider);
+            await ctrl.start();
+            assert.equal(ctrl.getState(), S.BackendDisconnected);
+
+            const parsed = ctrl.startJoining(INVITE_URL);
+            assert.equal(parsed.roomId, 'abc-123');
+            assert.equal(parsed.backendUrl, 'https://example.ngrok.dev');
+            assert.equal(
+                parsed.liveShareUrl,
+                'https://prod.liveshare.vsengsaas.visualstudio.com/join?ABC123',
+            );
+        });
+
+        it('can complete full join flow from BackendDisconnected', async () => {
+            const ctrl = new ConductorController(fsm, unhealthyCheck, urlProvider);
+            await ctrl.start();
+            assert.equal(ctrl.getState(), S.BackendDisconnected);
+
+            ctrl.startJoining(INVITE_URL);
+            assert.equal(ctrl.getState(), S.Joining);
+
+            ctrl.joinSucceeded();
+            assert.equal(ctrl.getState(), S.Joined);
+        });
     });
 
     // -----------------------------------------------------------------------
