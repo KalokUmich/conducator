@@ -26,6 +26,8 @@ Protocol Message Types:
 """
 import html
 import logging
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -340,6 +342,38 @@ async def websocket_chat_endpoint(
 
                 logger.info(f"[WS] Broadcasting file message: {file_message.get('originalFilename')}")
                 await manager.broadcast(file_message, room_id)
+                continue
+
+            # --- Handle CODE SNIPPET message ---
+            if message_type == "code_snippet":
+                message_id = str(uuid.uuid4())
+                user_id = data.get("userId", "")
+                user_info = manager.get_user(room_id, user_id)
+                display_name = user_info.displayName if user_info else data.get("displayName", "")
+                code_snippet = data.get("codeSnippet", {})
+
+                # Build code snippet message
+                snippet_message = {
+                    "type": "code_snippet",
+                    "id": message_id,
+                    "roomId": room_id,
+                    "userId": user_id,
+                    "displayName": display_name,
+                    "role": data.get("role", "engineer"),
+                    "content": data.get("content", ""),  # Optional comment
+                    "codeSnippet": {
+                        "filename": code_snippet.get("filename", ""),
+                        "relativePath": code_snippet.get("relativePath", ""),
+                        "language": code_snippet.get("language", ""),
+                        "startLine": code_snippet.get("startLine", 1),
+                        "endLine": code_snippet.get("endLine", 1),
+                        "code": code_snippet.get("code", "")
+                    },
+                    "ts": time.time()
+                }
+
+                logger.info(f"[WS] Broadcasting code snippet: {code_snippet.get('relativePath', 'unknown')} lines {code_snippet.get('startLine')}-{code_snippet.get('endLine')}")
+                await manager.broadcast(snippet_message, room_id)
                 continue
 
             # --- Handle regular CHAT message ---

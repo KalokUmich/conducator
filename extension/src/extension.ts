@@ -310,6 +310,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 case 'downloadFile':
                     this._handleDownloadFile(message);
                     return;
+                case 'getCodeSnippet':
+                    this._handleGetCodeSnippet();
+                    return;
             }
         });
 
@@ -813,6 +816,57 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             console.error('[Conductor] File download failed:', msg);
             vscode.window.showErrorMessage(`Download failed: ${msg}`);
         }
+    }
+
+    /**
+     * Handle request to get code snippet from the active editor.
+     * Gets the current selection and sends it back to the WebView.
+     */
+    private _handleGetCodeSnippet(): void {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            this._view?.webview.postMessage({
+                command: 'codeSnippet',
+                error: 'No active editor. Please open a file and select some code.'
+            });
+            return;
+        }
+
+        const selection = editor.selection;
+        const document = editor.document;
+
+        if (selection.isEmpty) {
+            this._view?.webview.postMessage({
+                command: 'codeSnippet',
+                error: 'No code selected. Please select some code in the editor first.'
+            });
+            return;
+        }
+
+        const selectedText = document.getText(selection);
+
+        // Get relative path if in workspace
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+        const relativePath = workspaceFolder
+            ? vscode.workspace.asRelativePath(document.uri)
+            : document.fileName;
+
+        this._view?.webview.postMessage({
+            command: 'codeSnippet',
+            filename: document.fileName.split('/').pop() || document.fileName.split('\\').pop() || 'file',
+            relativePath: relativePath,
+            language: document.languageId,
+            startLine: selection.start.line + 1,  // Convert to 1-based
+            endLine: selection.end.line + 1,      // Convert to 1-based
+            code: selectedText
+        });
+
+        console.log('[Conductor] Code snippet sent:', {
+            filename: relativePath,
+            language: document.languageId,
+            lines: `${selection.start.line + 1}-${selection.end.line + 1}`,
+            codeLength: selectedText.length
+        });
     }
 
     /**
@@ -1367,9 +1421,17 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         const wsUrl = backendUrl.replace('http', 'ws');
         const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'unsafe-inline'; connect-src ${backendUrl} ${wsUrl} ws://localhost:* wss://localhost:* ws://*.ngrok-free.dev wss://*.ngrok-free.dev ws://*.ngrok.io wss://*.ngrok.io;">`;
 
-        // Inject initial permissions data
+        // Inject initial permissions data (including sessionRole based on FSM state)
         const permissions = getPermissionsService().getPermissionsForWebView();
-        const permissionsScript = `<script>window.initialPermissions = ${JSON.stringify(permissions)};</script>`;
+        const currentState = this._controller.getState();
+        let sessionRole: 'host' | 'guest' | 'none' = 'none';
+        if (currentState === ConductorState.Hosting) {
+            sessionRole = 'host';
+        } else if (currentState === ConductorState.Joined) {
+            sessionRole = 'guest';
+        }
+        const permissionsWithRole = { ...permissions, sessionRole };
+        const permissionsScript = `<script>window.initialPermissions = ${JSON.stringify(permissionsWithRole)};</script>`;
 
         // Inject session state (roomId, hostId, createdAt)
         const sessionState = getSessionService().getSessionStateForWebView();

@@ -425,6 +425,25 @@
                 </div>
             </div>
 
+            <!-- Code Snippet Preview (shown when code is attached) -->
+            <div id="code-snippet-preview" class="hidden mb-3 bg-gray-800 border border-gray-600 rounded-lg overflow-hidden">
+                <div class="flex items-center justify-between px-3 py-2 bg-gray-700 border-b border-gray-600">
+                    <div class="flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+                        </svg>
+                        <span id="code-snippet-filename" class="text-xs text-gray-300 font-mono truncate max-w-[200px]"></span>
+                        <span id="code-snippet-lines" class="text-xs text-gray-500"></span>
+                    </div>
+                    <button id="btn-clear-snippet" class="text-gray-400 hover:text-white p-1" title="Remove code snippet">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                </div>
+                <pre id="code-snippet-content" class="p-3 text-xs font-mono text-gray-300 overflow-x-auto max-h-32 overflow-y-auto"></pre>
+            </div>
+
             <div class="flex items-end gap-3">
                 <!-- Attachment Button -->
                 <button
@@ -434,6 +453,17 @@
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+
+                <!-- Code Snippet Button -->
+                <button
+                    id="btn-code-snippet"
+                    class="bg-gray-700 hover:bg-gray-600 text-gray-300 p-3 rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    title="Share code from editor (select code first)"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
                 </button>
 
@@ -461,7 +491,7 @@
 
             <!-- Helper Text -->
             <div class="mt-2 text-xs text-gray-500">
-                Press Enter to send, Shift+Enter for new line. Paste images directly or click 📎 to attach files.
+                Press Enter to send, Shift+Enter for new line. Click <span class="text-blue-400">&lt;/&gt;</span> to share code from editor.
             </div>
         </div>
         </div> <!-- close chat content column -->
@@ -469,11 +499,19 @@
         <!-- Users Sidebar (inside panel-chat) -->
         <aside id="sidebar" class="w-56 bg-gray-800 border-l border-gray-700 flex-shrink-0 hidden md:flex flex-col">
             <div class="px-4 py-4 border-b border-gray-700">
-                <h2 class="text-sm font-semibold text-gray-300">Participants</h2>
-                <p id="user-count" class="text-xs text-gray-500 mt-1">0 online</p>
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-semibold text-gray-300">Participants</h2>
+                    <span id="user-count" class="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded-full">0</span>
+                </div>
             </div>
-            <div id="users-list" class="flex-1 overflow-y-auto p-3 space-y-2">
+            <div id="users-list" class="flex-1 overflow-y-auto p-2 space-y-1">
                 <!-- Users will be rendered here -->
+            </div>
+            <!-- Room Info Footer -->
+            <div class="px-3 py-3 border-t border-gray-700 bg-gray-800/50">
+                <div class="text-xs text-gray-500 truncate" id="room-id-display" title="">
+                    Room: <span class="text-gray-400 font-mono">--</span>
+                </div>
             </div>
         </aside>
         </div> <!-- close panel-chat -->
@@ -584,8 +622,19 @@
         const btnRemoveFile = document.getElementById('btn-remove-file');
         const btnUploadFile = document.getElementById('btn-upload-file');
 
+        // Code snippet elements
+        const btnCodeSnippet = document.getElementById('btn-code-snippet');
+        const codeSnippetPreview = document.getElementById('code-snippet-preview');
+        const codeSnippetFilename = document.getElementById('code-snippet-filename');
+        const codeSnippetLines = document.getElementById('code-snippet-lines');
+        const codeSnippetContent = document.getElementById('code-snippet-content');
+        const btnClearSnippet = document.getElementById('btn-clear-snippet');
+
         // Track session state
         let sessionEnded = false;
+
+        // Track pending code snippet
+        let pendingCodeSnippet = null;
 
         // Track pending file upload
         let pendingFile = null;
@@ -951,6 +1000,10 @@
                 case 'uploadFileResult':
                     handleUploadFileResult(message);
                     break;
+                case 'codeSnippet':
+                    // Received code snippet from extension (user selected code in editor)
+                    handleCodeSnippetFromExtension(message);
+                    break;
             }
         });
 
@@ -1171,27 +1224,61 @@
         }
 
         /**
-         * Render the users list in the sidebar
+         * Render the users list in the sidebar with enhanced status display
          */
         function renderUsersList(users) {
             usersMap.clear();
             users.forEach(u => usersMap.set(u.userId, u));
 
-            userCount.textContent = `${users.length} online`;
+            // Update count badge
+            userCount.textContent = users.length;
+
+            // Update room ID display if available
+            if (session.roomId) {
+                const roomIdDisplay = document.getElementById('room-id-display');
+                const shortId = session.roomId.slice(0, 8);
+                roomIdDisplay.innerHTML = `Room: <span class="text-gray-400 font-mono">${shortId}...</span>`;
+                roomIdDisplay.title = session.roomId;
+            }
+
             usersList.innerHTML = users.map(user => {
                 const colorClass = avatarColors[user.avatarColor] || 'bg-purple-600';
                 const isHost = user.role === 'host';
                 const isMe = user.userId === session.userId;
+                const isTyping = typingUsers.has(user.userId);
+
+                // Role badge
+                let roleBadge = '';
+                if (isHost) {
+                    roleBadge = '<span class="ml-1 px-1.5 py-0.5 text-xs bg-amber-500/20 text-amber-400 rounded">Host</span>';
+                }
+
+                // Status indicator
+                const statusDot = isTyping
+                    ? '<span class="absolute bottom-0 right-0 w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse"></span>'
+                    : '<span class="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border border-gray-800"></span>';
+
+                // Typing status text
+                const typingText = isTyping
+                    ? '<span class="text-xs text-blue-400 italic">typing...</span>'
+                    : '';
+
                 return `
-                    <div class="flex items-center gap-2 p-2 rounded-lg ${isMe ? 'bg-gray-700/50' : 'hover:bg-gray-700/30'}">
-                        <div class="w-7 h-7 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium">
-                            ${getInitials(user.displayName)}
+                    <div class="user-item flex items-center gap-2 p-2 rounded-lg transition-colors ${isMe ? 'bg-blue-900/30 border border-blue-800/30' : 'hover:bg-gray-700/30'}" data-user-id="${escapeHtml(user.userId)}">
+                        <div class="relative flex-shrink-0">
+                            <div class="w-8 h-8 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium shadow-sm">
+                                ${getInitials(user.displayName)}
+                            </div>
+                            ${statusDot}
                         </div>
                         <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-1">
-                                <span class="text-xs text-gray-200 truncate">${escapeHtml(user.displayName)}</span>
-                                ${isHost ? '<span class="text-xs">👑</span>' : ''}
-                                ${isMe ? '<span class="text-xs text-gray-500">(you)</span>' : ''}
+                            <div class="flex items-center">
+                                <span class="text-sm text-gray-200 truncate font-medium">${escapeHtml(user.displayName)}</span>
+                                ${isMe ? '<span class="ml-1 text-xs text-gray-500">(you)</span>' : ''}
+                            </div>
+                            <div class="flex items-center gap-1 mt-0.5">
+                                ${roleBadge}
+                                ${typingText}
                             </div>
                         </div>
                     </div>
@@ -1282,6 +1369,7 @@
 
         /**
          * Handle incoming typing indicator from another user.
+         * Updates both the typing indicator and user list to show typing status.
          * @param {Object} data - Typing event data with userId, displayName, isTyping.
          */
         function handleTypingEvent(data) {
@@ -1291,11 +1379,46 @@
                 setTimeout(() => {
                     typingUsers.delete(data.userId);
                     updateTypingIndicator();
+                    updateUserTypingStatus(data.userId, false);
                 }, TYPING_EXPIRE_MS);
             } else {
                 typingUsers.delete(data.userId);
             }
             updateTypingIndicator();
+            updateUserTypingStatus(data.userId, data.isTyping);
+        }
+
+        /**
+         * Update a specific user's typing status in the user list
+         * without re-rendering the entire list
+         */
+        function updateUserTypingStatus(userId, isTyping) {
+            const userItem = usersList.querySelector(`[data-user-id="${userId}"]`);
+            if (!userItem) return;
+
+            // Update status dot
+            const statusDot = userItem.querySelector('.absolute');
+            if (statusDot) {
+                if (isTyping) {
+                    statusDot.className = 'absolute bottom-0 right-0 w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse';
+                } else {
+                    statusDot.className = 'absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border border-gray-800';
+                }
+            }
+
+            // Update typing text
+            const statusTextContainer = userItem.querySelector('.flex.items-center.gap-1.mt-0\\.5');
+            if (statusTextContainer) {
+                const existingTyping = statusTextContainer.querySelector('.italic');
+                if (isTyping && !existingTyping) {
+                    const typingSpan = document.createElement('span');
+                    typingSpan.className = 'text-xs text-blue-400 italic';
+                    typingSpan.textContent = 'typing...';
+                    statusTextContainer.appendChild(typingSpan);
+                } else if (!isTyping && existingTyping) {
+                    existingTyping.remove();
+                }
+            }
         }
 
         /**
@@ -1438,6 +1561,84 @@
                 return true;
             }
             return false;
+        }
+
+        /**
+         * Render a code snippet message in the UI.
+         * @param {Object} msg - Message object with codeSnippet data.
+         */
+        function renderCodeSnippetMessage(msg) {
+            const isOwnMessage = msg.userId === session.userId;
+            const isGrouped = shouldGroupMessage(msg);
+
+            // Update grouping state for next message
+            lastMessageUserId = msg.userId;
+            lastMessageTime = msg.ts * 1000;
+
+            const div = document.createElement('div');
+            div.setAttribute('data-message-id', msg.id || '');
+            div.setAttribute('data-timestamp', msg.ts || '');
+            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2 ${isGrouped ? 'mt-1' : ''}`;
+
+            const timeAlign = isOwnMessage ? 'text-right' : '';
+            const roleLabel = msg.role === 'host' ? '👑 ' : '';
+            const displayName = msg.displayName || usersMap.get(msg.userId)?.displayName || 'Unknown';
+
+            // Get avatar color from users map or default
+            const userInfo = usersMap.get(msg.userId);
+            const colorClass = userInfo ? (avatarColors[userInfo.avatarColor] || 'bg-purple-600') : 'bg-gray-600';
+
+            // Hide avatar and name for grouped messages
+            const avatarHtml = (!isOwnMessage && !isGrouped) ? `
+                <div class="w-7 h-7 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
+                    ${getInitials(displayName)}
+                </div>
+            ` : (!isOwnMessage && isGrouped) ? '<div class="w-7 flex-shrink-0"></div>' : '';
+
+            const showName = !isOwnMessage && !isGrouped;
+            const snippet = msg.codeSnippet || {};
+            const lineInfo = snippet.startLine === snippet.endLine
+                ? `Line ${snippet.startLine}`
+                : `Lines ${snippet.startLine}-${snippet.endLine}`;
+
+            // Status indicator for own messages
+            const statusHtml = isOwnMessage ? '<span class="message-status text-blue-300 ml-1">✓</span>' : '';
+
+            // Comment text if any
+            const commentHtml = msg.content ? `
+                <p class="text-sm leading-relaxed break-words whitespace-pre-wrap mb-2">${escapeHtml(msg.content)}</p>
+            ` : '';
+
+            div.innerHTML = `
+                ${avatarHtml}
+                <div class="max-w-[85%] min-w-0">
+                    ${showName ? `<div class="text-xs text-gray-400 mb-1 ml-1">${roleLabel}${escapeHtml(displayName)}</div>` : ''}
+                    <div class="bg-gray-800 rounded-lg overflow-hidden border border-gray-700 shadow-lg">
+                        ${commentHtml ? `<div class="px-4 py-2 border-b border-gray-700">${commentHtml}</div>` : ''}
+                        <div class="flex items-center justify-between px-3 py-2 bg-gray-700/50 border-b border-gray-600">
+                            <div class="flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                                <span class="text-xs text-gray-300 font-mono truncate max-w-[180px]" title="${escapeHtml(snippet.filename || '')}">${escapeHtml(snippet.relativePath || snippet.filename || 'code')}</span>
+                                <span class="text-xs text-gray-500">${lineInfo}</span>
+                            </div>
+                        </div>
+                        <pre class="p-3 text-xs font-mono text-gray-300 overflow-x-auto max-h-48 overflow-y-auto bg-gray-900/50"><code>${escapeHtml(snippet.code || '')}</code></pre>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-0.5 ${timeAlign} ${isOwnMessage ? 'mr-1' : 'ml-1'} flex items-center ${isOwnMessage ? 'justify-end' : ''}">
+                        <span>${formatTime(msg.ts)}</span>${statusHtml}
+                    </div>
+                </div>
+            `;
+
+            messagesContainer.appendChild(div);
+            smartScroll(isOwnMessage);
+
+            // Observe for read receipts (only for messages from others)
+            if (!isOwnMessage && msg.id && messageReadObserver) {
+                messageReadObserver.observe(div);
+            }
         }
 
         /**
@@ -1923,6 +2124,11 @@
                             renderFileMessage(data);
                             updateLastMessageTimestamp(data.ts);
                         }
+                    } else if (data.type === 'code_snippet') {
+                        if (!isDuplicateMessage(data.id)) {
+                            renderCodeSnippetMessage(data);
+                            updateLastMessageTimestamp(data.ts);
+                        }
                     } else if (data.type === 'user_joined') {
                         renderUsersList(data.users);
                         renderSystemMessage(`${data.user.displayName} joined the chat`);
@@ -2006,10 +2212,14 @@
         /**
          * Send a chat message.
          * Stops typing indicator and resets textarea.
+         * Includes code snippet if one is attached.
          */
         function sendMessage() {
             const content = chatInput.value.trim();
-            if (!content || !ws || ws.readyState !== WebSocket.OPEN) {
+            const hasSnippet = pendingCodeSnippet !== null;
+
+            // Need either content or a code snippet to send
+            if ((!content && !hasSnippet) || !ws || ws.readyState !== WebSocket.OPEN) {
                 return;
             }
 
@@ -2023,17 +2233,29 @@
                 typingTimeout = null;
             }
 
+            // Build message with optional code snippet
             const message = {
                 userId: session.userId,
                 displayName: session.displayName || 'Host',
                 role: 'host',
-                content: content
+                content: content || (hasSnippet ? '' : '')
             };
+
+            // Attach code snippet if present
+            if (hasSnippet) {
+                message.type = 'code_snippet';
+                message.codeSnippet = pendingCodeSnippet;
+            }
 
             console.log('[WebView] Sending:', message);
             ws.send(JSON.stringify(message));
             chatInput.value = '';
             chatInput.style.height = 'auto';  // Reset textarea height
+
+            // Clear code snippet after sending
+            if (hasSnippet) {
+                clearCodeSnippet();
+            }
         }
 
         // Send button click handler (text messages only)
@@ -2057,6 +2279,66 @@
 
         // Scroll to bottom button click handler
         scrollToBottomBtn.addEventListener('click', scrollToBottom);
+
+        // ============================================================
+        // Code Snippet Handling
+        // ============================================================
+
+        /**
+         * Handle code snippet button click - request code from extension
+         */
+        btnCodeSnippet.addEventListener('click', () => {
+            vscode.postMessage({ command: 'getCodeSnippet' });
+        });
+
+        /**
+         * Handle code snippet received from extension
+         */
+        function handleCodeSnippetFromExtension(message) {
+            if (message.error) {
+                console.warn('[WebView] Code snippet error:', message.error);
+                return;
+            }
+
+            pendingCodeSnippet = {
+                filename: message.filename,
+                relativePath: message.relativePath,
+                language: message.language,
+                startLine: message.startLine,
+                endLine: message.endLine,
+                code: message.code
+            };
+
+            // Show preview
+            codeSnippetFilename.textContent = message.relativePath || message.filename;
+            codeSnippetFilename.title = message.filename;
+            codeSnippetLines.textContent = message.startLine === message.endLine
+                ? `Line ${message.startLine}`
+                : `Lines ${message.startLine}-${message.endLine}`;
+            codeSnippetContent.textContent = message.code;
+            codeSnippetPreview.classList.remove('hidden');
+
+            // Focus the input for adding a comment
+            chatInput.focus();
+            chatInput.placeholder = 'Add a comment about this code...';
+        }
+
+        /**
+         * Clear the pending code snippet
+         */
+        function clearCodeSnippet() {
+            pendingCodeSnippet = null;
+            codeSnippetPreview.classList.add('hidden');
+            codeSnippetFilename.textContent = '';
+            codeSnippetLines.textContent = '';
+            codeSnippetContent.textContent = '';
+            chatInput.placeholder = 'Type your message or paste an image...';
+        }
+
+        /**
+         * Clear snippet button handler
+         */
+        btnClearSnippet.addEventListener('click', clearCodeSnippet);
 
         // ============================================================
         // File Upload Handling
