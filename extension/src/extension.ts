@@ -314,6 +314,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 case 'getCodeSnippet':
                     this._handleGetCodeSnippet();
                     return;
+                case 'navigateToCode':
+                    this._handleNavigateToCode(message);
+                    return;
             }
         });
 
@@ -916,6 +919,82 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             lines: `${selection.start.line + 1}-${selection.end.line + 1}`,
             codeLength: selectedText.length
         });
+    }
+
+    /**
+     * Handle navigation to a code location from a code snippet in chat.
+     * Opens the file and navigates to the specified line range.
+     */
+    private async _handleNavigateToCode(message: {
+        relativePath: string;
+        startLine: number;
+        endLine: number;
+    }): Promise<void> {
+        try {
+            const { relativePath, startLine, endLine } = message;
+            console.log('[Conductor] Navigating to code:', { relativePath, startLine, endLine });
+
+            // Find the file in the workspace
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                vscode.window.showWarningMessage('No workspace folder open. Cannot navigate to code.');
+                return;
+            }
+
+            // Try to find the file
+            let fileUri: vscode.Uri | undefined;
+
+            // First, try as a relative path from workspace root
+            for (const folder of workspaceFolders) {
+                const possibleUri = vscode.Uri.joinPath(folder.uri, relativePath);
+                try {
+                    await vscode.workspace.fs.stat(possibleUri);
+                    fileUri = possibleUri;
+                    break;
+                } catch {
+                    // File not found in this folder, try next
+                }
+            }
+
+            // If not found, try to find by filename using workspace search
+            if (!fileUri) {
+                const filename = relativePath.split('/').pop() || relativePath.split('\\').pop() || relativePath;
+                const files = await vscode.workspace.findFiles(`**/${filename}`, '**/node_modules/**', 5);
+                if (files.length > 0) {
+                    // If multiple matches, prefer one that contains the relative path
+                    fileUri = files.find(f => f.fsPath.includes(relativePath.replace(/\\/g, '/'))) || files[0];
+                }
+            }
+
+            if (!fileUri) {
+                vscode.window.showWarningMessage(`File not found: ${relativePath}`);
+                return;
+            }
+
+            // Open the document
+            const document = await vscode.workspace.openTextDocument(fileUri);
+            const editor = await vscode.window.showTextDocument(document, {
+                preview: false,
+                preserveFocus: false
+            });
+
+            // Navigate to the line range (convert from 1-based to 0-based)
+            const startLineIndex = Math.max(0, startLine - 1);
+            const endLineIndex = Math.max(0, endLine - 1);
+
+            // Create a selection that highlights the code range
+            const startPosition = new vscode.Position(startLineIndex, 0);
+            const endPosition = new vscode.Position(endLineIndex, document.lineAt(endLineIndex).text.length);
+            const selection = new vscode.Selection(startPosition, endPosition);
+
+            editor.selection = selection;
+            editor.revealRange(selection, vscode.TextEditorRevealType.InCenter);
+
+            console.log('[Conductor] Navigated to:', fileUri.fsPath, `lines ${startLine}-${endLine}`);
+        } catch (error) {
+            console.error('[Conductor] Navigation error:', error);
+            vscode.window.showErrorMessage(`Failed to navigate to code: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
     }
 
     /**
