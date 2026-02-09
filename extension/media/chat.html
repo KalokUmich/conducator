@@ -686,6 +686,11 @@
          * Update the UI based on permissions.
          */
         function updateUIForPermissions(permissions) {
+            // Store session role for use in messages
+            if (permissions.sessionRole) {
+                session.sessionRole = permissions.sessionRole;
+            }
+
             // Update role badge based on session role (host/guest) or config role (lead/member)
             if (permissions.sessionRole === 'host') {
                 roleBadge.textContent = '👑 Host';
@@ -1024,8 +1029,8 @@
                         type: 'file',
                         id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
                         userId: session.userId,
-                        displayName: session.displayName || 'Host',
-                        role: 'host',
+                        displayName: session.displayName || 'User',
+                        role: session.sessionRole || 'guest',
                         fileId: result.id,
                         originalFilename: result.original_filename,
                         fileType: result.file_type,
@@ -2110,8 +2115,8 @@
                             ws.send(JSON.stringify({
                                 type: 'join',
                                 userId: session.userId,
-                                displayName: session.displayName || 'Host',
-                                role: 'host'
+                                displayName: session.displayName || 'User',
+                                role: session.sessionRole || 'guest'
                             }));
                         }
                     } else if (data.type === 'message') {
@@ -2234,10 +2239,11 @@
             }
 
             // Build message with optional code snippet
+            // Use session role (host/guest) - defaults to 'guest' if not set
             const message = {
                 userId: session.userId,
-                displayName: session.displayName || 'Host',
-                role: 'host',
+                displayName: session.displayName || 'User',
+                role: session.sessionRole || 'guest',
                 content: content || (hasSnippet ? '' : '')
             };
 
