@@ -1,4 +1,10 @@
-"""Tests for WebSocket chat functionality with multi-client support."""
+"""Tests for WebSocket chat functionality with multi-client support.
+
+SECURITY NOTE: The WebSocket protocol now implements server-side credential assignment:
+1. On connect, backend sends {type: "connected", userId: "<uuid>", role: "host/guest"}
+2. First client in room becomes host, subsequent clients become guests
+3. All messages use backend-assigned userId and role
+"""
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
@@ -6,6 +12,22 @@ from app.chat.manager import manager
 
 
 client = TestClient(app)
+
+
+def receive_credentials(ws):
+    """Helper to receive and validate backend-assigned credentials."""
+    connected = ws.receive_json()
+    assert connected["type"] == "connected"
+    assert "userId" in connected
+    assert connected["role"] in ("host", "guest")
+    return connected
+
+
+def receive_history(ws):
+    """Helper to receive and validate history message."""
+    history = ws.receive_json()
+    assert history["type"] == "history"
+    return history
 
 
 @pytest.fixture(autouse=True)
@@ -25,16 +47,21 @@ def test_websocket_chat_two_clients_same_room():
     with client.websocket_connect(f"/ws/chat/{room_id}") as ws1, \
          client.websocket_connect(f"/ws/chat/{room_id}") as ws2:
 
-        # Both clients receive history on connect (empty for new room)
-        history1 = ws1.receive_json()
-        history2 = ws2.receive_json()
-        assert history1["type"] == "history"
-        assert history2["type"] == "history"
+        # SECURITY: First receive backend-assigned credentials
+        creds1 = receive_credentials(ws1)
+        creds2 = receive_credentials(ws2)
 
-        # Client 1 sends a message
+        # First client should be host, second should be guest
+        assert creds1["role"] == "host"
+        assert creds2["role"] == "guest"
+
+        # Both clients receive history on connect (empty for new room)
+        history1 = receive_history(ws1)
+        history2 = receive_history(ws2)
+
+        # Client 1 sends a message (displayName only, userId/role from backend)
         message1 = {
-            "userId": "user1",
-            "role": "host",
+            "displayName": "User 1",
             "content": "Hello from user1"
         }
         ws1.send_json(message1)
@@ -43,10 +70,10 @@ def test_websocket_chat_two_clients_same_room():
         data1 = ws1.receive_json()
         data2 = ws2.receive_json()
 
-        # Verify message structure
+        # Verify message structure - backend assigns userId/role
         assert data1["type"] == "message"
-        assert data1["userId"] == "user1"
-        assert data1["role"] == "host"
+        assert data1["userId"] == creds1["userId"]  # Backend-assigned
+        assert data1["role"] == "host"  # Backend-assigned
         assert data1["content"] == "Hello from user1"
         assert data1["roomId"] == room_id
         assert "id" in data1
@@ -57,8 +84,7 @@ def test_websocket_chat_two_clients_same_room():
 
         # Client 2 sends a message
         message2 = {
-            "userId": "user2",
-            "role": "engineer",
+            "displayName": "User 2",
             "content": "Hello from user2"
         }
         ws2.send_json(message2)
@@ -68,8 +94,8 @@ def test_websocket_chat_two_clients_same_room():
         data2 = ws2.receive_json()
 
         assert data1["type"] == "message"
-        assert data1["userId"] == "user2"
-        assert data1["role"] == "engineer"
+        assert data1["userId"] == creds2["userId"]  # Backend-assigned
+        assert data1["role"] == "guest"  # Backend-assigned
         assert data1 == data2
 
 
@@ -81,13 +107,23 @@ def test_websocket_chat_three_clients_same_room():
          client.websocket_connect(f"/ws/chat/{room_id}") as ws2, \
          client.websocket_connect(f"/ws/chat/{room_id}") as ws3:
 
+        # SECURITY: First receive backend-assigned credentials
+        creds1 = receive_credentials(ws1)
+        creds2 = receive_credentials(ws2)
+        creds3 = receive_credentials(ws3)
+
+        # First client should be host, others should be guests
+        assert creds1["role"] == "host"
+        assert creds2["role"] == "guest"
+        assert creds3["role"] == "guest"
+
         # All clients receive history on connect (empty for new room)
-        assert ws1.receive_json()["type"] == "history"
-        assert ws2.receive_json()["type"] == "history"
-        assert ws3.receive_json()["type"] == "history"
+        receive_history(ws1)
+        receive_history(ws2)
+        receive_history(ws3)
 
         # Client 1 (host) sends a message
-        msg1 = {"userId": "host-user", "role": "host", "content": "Welcome everyone!"}
+        msg1 = {"displayName": "Host User", "content": "Welcome everyone!"}
         ws1.send_json(msg1)
 
         # All three clients should receive the message
@@ -97,11 +133,11 @@ def test_websocket_chat_three_clients_same_room():
 
         assert recv1["type"] == "message"
         assert recv1["content"] == "Welcome everyone!"
-        assert recv1["role"] == "host"
+        assert recv1["role"] == "host"  # Backend-assigned
         assert recv1 == recv2 == recv3
 
-        # Client 2 (engineer) sends a message
-        msg2 = {"userId": "engineer-1", "role": "engineer", "content": "Thanks for having me!"}
+        # Client 2 (guest) sends a message
+        msg2 = {"displayName": "Guest 1", "content": "Thanks for having me!"}
         ws2.send_json(msg2)
 
         recv1 = ws1.receive_json()
@@ -109,11 +145,11 @@ def test_websocket_chat_three_clients_same_room():
         recv3 = ws3.receive_json()
 
         assert recv1["content"] == "Thanks for having me!"
-        assert recv1["role"] == "engineer"
+        assert recv1["role"] == "guest"  # Backend-assigned
         assert recv1 == recv2 == recv3
 
-        # Client 3 (engineer) sends a message
-        msg3 = {"userId": "engineer-2", "role": "engineer", "content": "Hello team!"}
+        # Client 3 (guest) sends a message
+        msg3 = {"displayName": "Guest 2", "content": "Hello team!"}
         ws3.send_json(msg3)
 
         recv1 = ws1.receive_json()
@@ -133,34 +169,41 @@ def test_websocket_chat_message_history_on_join():
 
     # First client connects and sends messages
     with client.websocket_connect(f"/ws/chat/{room_id}") as ws1:
+        # SECURITY: Receive credentials first
+        creds1 = receive_credentials(ws1)
+        assert creds1["role"] == "host"
+
         # Receive empty history on connect
-        history1 = ws1.receive_json()
-        assert history1["type"] == "history"
+        history1 = receive_history(ws1)
         assert len(history1["messages"]) == 0
 
-        # Send first message
-        ws1.send_json({"userId": "user1", "role": "host", "content": "First message"})
+        # Send first message (displayName only)
+        ws1.send_json({"displayName": "Host", "content": "First message"})
         ws1.receive_json()  # Receive the broadcast
 
         # Send second message
-        ws1.send_json({"userId": "user1", "role": "host", "content": "Second message"})
+        ws1.send_json({"displayName": "Host", "content": "Second message"})
         ws1.receive_json()  # Receive the broadcast
 
         # Second client joins - should receive history
         with client.websocket_connect(f"/ws/chat/{room_id}") as ws2:
-            # First message should be history
-            history = ws2.receive_json()
+            # SECURITY: Receive credentials first
+            creds2 = receive_credentials(ws2)
+            assert creds2["role"] == "guest"
 
-            assert history["type"] == "history"
+            # Then receive history
+            history = receive_history(ws2)
+
             assert len(history["messages"]) == 2
             assert history["messages"][0]["content"] == "First message"
             assert history["messages"][1]["content"] == "Second message"
 
             # Third client joins - should also receive history
             with client.websocket_connect(f"/ws/chat/{room_id}") as ws3:
-                history3 = ws3.receive_json()
+                # SECURITY: Receive credentials first
+                receive_credentials(ws3)
+                history3 = receive_history(ws3)
 
-                assert history3["type"] == "history"
                 assert len(history3["messages"]) == 2
 
 
@@ -172,12 +215,20 @@ def test_websocket_chat_different_rooms():
     with client.websocket_connect(f"/ws/chat/{room1}") as ws1, \
          client.websocket_connect(f"/ws/chat/{room2}") as ws2:
 
+        # SECURITY: Receive credentials first
+        creds1 = receive_credentials(ws1)
+        creds2 = receive_credentials(ws2)
+
+        # Both are hosts in their respective rooms
+        assert creds1["role"] == "host"
+        assert creds2["role"] == "host"
+
         # Both clients receive history on connect
-        assert ws1.receive_json()["type"] == "history"
-        assert ws2.receive_json()["type"] == "history"
+        receive_history(ws1)
+        receive_history(ws2)
 
         # Client 1 sends a message in room 1
-        ws1.send_json({"userId": "user1", "role": "host", "content": "Message in room 1"})
+        ws1.send_json({"displayName": "User 1", "content": "Message in room 1"})
 
         # Client 1 should receive the message
         data1 = ws1.receive_json()
@@ -186,7 +237,7 @@ def test_websocket_chat_different_rooms():
         assert data1["roomId"] == room1
 
         # Client 2 sends a message in room 2
-        ws2.send_json({"userId": "user2", "role": "engineer", "content": "Message in room 2"})
+        ws2.send_json({"displayName": "User 2", "content": "Message in room 2"})
 
         # Client 2 should receive its message
         data2 = ws2.receive_json()
@@ -200,15 +251,20 @@ def test_websocket_chat_different_rooms():
 
 
 def test_websocket_chat_invalid_message():
-    """Test that invalid messages are handled gracefully."""
+    """Test that invalid messages are handled gracefully.
+
+    NOTE: With server-side credential assignment, the only required field
+    for a regular message is 'content'. Empty content is still invalid.
+    """
     room_id = "test-room-invalid-msg"
 
     with client.websocket_connect(f"/ws/chat/{room_id}") as ws:
-        # Receive history on connect
-        assert ws.receive_json()["type"] == "history"
+        # SECURITY: Receive credentials first
+        receive_credentials(ws)
+        receive_history(ws)
 
-        # Send invalid message (missing required fields)
-        invalid_message = {"content": "Missing userId and role"}
+        # Send empty message (missing content)
+        invalid_message = {}
         ws.send_json(invalid_message)
 
         # Should receive an error response
@@ -217,19 +273,19 @@ def test_websocket_chat_invalid_message():
         assert "Invalid message format" in response["error"]
 
 
-def test_websocket_chat_invalid_role():
-    """Test that invalid role values are rejected."""
-    room_id = "test-room-invalid-role"
+def test_websocket_chat_empty_content():
+    """Test that messages with empty content are rejected."""
+    room_id = "test-room-empty-content"
 
     with client.websocket_connect(f"/ws/chat/{room_id}") as ws:
-        # Receive history on connect
-        assert ws.receive_json()["type"] == "history"
+        # SECURITY: Receive credentials first
+        receive_credentials(ws)
+        receive_history(ws)
 
-        # Send message with invalid role
+        # Send message with empty content
         invalid_message = {
-            "userId": "user1",
-            "role": "admin",  # Invalid role
-            "content": "Test"
+            "displayName": "User",
+            "content": ""
         }
         ws.send_json(invalid_message)
 
@@ -244,13 +300,14 @@ def test_websocket_chat_multiple_messages():
     room_id = "test-room-multi-msgs"
 
     with client.websocket_connect(f"/ws/chat/{room_id}") as ws:
-        # Receive history on connect
-        assert ws.receive_json()["type"] == "history"
+        # SECURITY: Receive credentials first
+        creds = receive_credentials(ws)
+        receive_history(ws)
 
         messages = [
-            {"userId": "user1", "role": "host", "content": "Message 1"},
-            {"userId": "user1", "role": "host", "content": "Message 2"},
-            {"userId": "user1", "role": "host", "content": "Message 3"},
+            {"displayName": "User", "content": "Message 1"},
+            {"displayName": "User", "content": "Message 2"},
+            {"displayName": "User", "content": "Message 3"},
         ]
 
         for i, msg in enumerate(messages):
@@ -260,6 +317,9 @@ def test_websocket_chat_multiple_messages():
             assert received["content"] == msg["content"]
             # Verify unique IDs
             assert "id" in received
+            # Verify backend-assigned userId/role
+            assert received["userId"] == creds["userId"]
+            assert received["role"] == creds["role"]
 
         # Verify all messages are stored
         assert manager.get_message_count(room_id) == 3
@@ -270,12 +330,12 @@ def test_websocket_chat_message_schema():
     room_id = "test-room-schema"
 
     with client.websocket_connect(f"/ws/chat/{room_id}") as ws:
-        # Receive history on connect
-        assert ws.receive_json()["type"] == "history"
+        # SECURITY: Receive credentials first
+        creds = receive_credentials(ws)
+        receive_history(ws)
 
         ws.send_json({
-            "userId": "test-user",
-            "role": "engineer",
+            "displayName": "Test User",
             "content": "Test content"
         })
 
@@ -285,8 +345,9 @@ def test_websocket_chat_message_schema():
         assert received["type"] == "message"
         assert "id" in received  # UUID
         assert received["roomId"] == room_id
-        assert received["userId"] == "test-user"
-        assert received["role"] == "engineer"
+        # SECURITY: userId and role are backend-assigned
+        assert received["userId"] == creds["userId"]
+        assert received["role"] == "host"  # First client is always host
         assert received["content"] == "Test content"
         assert "ts" in received  # Timestamp
         assert isinstance(received["ts"], float)

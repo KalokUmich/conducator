@@ -63,10 +63,12 @@ class UserRole(str, Enum):
 
     Attributes:
         HOST: The lead user who can end sessions and use AI features.
-        ENGINEER: A participant who can chat but has limited permissions.
+        GUEST: A participant who joined an existing room (limited permissions).
+        ENGINEER: Legacy alias for guest (kept for backwards compatibility).
     """
     HOST = "host"
-    ENGINEER = "engineer"
+    GUEST = "guest"
+    ENGINEER = "engineer"  # Legacy alias
 
 
 class RoomUser(BaseModel):
@@ -149,6 +151,12 @@ class ConnectionManager:
     - Message history per room (in-memory, append-only)
     - User registrations per room
     - Guest numbering counters
+    - Room host tracking (for permission validation)
+
+    Security Model:
+        - Backend assigns userId on WebSocket connection (not client-provided)
+        - Backend determines role: first user in room = host, others = guest
+        - Backend validates permissions for sensitive operations (end_session, etc.)
 
     Note:
         This is a singleton-style global instance. All WebSocket handlers
@@ -178,20 +186,33 @@ class ConnectionManager:
         # Read receipts: room_id -> {message_id -> set of user_ids who read it}
         self.message_read_by: Dict[str, Dict[str, Set[str]]] = {}
 
-    async def connect(self, websocket: WebSocket, room_id: str) -> List[ChatMessage]:
-        """Accept a WebSocket connection and add it to a room.
+        # SECURITY: room_id -> host_user_id (first user to join becomes host)
+        self.room_hosts: Dict[str, str] = {}
 
-        This method accepts the WebSocket handshake and initializes
-        room data structures if this is the first connection to the room.
+    async def connect(
+        self, websocket: WebSocket, room_id: str
+    ) -> Tuple[str, str, List[ChatMessage]]:
+        """Accept a WebSocket connection, assign userId/role, and add to room.
+
+        SECURITY: This method is responsible for:
+        1. Generating a unique userId for the connection (not client-provided)
+        2. Determining role: first user in room = host, others = guest
+        3. Storing the host userId for permission validation
 
         Args:
             websocket: The WebSocket connection to accept.
             room_id: The room ID to join.
 
         Returns:
-            List of existing messages in the room (may be empty).
+            Tuple of (userId, role, message_history):
+            - userId: Backend-generated unique identifier
+            - role: "host" for first user, "guest" for others
+            - message_history: List of existing messages in the room
         """
         await websocket.accept()
+
+        # SECURITY: Generate userId on backend (never trust client-provided IDs)
+        user_id = str(uuid.uuid4())
 
         # Initialize room data structures if needed (first connection to room)
         if room_id not in self.active_connections:
@@ -203,9 +224,18 @@ class ConnectionManager:
         if room_id not in self.guest_counters:
             self.guest_counters[room_id] = 0
 
+        # SECURITY: First user to connect becomes host
+        if room_id not in self.room_hosts:
+            self.room_hosts[room_id] = user_id
+            role = "host"
+            logger.info(f"[Manager] User {user_id} is HOST of room {room_id}")
+        else:
+            role = "guest"
+            logger.info(f"[Manager] User {user_id} is GUEST in room {room_id}")
+
         self.active_connections[room_id].append(websocket)
 
-        return self.message_history[room_id]
+        return (user_id, role, self.message_history[room_id])
 
     def register_user(
         self,
@@ -441,7 +471,7 @@ class ConnectionManager:
         """Clear all data for a room (used when host ends session).
 
         This removes all connections, message history, user registrations,
-        and guest counters for the specified room.
+        guest counters, and host tracking for the specified room.
 
         Args:
             room_id: Room to clear.
@@ -453,6 +483,7 @@ class ConnectionManager:
         self.guest_counters.pop(room_id, None)
         self.seen_message_ids.pop(room_id, None)
         self.message_read_by.pop(room_id, None)
+        self.room_hosts.pop(room_id, None)  # SECURITY: Clear host tracking
 
         # Clean up websocket-to-user mappings for this room
         to_remove = [
@@ -461,6 +492,49 @@ class ConnectionManager:
         ]
         for ws in to_remove:
             del self.websocket_to_user[ws]
+
+    # =========================================================================
+    # Permission Validation (Security)
+    # =========================================================================
+
+    def is_host(self, room_id: str, user_id: str) -> bool:
+        """Check if a user is the host of a room.
+
+        SECURITY: Used for permission validation before sensitive operations.
+
+        Args:
+            room_id: The room ID.
+            user_id: The user ID to check.
+
+        Returns:
+            True if user is the host, False otherwise.
+        """
+        return self.room_hosts.get(room_id) == user_id
+
+    def get_host_id(self, room_id: str) -> Optional[str]:
+        """Get the host user ID for a room.
+
+        Args:
+            room_id: The room ID.
+
+        Returns:
+            The host's user ID, or None if room doesn't exist.
+        """
+        return self.room_hosts.get(room_id)
+
+    def can_end_session(self, room_id: str, user_id: str) -> bool:
+        """Check if a user has permission to end a session.
+
+        SECURITY: Only the host can end sessions.
+
+        Args:
+            room_id: The room ID.
+            user_id: The user ID attempting the operation.
+
+        Returns:
+            True if user can end session, False otherwise.
+        """
+        return self.is_host(room_id, user_id)
 
     # =========================================================================
     # Message Deduplication

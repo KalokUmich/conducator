@@ -15,6 +15,7 @@
  */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as vsls from 'vsls/vscode';
 
 import { checkBackendHealth } from './services/backendHealthCheck';
 import { ConductorController } from './services/conductorController';
@@ -373,13 +374,37 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
     /**
      * Handle "Start Session" command from WebView.
-     * 1. Runs health check if needed
-     * 2. Resets session (new roomId)
-     * 3. Transitions FSM to Hosting
-     * 4. Starts Live Share and generates invite link
+     * 1. Checks if Live Share is already active (prompts user to close it)
+     * 2. Runs health check if needed
+     * 3. Resets session (new roomId)
+     * 4. Transitions FSM to Hosting
+     * 5. Starts Live Share and generates invite link
      */
     private async _handleStartSession(): Promise<void> {
         try {
+            // Check if Live Share is already active
+            const liveShareStatus = await this._checkLiveShareStatus();
+            if (liveShareStatus.isActive) {
+                const roleStr = liveShareStatus.role === vsls.Role.Host ? 'hosting' : 'in';
+                const choice = await vscode.window.showWarningMessage(
+                    `You are currently ${roleStr} a Live Share session. Please end it before starting a new Conductor session.`,
+                    'End Live Share',
+                    'Cancel'
+                );
+
+                if (choice === 'End Live Share') {
+                    const liveShareApi = await vsls.getApi();
+                    if (liveShareApi) {
+                        await liveShareApi.end();
+                        // Wait a moment for Live Share to fully close
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                } else {
+                    // User cancelled
+                    return;
+                }
+            }
+
             const currentState = this._controller.getState();
 
             // If in Idle or BackendDisconnected, run health check first
@@ -413,6 +438,30 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             const msg = error instanceof Error ? error.message : String(error);
             console.warn('[Conductor] startSession failed:', msg);
             vscode.window.showWarningMessage(`Cannot start session: ${msg}`);
+        }
+    }
+
+    /**
+     * Check if Live Share is currently active.
+     * @returns Object containing isActive flag and role (Host/Guest/None)
+     */
+    private async _checkLiveShareStatus(): Promise<{ isActive: boolean; role: vsls.Role }> {
+        try {
+            const liveShareApi = await vsls.getApi();
+            if (!liveShareApi) {
+                // Live Share extension not installed or not activated
+                return { isActive: false, role: vsls.Role.None };
+            }
+
+            const session = liveShareApi.session;
+            const isActive = session.id !== null;
+            const role = session.role;
+
+            console.log(`[Conductor] Live Share status: isActive=${isActive}, role=${vsls.Role[role]}`);
+            return { isActive, role };
+        } catch (error) {
+            console.warn('[Conductor] Failed to check Live Share status:', error);
+            return { isActive: false, role: vsls.Role.None };
         }
     }
 

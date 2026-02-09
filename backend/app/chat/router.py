@@ -183,18 +183,24 @@ async def websocket_chat_endpoint(
 ) -> None:
     """WebSocket endpoint for real-time chat in a room.
 
-    This endpoint handles the complete chat lifecycle for a single client:
+    This endpoint handles the complete chat lifecycle for a single client.
+
+    SECURITY MODEL:
+        - Backend assigns userId on connection (never trust client-provided IDs)
+        - Backend determines role: first user = host, others = guest
+        - Backend validates permissions for sensitive operations
 
     Protocol Flow:
-        1. Client connects → Server sends: {type: "history", messages: [], users: []}
-           If `since` is provided, only messages newer than that timestamp are sent.
-        2. Client sends: {type: "join", userId, displayName, role}
+        1. Client connects → Server assigns userId and role
+           → Server sends: {type: "connected", userId: "xxx", role: "host/guest"}
+           → Server sends: {type: "history", messages: [], users: []}
+        2. Client sends: {type: "join", displayName} (uses backend-assigned userId/role)
            → Server broadcasts: {type: "user_joined", user: {}, users: []}
-        3. Client sends: {userId, displayName, role, content}
+        3. Client sends: {content} (messages use backend-tracked userId/role)
            → Server broadcasts: {type: "message", ...fullMessage}
-        4. Client sends: {type: "read", messageId, userId}
+        4. Client sends: {type: "read", messageId}
            → Server broadcasts: {type: "read_receipt", messageId, readBy: [...]}
-        5. Client sends: {type: "end_session", userId} (host only)
+        5. Client sends: {type: "end_session"} (host only, validated by backend)
            → Server broadcasts: {type: "session_ended", message: "..."}
         6. On disconnect → Server broadcasts: {type: "user_left", user: {}, users: []}
 
@@ -204,11 +210,24 @@ async def websocket_chat_endpoint(
         since: Optional timestamp for message recovery on reconnect.
     """
     logger.info(f"[WS] New connection to room: {room_id}, since={since}")
-    # Accept connection and get existing message history
-    history = await manager.connect(websocket, room_id)
-    logger.info(f"[WS] Connection accepted. Room {room_id} now has {manager.get_room_size(room_id)} connections")
+
+    # SECURITY: Backend assigns userId and role on connection
+    assigned_user_id, assigned_role, history = await manager.connect(websocket, room_id)
+    logger.info(
+        f"[WS] Connection accepted. Assigned userId={assigned_user_id}, role={assigned_role}. "
+        f"Room {room_id} now has {manager.get_room_size(room_id)} connections"
+    )
 
     try:
+        # SECURITY: Send backend-assigned credentials to client FIRST
+        # Client MUST use these credentials for all subsequent operations
+        await websocket.send_json({
+            "type": "connected",
+            "userId": assigned_user_id,
+            "role": assigned_role
+        })
+        logger.info(f"[WS] Sent 'connected' with userId={assigned_user_id}, role={assigned_role}")
+
         # If reconnecting with `since`, only send messages newer than that timestamp
         if since is not None:
             history = manager.get_messages_since(room_id, since)
@@ -232,14 +251,17 @@ async def websocket_chat_endpoint(
             logger.debug(f"[WS] Room {room_id} received: {data}")
 
             # --- Handle JOIN message (user registration) ---
+            # SECURITY: Use backend-assigned userId and role, ignore client-provided values
             if message_type == "join":
-                logger.info(f"[WS] JOIN from userId={data.get('userId')}, role={data.get('role')}")
+                logger.info(
+                    f"[WS] JOIN from backend-assigned userId={assigned_user_id}, role={assigned_role}"
+                )
                 user = manager.register_user(
                     websocket=websocket,
                     room_id=room_id,
-                    user_id=data.get("userId", ""),
+                    user_id=assigned_user_id,  # SECURITY: Use backend-assigned ID
                     display_name=data.get("displayName", ""),
-                    role=data.get("role", "engineer")
+                    role=assigned_role  # SECURITY: Use backend-assigned role
                 )
 
                 # Broadcast updated user list to all clients
@@ -253,39 +275,47 @@ async def websocket_chat_endpoint(
                 continue
 
             # --- Handle END_SESSION message (host only) ---
+            # SECURITY: Validate using backend-tracked userId and role
             if message_type == "end_session":
-                user_id = data.get("userId", "")
-                user_info = manager.get_user(room_id, user_id)
+                # SECURITY: Use backend-assigned userId, not client-provided
+                if not manager.can_end_session(room_id, assigned_user_id):
+                    logger.warning(
+                        f"[WS] Unauthorized end_session attempt by userId={assigned_user_id}"
+                    )
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": "Only the host can end the session"
+                    })
+                    continue
 
-                # Only the host can end the session
-                if user_info and user_info.role == "host":
-                    # Delete all files for this room
-                    # TODO: CLOUD_BACKUP - Consider backing up files before deletion
-                    try:
-                        file_service = FileStorageService.get_instance()
-                        deleted_count = file_service.delete_room_files(room_id)
-                        logger.info(f"[WS] Deleted {deleted_count} files for room {room_id}")
-                    except Exception as e:
-                        logger.error(f"[WS] Failed to delete files for room {room_id}: {e}")
+                logger.info(f"[WS] Host {assigned_user_id} ending session for room {room_id}")
+                # Delete all files for this room
+                # TODO: CLOUD_BACKUP - Consider backing up files before deletion
+                try:
+                    file_service = FileStorageService.get_instance()
+                    deleted_count = file_service.delete_room_files(room_id)
+                    logger.info(f"[WS] Deleted {deleted_count} files for room {room_id}")
+                except Exception as e:
+                    logger.error(f"[WS] Failed to delete files for room {room_id}: {e}")
 
-                    await manager.broadcast({
-                        "type": "session_ended",
-                        "message": "Host has ended the chat session"
-                    }, room_id)
+                await manager.broadcast({
+                    "type": "session_ended",
+                    "message": "Host has ended the chat session"
+                }, room_id)
 
-                    # Clear all room data
-                    manager.clear_room(room_id)
+                # Clear all room data
+                manager.clear_room(room_id)
                 continue
 
             # --- Handle TYPING indicator message ---
+            # SECURITY: Use backend-assigned userId
             if message_type == "typing":
-                user_id = data.get("userId", "")
-                user_info = manager.get_user(room_id, user_id)
+                user_info = manager.get_user(room_id, assigned_user_id)
                 if user_info:
                     await manager.broadcast_except(
                         {
                             "type": "typing",
-                            "userId": user_id,
+                            "userId": assigned_user_id,
                             "displayName": user_info.displayName,
                             "isTyping": data.get("isTyping", True)
                         },
@@ -295,12 +325,12 @@ async def websocket_chat_endpoint(
                 continue
 
             # --- Handle READ receipt message ---
+            # SECURITY: Use backend-assigned userId
             if message_type == "read":
                 message_id = data.get("messageId", "")
-                user_id = data.get("userId", "")
-                if message_id and user_id:
+                if message_id:
                     # Mark message as read and get all readers
-                    read_by = manager.mark_message_read(room_id, message_id, user_id)
+                    read_by = manager.mark_message_read(room_id, message_id, assigned_user_id)
                     # Broadcast read receipt to all clients
                     await manager.broadcast({
                         "type": "read_receipt",
@@ -310,6 +340,7 @@ async def websocket_chat_endpoint(
                 continue
 
             # --- Handle FILE message (broadcast file upload notification) ---
+            # SECURITY: Use backend-assigned userId and role
             if message_type == "file":
                 message_id = data.get("id", "")
 
@@ -318,8 +349,7 @@ async def websocket_chat_endpoint(
                     logger.debug(f"[WS] Duplicate file message ignored: {message_id}")
                     continue
 
-                user_id = data.get("userId", "")
-                user_info = manager.get_user(room_id, user_id)
+                user_info = manager.get_user(room_id, assigned_user_id)
                 display_name = user_info.displayName if user_info else data.get("displayName", "")
 
                 # Broadcast file message to all clients
@@ -327,9 +357,9 @@ async def websocket_chat_endpoint(
                     "type": "file",
                     "id": message_id,
                     "roomId": room_id,
-                    "userId": user_id,
+                    "userId": assigned_user_id,  # SECURITY: Use backend-assigned ID
                     "displayName": display_name,
-                    "role": data.get("role", "engineer"),
+                    "role": assigned_role,  # SECURITY: Use backend-assigned role
                     "fileId": data.get("fileId", ""),
                     "originalFilename": data.get("originalFilename", ""),
                     "fileType": data.get("fileType", "other"),
@@ -345,10 +375,10 @@ async def websocket_chat_endpoint(
                 continue
 
             # --- Handle CODE SNIPPET message ---
+            # SECURITY: Use backend-assigned userId and role
             if message_type == "code_snippet":
                 message_id = str(uuid.uuid4())
-                user_id = data.get("userId", "")
-                user_info = manager.get_user(room_id, user_id)
+                user_info = manager.get_user(room_id, assigned_user_id)
                 display_name = user_info.displayName if user_info else data.get("displayName", "")
                 code_snippet = data.get("codeSnippet", {})
 
@@ -357,9 +387,9 @@ async def websocket_chat_endpoint(
                     "type": "code_snippet",
                     "id": message_id,
                     "roomId": room_id,
-                    "userId": user_id,
+                    "userId": assigned_user_id,  # SECURITY: Use backend-assigned ID
                     "displayName": display_name,
-                    "role": data.get("role", "engineer"),
+                    "role": assigned_role,  # SECURITY: Use backend-assigned role
                     "content": data.get("content", ""),  # Optional comment
                     "codeSnippet": {
                         "filename": code_snippet.get("filename", ""),
@@ -377,29 +407,31 @@ async def websocket_chat_endpoint(
                 continue
 
             # --- Handle regular CHAT message ---
-            logger.info(f"[WS] CHAT message from userId={data.get('userId')}: {data.get('content', '')[:50]}")
-            try:
-                input_msg = ChatMessageInput(**data)
-            except Exception as e:
-                # Invalid message format - notify sender only
-                logger.error(f"[WS] Invalid message format: {e}")
+            # SECURITY: Use backend-assigned userId and role for all messages
+            content = data.get("content", "")
+
+            # Validate: content is required and cannot be empty for regular messages
+            if not content or not content.strip():
                 await websocket.send_json({
                     "type": "error",
-                    "error": f"Invalid message format: {str(e)}"
+                    "error": "Invalid message format: content is required"
                 })
                 continue
 
+            logger.info(f"[WS] CHAT message from backend-assigned userId={assigned_user_id}: {content[:50]}")
+
             # Use registered display name if available
-            user_info = manager.get_user(room_id, input_msg.userId)
-            display_name = user_info.displayName if user_info else input_msg.displayName
+            user_info = manager.get_user(room_id, assigned_user_id)
+            display_name = user_info.displayName if user_info else data.get("displayName", "")
 
             # Create and store the full message
+            # SECURITY: Use backend-assigned userId and role, ignore client-provided values
             full_message = ChatMessage(
                 roomId=room_id,
-                userId=input_msg.userId,
+                userId=assigned_user_id,
                 displayName=display_name,
-                role=input_msg.role,
-                content=input_msg.content
+                role=assigned_role,
+                content=content
             )
             manager.add_message(room_id, full_message)
 

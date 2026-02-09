@@ -428,10 +428,10 @@
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
             if (!messageId) return;
 
+            // SECURITY: userId is handled by backend
             ws.send(JSON.stringify({
                 type: 'read',
-                messageId: messageId,
-                userId: session.userId
+                messageId: messageId
             }));
         }
 
@@ -447,7 +447,7 @@
             if (messageEl) {
                 const statusEl = messageEl.querySelector('.message-status');
                 if (statusEl) {
-                    const otherReaders = readBy.filter(id => id !== session.userId);
+                    const otherReaders = readBy.filter(id => id !== config.userId);
                     if (otherReaders.length > 0) {
                         statusEl.textContent = '✓✓';
                         statusEl.title = `Read by ${otherReaders.length} ${otherReaders.length === 1 ? 'person' : 'people'}`;
@@ -557,14 +557,14 @@
 
         /**
          * Send typing indicator to other users.
+         * SECURITY: userId is handled by backend
          */
         function sendTypingIndicator(typing) {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
             ws.send(JSON.stringify({
                 type: 'typing',
-                userId: config.userId,
-                displayName: config.displayName,
+                displayName: config.displayName || 'Guest',
                 isTyping: typing
             }));
         }
@@ -1078,7 +1078,17 @@
                     const data = JSON.parse(event.data);
                     console.log('[Guest] Received:', data);
 
-                    if (data.type === 'history') {
+                    // SECURITY: Handle backend-assigned credentials FIRST
+                    if (data.type === 'connected') {
+                        console.log('[Guest] SECURITY: Backend assigned credentials:', data);
+                        // Store backend-assigned userId and role
+                        config.userId = data.userId;
+                        config.role = data.role;
+                        // Update role badge to show assigned role
+                        if (data.role === 'host') {
+                            myRoleBadge.textContent = '👑 Host';
+                        }
+                    } else if (data.type === 'history') {
                         if (connectionStatus) connectionStatus.style.display = 'none';
 
                         // Render existing users (always update on history)
@@ -1095,14 +1105,18 @@
                         });
 
                         // Only send join if this is not a recovery (reconnect)
+                        // SECURITY: Only send displayName, userId and role are handled by backend
                         if (!data.isRecovery) {
                             ws.send(JSON.stringify({
                                 type: 'join',
-                                userId: config.userId,
-                                displayName: config.displayName,
-                                role: config.role
+                                displayName: config.displayName || 'Guest'
+                                // Note: userId and role are now assigned by backend
                             }));
                         }
+                    } else if (data.type === 'error') {
+                        // Handle backend error messages (e.g., permission denied)
+                        console.error('[Guest] Backend error:', data.error);
+                        renderSystemMessage(`⚠️ ${data.error}`);
                     } else if (data.type === 'message') {
                         if (!isDuplicateMessage(data.id)) {
                             renderMessage(data);
@@ -1189,10 +1203,10 @@
                 typingTimeout = null;
             }
 
+            // SECURITY: Only send displayName and content
+            // userId and role are handled by backend
             const message = {
-                userId: config.userId,
-                displayName: config.displayName,
-                role: config.role,
+                displayName: config.displayName || 'Guest',
                 content: content
             };
 
@@ -1263,9 +1277,9 @@
             btnUploadFile.disabled = true;
             btnUploadFile.textContent = '⏳ Uploading...';
 
+            // SECURITY: userId is handled by backend
             const formData = new FormData();
             formData.append('file', file);
-            formData.append('user_id', config.userId);
             formData.append('display_name', config.displayName || 'Guest');
             if (caption) {
                 formData.append('caption', caption);
@@ -1289,13 +1303,12 @@
                 console.log('[Guest] Upload result:', result);
 
                 // Send file message via WebSocket
+                // SECURITY: userId and role are handled by backend
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     const fileMessage = {
                         type: 'file',
                         id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
-                        userId: config.userId,
                         displayName: config.displayName || 'Guest',
-                        role: config.role,
                         fileId: result.id,
                         originalFilename: result.original_filename,
                         fileType: result.file_type,
@@ -1395,11 +1408,9 @@
         });
 
         // Initialize and start connection
-        (async function init() {
-            // Generate stable guest ID based on browser fingerprint
-            config.userId = await generateGuestId();
-            console.log('[Guest] Generated userId:', config.userId);
-
+        // SECURITY: userId will be assigned by backend via 'connected' message
+        (function init() {
+            console.log('[Guest] Starting WebSocket connection (userId will be assigned by backend)');
             // Start WebSocket connection
             connectWebSocket();
         })();

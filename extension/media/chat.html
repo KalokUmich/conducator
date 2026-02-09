@@ -1024,13 +1024,12 @@
                 console.log('[WebView] WebSocket state:', ws ? ws.readyState : 'null', '(OPEN=1)');
 
                 // Send file message via WebSocket
+                // SECURITY: userId and role are assigned by backend
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     const fileMessage = {
                         type: 'file',
                         id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
-                        userId: session.userId,
                         displayName: session.displayName || 'User',
-                        role: session.sessionRole || 'guest',
                         fileId: result.id,
                         originalFilename: result.original_filename,
                         fileType: result.file_type,
@@ -1433,9 +1432,9 @@
         function sendTypingIndicator(isTyping) {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
+            // SECURITY: Backend uses assigned userId, we only send displayName
             ws.send(JSON.stringify({
                 type: 'typing',
-                userId: session.userId,
                 displayName: session.displayName || 'Host',
                 isTyping: isTyping
             }));
@@ -2049,10 +2048,10 @@
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
             if (!messageId) return;
 
+            // SECURITY: Backend uses assigned userId
             ws.send(JSON.stringify({
                 type: 'read',
-                messageId: messageId,
-                userId: session.userId
+                messageId: messageId
             }));
         }
 
@@ -2093,7 +2092,19 @@
                     const data = JSON.parse(event.data);
                     console.log('[WebView] Received:', data);
 
-                    if (data.type === 'history') {
+                    // SECURITY: Handle backend-assigned credentials FIRST
+                    // The backend assigns userId and role on connection - client MUST use these
+                    if (data.type === 'connected') {
+                        console.log('[WebView] SECURITY: Backend assigned credentials:', data);
+                        // Store backend-assigned userId and role
+                        session.userId = data.userId;
+                        session.sessionRole = data.role;
+                        console.log('[WebView] Updated session with backend credentials:', {
+                            userId: session.userId,
+                            sessionRole: session.sessionRole
+                        });
+                        // Don't send join yet - wait for history message
+                    } else if (data.type === 'history') {
                         // Clear status
                         if (connectionStatus) connectionStatus.style.display = 'none';
 
@@ -2111,12 +2122,12 @@
                         });
 
                         // Only send join if this is not a recovery (reconnect)
+                        // SECURITY: Use backend-assigned userId (already stored in session)
                         if (!data.isRecovery) {
                             ws.send(JSON.stringify({
                                 type: 'join',
-                                userId: session.userId,
-                                displayName: session.displayName || 'User',
-                                role: session.sessionRole || 'guest'
+                                displayName: session.displayName || 'User'
+                                // Note: userId and role are now handled by backend
                             }));
                         }
                     } else if (data.type === 'message') {
@@ -2160,6 +2171,10 @@
                     } else if (data.type === 'read_receipt') {
                         // Update message status indicators
                         handleReadReceipt(data);
+                    } else if (data.type === 'error') {
+                        // SECURITY: Handle backend error messages (e.g., permission denied)
+                        console.error('[WebView] Backend error:', data.error);
+                        renderSystemMessage(`⚠️ ${data.error}`);
                     }
                 } catch (err) {
                     console.error('[WebView] Failed to parse message:', err);
@@ -2239,11 +2254,9 @@
             }
 
             // Build message with optional code snippet
-            // Use session role (host/guest) - defaults to 'guest' if not set
+            // SECURITY: userId and role are assigned by backend, we only send content
             const message = {
-                userId: session.userId,
                 displayName: session.displayName || 'User',
-                role: session.sessionRole || 'guest',
                 content: content || (hasSnippet ? '' : '')
             };
 
@@ -2569,10 +2582,11 @@
         // Handle confirmation response from extension
         function handleEndChatConfirmed() {
             console.log('[WebView] End chat confirmed, ws state:', ws ? ws.readyState : 'null');
+            // SECURITY: Backend validates permission using assigned userId
             if (ws && ws.readyState === WebSocket.OPEN) {
                 const msg = {
-                    type: 'end_session',
-                    userId: session.userId
+                    type: 'end_session'
+                    // Note: userId is handled by backend (assigned on connection)
                 };
                 console.log('[WebView] Sending end_session:', msg);
                 ws.send(JSON.stringify(msg));
