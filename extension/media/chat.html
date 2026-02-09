@@ -637,8 +637,14 @@
          * Update the UI based on permissions.
          */
         function updateUIForPermissions(permissions) {
-            // Update role badge
-            if (permissions.role === 'lead') {
+            // Update role badge based on session role (host/guest) or config role (lead/member)
+            if (permissions.sessionRole === 'host') {
+                roleBadge.textContent = '👑 Host';
+                roleBadge.className = 'px-3 py-1 rounded-full text-xs font-medium bg-amber-600 text-white';
+            } else if (permissions.sessionRole === 'guest') {
+                roleBadge.textContent = '👤 Guest';
+                roleBadge.className = 'px-3 py-1 rounded-full text-xs font-medium bg-blue-600 text-white';
+            } else if (permissions.role === 'lead') {
                 roleBadge.textContent = '👑 Lead';
                 roleBadge.className = 'px-3 py-1 rounded-full text-xs font-medium bg-amber-600 text-white';
             } else {

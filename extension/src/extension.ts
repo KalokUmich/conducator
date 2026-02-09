@@ -329,13 +329,27 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
     /**
      * Send current permissions to the WebView.
+     * Includes sessionRole based on FSM state (host/guest/none).
      */
     private _sendPermissions(): void {
         if (this._view) {
             const permissions = getPermissionsService().getPermissionsForWebView();
+            const currentState = this._controller.getState();
+
+            // Determine session role based on FSM state
+            let sessionRole: 'host' | 'guest' | 'none' = 'none';
+            if (currentState === ConductorState.Hosting) {
+                sessionRole = 'host';
+            } else if (currentState === ConductorState.Joined) {
+                sessionRole = 'guest';
+            }
+
             this._view.webview.postMessage({
                 command: 'updatePermissions',
-                permissions
+                permissions: {
+                    ...permissions,
+                    sessionRole
+                }
             });
         }
     }
@@ -515,10 +529,13 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
     /**
      * Send both session state and conductor state to the WebView.
-     * Used after startHosting to give the WebView everything it needs.
+     * Also sends updated permissions (which include sessionRole based on FSM state).
+     * Used after startHosting/joinSucceeded to give the WebView everything it needs.
      */
     private _sendSessionAndState(): void {
         this._sendConductorState(this._controller.getState());
+        // Also send permissions so the role badge updates (host/guest)
+        this._sendPermissions();
     }
 
     /**
