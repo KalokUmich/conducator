@@ -7,4 +7,5 @@ duckdb
 pyyaml
 pyngrok
 python-multipart
+boto3
 

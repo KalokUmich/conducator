@@ -87,10 +87,26 @@ session:
 logging:
   # Log level: debug, info, warning, error
   level: "info"
-  
+
   # Enable audit logging
   audit_enabled: true
-  
+
   # Audit log file path
   audit_path: "audit_logs.duckdb"
 
+# =============================================================================
+# Summary / AI Provider Configuration
+# =============================================================================
+summary:
+  # Enable AI-powered chat summarization
+  enabled: false
+
+  # Claude via AWS Bedrock
+  # Format: "ACCESS_KEY:SECRET_KEY" or "ACCESS_KEY:SECRET_KEY:SESSION_TOKEN"
+  # Leave empty to disable this provider
+  claude_bedrock_api_key: ""
+
+  # Claude via Anthropic API (direct)
+  # Your Anthropic API key (starts with sk-ant-...)
+  # Leave empty to disable this provider
+  claude_direct_api_key: ""

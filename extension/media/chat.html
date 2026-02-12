@@ -211,6 +211,16 @@
                         </p>
                     </div>
                     <div class="flex items-center gap-3">
+                        <!-- AI Config Button -->
+                        <button
+                            id="btn-ai-config"
+                            class="text-gray-400 hover:text-purple-400 p-1.5 rounded transition-colors"
+                            title="AI Configuration"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
                         <!-- Auto Apply Toggle (Lead only) -->
                         <div id="auto-apply-toggle-container" class="hidden flex items-center gap-2">
                             <span class="text-xs text-gray-400">Auto</span>
@@ -507,16 +517,249 @@
             <div id="users-list" class="flex-1 overflow-y-auto p-2 space-y-1">
                 <!-- Users will be rendered here -->
             </div>
-            <!-- Room Info Footer -->
-            <div class="px-3 py-3 border-t border-gray-700 bg-gray-800/50">
-                <div class="text-xs text-gray-500 truncate" id="room-id-display" title="">
-                    Room: <span class="text-gray-400 font-mono">--</span>
+            <!-- AI Summary Footer -->
+            <div class="px-3 py-3 border-t border-gray-700 bg-gray-800/50 space-y-2">
+                <button
+                    id="btn-summarize"
+                    class="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors flex items-center justify-center gap-2"
+                    title="Generate AI summary of this conversation"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" />
+                    </svg>
+                    <span id="btn-summarize-text">Summarize Chat</span>
+                </button>
+                <div id="ai-status-indicator" class="text-xs text-gray-500 text-center">
+                    AI: <span id="ai-status-text" class="text-gray-400">--</span>
                 </div>
             </div>
         </aside>
         </div> <!-- close panel-chat -->
     </div> <!-- close main area flex-col -->
     </div> <!-- close outer flex h-full -->
+
+    <!-- ============================================================ -->
+    <!-- AI Configuration Modal                                        -->
+    <!-- ============================================================ -->
+    <div id="ai-config-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
+        <!-- Backdrop -->
+        <div id="ai-config-backdrop" class="absolute inset-0 bg-black/60"></div>
+        <!-- Modal Content -->
+        <div class="relative bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-md mx-4">
+            <!-- Header -->
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+                <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" />
+                    </svg>
+                    AI Configuration
+                </h3>
+                <button id="btn-close-ai-config" class="text-gray-400 hover:text-white p-1 rounded transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <!-- Body -->
+            <div class="px-5 py-4 space-y-4">
+                <!-- Loading State -->
+                <div id="ai-config-loading" class="hidden flex items-center justify-center py-8">
+                    <div class="h-6 w-6 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></div>
+                    <span class="ml-3 text-gray-400 text-sm">Loading AI status...</span>
+                </div>
+                <!-- Error State -->
+                <div id="ai-config-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-3">
+                    <p class="text-red-400 text-sm" id="ai-config-error-text">Failed to fetch AI status</p>
+                </div>
+                <!-- Content -->
+                <div id="ai-config-content" class="hidden space-y-4">
+                    <!-- AI Summary Toggle Section -->
+                    <div class="bg-gray-900/50 rounded-lg border border-gray-700 p-4">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-3">
+                                <div id="ai-summary-icon" class="h-10 w-10 rounded-full flex items-center justify-center">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" />
+                                    </svg>
+                                </div>
+                                <div>
+                                    <span class="text-white text-sm font-medium block">AI Summary</span>
+                                    <span id="ai-summary-status-text" class="text-xs text-gray-400">Checking status...</span>
+                                </div>
+                            </div>
+                            <span id="ai-summary-enabled" class="px-3 py-1 rounded-full text-xs font-medium"></span>
+                        </div>
+                    </div>
+
+                    <!-- Active Provider Card -->
+                    <div class="bg-purple-900/20 rounded-lg border border-purple-700/50 p-4">
+                        <div class="flex items-center gap-2 mb-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                            </svg>
+                            <span class="text-purple-300 text-xs font-medium uppercase tracking-wide">Active Provider</span>
+                        </div>
+                        <div class="flex items-center justify-between">
+                            <span id="ai-active-provider" class="text-white font-mono text-lg"></span>
+                            <span id="ai-active-provider-status" class="flex items-center gap-1 text-xs"></span>
+                        </div>
+                    </div>
+
+                    <!-- Provider Health List -->
+                    <div>
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-gray-300 text-sm font-medium">Provider Health Status</span>
+                            <span id="ai-last-updated" class="text-xs text-gray-500"></span>
+                        </div>
+                        <div id="ai-providers-list" class="bg-gray-900/50 rounded-lg border border-gray-700 divide-y divide-gray-700">
+                            <!-- Provider rows will be inserted here -->
+                        </div>
+                        <p id="ai-no-providers" class="hidden text-gray-500 text-xs italic py-2">No providers configured</p>
+                    </div>
+                </div>
+            </div>
+            <!-- Footer -->
+            <div class="px-5 py-4 border-t border-gray-700 flex justify-end gap-2">
+                <button
+                    id="btn-refresh-ai-status"
+                    class="bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" />
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- AI Summary Results Modal                                      -->
+    <!-- ============================================================ -->
+    <div id="summary-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
+        <!-- Backdrop -->
+        <div id="summary-modal-backdrop" class="absolute inset-0 bg-black/60"></div>
+        <!-- Modal Content -->
+        <div class="relative bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+            <!-- Header -->
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700 flex-shrink-0">
+                <h3 class="text-lg font-semibold text-white flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-emerald-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+                    </svg>
+                    Chat Summary
+                </h3>
+                <button id="btn-close-summary" class="text-gray-400 hover:text-white p-1 rounded transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            <!-- Body (scrollable) -->
+            <div class="px-5 py-4 space-y-4 overflow-y-auto flex-1">
+                <!-- Loading State -->
+                <div id="summary-loading" class="hidden flex items-center justify-center py-8">
+                    <div class="h-6 w-6 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
+                    <span class="ml-3 text-gray-400 text-sm">Generating summary...</span>
+                </div>
+                <!-- Error State -->
+                <div id="summary-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                        <span class="text-red-400 font-medium">Summary Failed</span>
+                    </div>
+                    <p class="text-red-300 text-sm" id="summary-error-text">Unable to generate summary.</p>
+                </div>
+                <!-- Summary Content -->
+                <div id="summary-content" class="hidden space-y-4">
+                    <!-- Topic -->
+                    <div>
+                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Topic</h4>
+                        <p id="summary-topic" class="text-white text-sm"></p>
+                    </div>
+                    <!-- Problem Statement -->
+                    <div>
+                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Problem</h4>
+                        <p id="summary-problem" class="text-gray-200 text-sm"></p>
+                    </div>
+                    <!-- Proposed Solution -->
+                    <div>
+                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Proposed Solution</h4>
+                        <p id="summary-solution" class="text-gray-200 text-sm"></p>
+                    </div>
+                    <!-- Risk Level -->
+                    <div class="flex items-center gap-3">
+                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Risk Level</h4>
+                        <span id="summary-risk" class="px-2 py-0.5 rounded text-xs font-medium"></span>
+                    </div>
+                    <!-- Affected Components -->
+                    <div id="summary-components-section">
+                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Affected Components</h4>
+                        <div id="summary-components" class="flex flex-wrap gap-1"></div>
+                    </div>
+                    <!-- Next Steps -->
+                    <div id="summary-steps-section">
+                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Next Steps</h4>
+                        <ul id="summary-steps" class="text-sm text-gray-200 list-disc list-inside space-y-1"></ul>
+                    </div>
+                    <!-- Code Change Required Section -->
+                    <div id="summary-code-change-section" class="hidden mt-4 p-4 bg-purple-900/30 border border-purple-700 rounded-lg">
+                        <div class="flex items-center gap-2 mb-3">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+                            </svg>
+                            <span class="text-purple-300 font-medium text-sm">This decision includes code changes.</span>
+                        </div>
+
+                        <!-- Initial state: Generate button -->
+                        <div id="code-prompt-initial" class="">
+                            <p class="text-gray-300 text-xs mb-3">Generate a coding prompt?</p>
+                            <button id="btn-generate-code-prompt" class="w-full bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center justify-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+                                </svg>
+                                <span id="btn-generate-code-prompt-text">Generate Coding Prompt</span>
+                            </button>
+                        </div>
+
+                        <!-- Loading state -->
+                        <div id="code-prompt-loading" class="hidden flex items-center justify-center py-4">
+                            <div class="h-5 w-5 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></div>
+                            <span class="ml-2 text-gray-400 text-sm">Generating prompt...</span>
+                        </div>
+
+                        <!-- Error state -->
+                        <div id="code-prompt-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-3 mt-2">
+                            <p class="text-red-300 text-xs" id="code-prompt-error-text">Failed to generate code prompt.</p>
+                        </div>
+
+                        <!-- Result state: Code prompt display -->
+                        <div id="code-prompt-result" class="hidden mt-3">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-xs font-medium text-gray-400">Generated Coding Prompt</span>
+                                <button id="btn-copy-code-prompt" class="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1 transition-colors">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
+                                        <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" />
+                                    </svg>
+                                    <span id="btn-copy-code-prompt-text">Copy</span>
+                                </button>
+                            </div>
+                            <textarea id="code-prompt-textarea" readonly class="w-full h-40 bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs text-gray-200 font-mono resize-none focus:outline-none focus:border-purple-500"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- Footer -->
+            <div class="px-5 py-4 border-t border-gray-700 flex justify-end flex-shrink-0">
+                <button id="btn-dismiss-summary" class="bg-gray-600 hover:bg-gray-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                    Close
+                </button>
+            </div>
+        </div>
+    </div>
 
     <script>
         // VS Code API for communication with the extension
@@ -558,6 +801,10 @@
         // Message recovery & deduplication
         let lastMessageTimestamp = 0;
         const seenMessageIds = new Set();
+
+        // Chat messages storage for summarization
+        // Each message: { role: 'host'|'engineer', text: string, timestamp: number }
+        const chatMessages = [];
 
         // DOM elements
         const roleBadge = document.getElementById('role-badge');
@@ -629,6 +876,69 @@
         const codeSnippetLines = document.getElementById('code-snippet-lines');
         const codeSnippetContent = document.getElementById('code-snippet-content');
         const btnClearSnippet = document.getElementById('btn-clear-snippet');
+
+        // AI Config modal elements
+        const aiConfigModal = document.getElementById('ai-config-modal');
+        const aiConfigBackdrop = document.getElementById('ai-config-backdrop');
+        const btnAiConfig = document.getElementById('btn-ai-config');
+        const btnCloseAiConfig = document.getElementById('btn-close-ai-config');
+        const btnRefreshAiStatus = document.getElementById('btn-refresh-ai-status');
+        const aiConfigLoading = document.getElementById('ai-config-loading');
+        const aiConfigError = document.getElementById('ai-config-error');
+        const aiConfigErrorText = document.getElementById('ai-config-error-text');
+        const aiConfigContent = document.getElementById('ai-config-content');
+        const aiSummaryEnabled = document.getElementById('ai-summary-enabled');
+        const aiSummaryIcon = document.getElementById('ai-summary-icon');
+        const aiSummaryStatusText = document.getElementById('ai-summary-status-text');
+        const aiActiveProvider = document.getElementById('ai-active-provider');
+        const aiActiveProviderStatus = document.getElementById('ai-active-provider-status');
+        const aiLastUpdated = document.getElementById('ai-last-updated');
+        const aiProvidersList = document.getElementById('ai-providers-list');
+        const aiNoProviders = document.getElementById('ai-no-providers');
+
+        // AI Summarize elements
+        const btnSummarize = document.getElementById('btn-summarize');
+        const btnSummarizeText = document.getElementById('btn-summarize-text');
+        const aiStatusText = document.getElementById('ai-status-text');
+
+        // Summary modal elements
+        const summaryModal = document.getElementById('summary-modal');
+        const summaryModalBackdrop = document.getElementById('summary-modal-backdrop');
+        const btnCloseSummary = document.getElementById('btn-close-summary');
+        const btnDismissSummary = document.getElementById('btn-dismiss-summary');
+        const summaryLoading = document.getElementById('summary-loading');
+        const summaryError = document.getElementById('summary-error');
+        const summaryErrorText = document.getElementById('summary-error-text');
+        const summaryContent = document.getElementById('summary-content');
+        const summaryTopic = document.getElementById('summary-topic');
+        const summaryProblem = document.getElementById('summary-problem');
+        const summarySolution = document.getElementById('summary-solution');
+        const summaryRisk = document.getElementById('summary-risk');
+        const summaryComponents = document.getElementById('summary-components');
+        const summaryComponentsSection = document.getElementById('summary-components-section');
+        const summarySteps = document.getElementById('summary-steps');
+        const summaryStepsSection = document.getElementById('summary-steps-section');
+        const summaryCodeChangeSection = document.getElementById('summary-code-change-section');
+        const btnGenerateCodePrompt = document.getElementById('btn-generate-code-prompt');
+        const btnGenerateCodePromptText = document.getElementById('btn-generate-code-prompt-text');
+        const codePromptInitial = document.getElementById('code-prompt-initial');
+        const codePromptLoading = document.getElementById('code-prompt-loading');
+        const codePromptError = document.getElementById('code-prompt-error');
+        const codePromptErrorText = document.getElementById('code-prompt-error-text');
+        const codePromptResult = document.getElementById('code-prompt-result');
+        const codePromptTextarea = document.getElementById('code-prompt-textarea');
+        const btnCopyCodePrompt = document.getElementById('btn-copy-code-prompt');
+        const btnCopyCodePromptText = document.getElementById('btn-copy-code-prompt-text');
+
+        // Track AI status
+        let aiSummaryEnabledState = false;
+        let aiActiveProviderState = null;
+
+        // Track current summary for code prompt generation
+        let currentSummaryData = null;
+
+        // Track generated code prompt
+        let generatedCodePrompt = null;
 
         // Track session state
         let sessionEnded = false;
@@ -1009,6 +1319,18 @@
                     // Received code snippet from extension (user selected code in editor)
                     handleCodeSnippetFromExtension(message);
                     break;
+                case 'aiStatus':
+                    // Received AI status from extension (proxied from backend)
+                    handleAiStatusResponse(message.data);
+                    break;
+                case 'summarizeResult':
+                    // Received summarize result from extension
+                    handleSummarizeResponse(message.data);
+                    break;
+                case 'codePromptResult':
+                    // Received code prompt result from extension
+                    handleCodePromptResponse(message.data);
+                    break;
             }
         });
 
@@ -1118,7 +1440,8 @@
 
         // Button click handlers
         btnCreateSummary.addEventListener('click', () => {
-            vscode.postMessage({ command: 'alert', text: 'Create Summary clicked (Lead feature)' });
+            // Use the same summary functionality as the sidebar button
+            requestSummarize();
         });
 
         btnGenerateChanges.addEventListener('click', () => {
@@ -1790,6 +2113,17 @@
          * @param {Object} msg - Message object with id, userId, displayName, role, content, ts.
          */
         function renderMessage(msg) {
+            // Store message for summarization (only text messages)
+            if (msg.content) {
+                // Map msg.role to API format: 'host' stays 'host', everything else is 'engineer'
+                const apiRole = msg.role === 'host' ? 'host' : 'engineer';
+                chatMessages.push({
+                    role: apiRole,
+                    text: msg.content,
+                    timestamp: msg.ts || Date.now() / 1000
+                });
+            }
+
             // Check if we need a date separator
             if (needsDateSeparator(msg)) {
                 renderDateSeparator(new Date(msg.ts * 1000));
@@ -2617,6 +2951,490 @@
                 console.error('[WebView] WebSocket not open');
             }
         }
+
+        // ============================================================
+        // AI Configuration Modal Functions
+        // ============================================================
+
+        /**
+         * Open the AI Configuration modal and fetch status.
+         */
+        function openAiConfigModal() {
+            aiConfigModal.classList.remove('hidden');
+            fetchAiStatus();
+        }
+
+        /**
+         * Close the AI Configuration modal.
+         */
+        function closeAiConfigModal() {
+            aiConfigModal.classList.add('hidden');
+        }
+
+        /**
+         * Fetch AI status from the backend via extension.
+         */
+        function fetchAiStatus() {
+            // Show loading state
+            aiConfigLoading.classList.remove('hidden');
+            aiConfigError.classList.add('hidden');
+            aiConfigContent.classList.add('hidden');
+
+            // Request AI status from extension (which proxies to backend)
+            vscode.postMessage({ command: 'getAiStatus' });
+        }
+
+        /**
+         * Handle AI status response from extension.
+         * @param {Object} data - AI status data or error
+         */
+        function handleAiStatusResponse(data) {
+            // Hide loading
+            aiConfigLoading.classList.add('hidden');
+
+            if (data.error) {
+                // Show error state
+                aiConfigError.classList.remove('hidden');
+                aiConfigErrorText.textContent = data.error;
+                aiConfigContent.classList.add('hidden');
+                return;
+            }
+
+            // Show content
+            aiConfigError.classList.add('hidden');
+            aiConfigContent.classList.remove('hidden');
+
+            // Update global AI status state
+            aiSummaryEnabledState = data.summary_enabled;
+            aiActiveProviderState = data.active_provider;
+
+            // Update summary enabled section
+            if (data.summary_enabled) {
+                aiSummaryEnabled.textContent = 'Enabled';
+                aiSummaryEnabled.className = 'px-3 py-1 rounded-full text-xs font-medium bg-green-600 text-white';
+                aiSummaryIcon.className = 'h-10 w-10 rounded-full flex items-center justify-center bg-green-600/20 text-green-400';
+                aiSummaryStatusText.textContent = data.active_provider ? 'Ready to summarize' : 'No provider available';
+                aiSummaryStatusText.className = data.active_provider ? 'text-xs text-green-400' : 'text-xs text-yellow-400';
+            } else {
+                aiSummaryEnabled.textContent = 'Disabled';
+                aiSummaryEnabled.className = 'px-3 py-1 rounded-full text-xs font-medium bg-gray-600 text-gray-300';
+                aiSummaryIcon.className = 'h-10 w-10 rounded-full flex items-center justify-center bg-gray-600/20 text-gray-400';
+                aiSummaryStatusText.textContent = 'AI summarization is disabled';
+                aiSummaryStatusText.className = 'text-xs text-gray-400';
+            }
+
+            // Update active provider card
+            aiActiveProvider.textContent = data.active_provider || 'None';
+
+            // Find active provider health status
+            const activeProviderData = data.providers?.find(p => p.name === data.active_provider);
+            if (data.active_provider && activeProviderData) {
+                if (activeProviderData.healthy) {
+                    aiActiveProviderStatus.className = 'flex items-center gap-1 text-xs text-green-400';
+                    aiActiveProviderStatus.innerHTML = `
+                        <span class="inline-block h-2 w-2 rounded-full bg-green-400 animate-pulse"></span>
+                        Healthy
+                    `;
+                } else {
+                    aiActiveProviderStatus.className = 'flex items-center gap-1 text-xs text-red-400';
+                    aiActiveProviderStatus.innerHTML = `
+                        <span class="inline-block h-2 w-2 rounded-full bg-red-400"></span>
+                        Unhealthy
+                    `;
+                }
+            } else {
+                aiActiveProviderStatus.className = 'flex items-center gap-1 text-xs text-gray-400';
+                aiActiveProviderStatus.innerHTML = '';
+            }
+
+            // Update last updated timestamp
+            const now = new Date();
+            aiLastUpdated.textContent = `Updated ${now.toLocaleTimeString()}`;
+
+            // Update the sidebar AI status indicator
+            updateAiStatusIndicator();
+
+            // Update providers list
+            aiProvidersList.innerHTML = '';
+            if (data.providers && data.providers.length > 0) {
+                aiNoProviders.classList.add('hidden');
+                aiProvidersList.classList.remove('hidden');
+
+                data.providers.forEach(provider => {
+                    const row = document.createElement('div');
+                    const isActive = provider.name === data.active_provider;
+                    row.className = isActive
+                        ? 'flex items-center justify-between px-3 py-2.5 bg-purple-900/20'
+                        : 'flex items-center justify-between px-3 py-2.5';
+
+                    const leftSection = document.createElement('div');
+                    leftSection.className = 'flex items-center gap-2';
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.className = 'text-sm text-gray-300 font-mono';
+                    nameSpan.textContent = provider.name;
+
+                    leftSection.appendChild(nameSpan);
+
+                    // Add "Active" badge if this is the active provider
+                    if (isActive) {
+                        const activeBadge = document.createElement('span');
+                        activeBadge.className = 'px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-600 text-white uppercase';
+                        activeBadge.textContent = 'Active';
+                        leftSection.appendChild(activeBadge);
+                    }
+
+                    const statusSpan = document.createElement('span');
+                    if (provider.healthy) {
+                        statusSpan.className = 'flex items-center gap-1.5 text-xs text-green-400';
+                        statusSpan.innerHTML = `
+                            <span class="inline-block h-2 w-2 rounded-full bg-green-400"></span>
+                            Healthy
+                        `;
+                    } else {
+                        statusSpan.className = 'flex items-center gap-1.5 text-xs text-red-400';
+                        statusSpan.innerHTML = `
+                            <span class="inline-block h-2 w-2 rounded-full bg-red-400"></span>
+                            Unhealthy
+                        `;
+                    }
+
+                    row.appendChild(leftSection);
+                    row.appendChild(statusSpan);
+                    aiProvidersList.appendChild(row);
+                });
+            } else {
+                aiProvidersList.classList.add('hidden');
+                aiNoProviders.classList.remove('hidden');
+            }
+        }
+
+        // AI Config modal event listeners
+        if (btnAiConfig) {
+            btnAiConfig.addEventListener('click', openAiConfigModal);
+        } else {
+            console.error('[WebView] btnAiConfig element not found!');
+        }
+        if (btnCloseAiConfig) {
+            btnCloseAiConfig.addEventListener('click', closeAiConfigModal);
+        }
+        if (aiConfigBackdrop) {
+            aiConfigBackdrop.addEventListener('click', closeAiConfigModal);
+        }
+        if (btnRefreshAiStatus) {
+            btnRefreshAiStatus.addEventListener('click', fetchAiStatus);
+        }
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !aiConfigModal.classList.contains('hidden')) {
+                closeAiConfigModal();
+            }
+        });
+
+        // ============================================================
+        // AI SUMMARIZE FUNCTIONALITY
+        // ============================================================
+
+        /**
+         * Update the AI status indicator in the sidebar footer.
+         */
+        function updateAiStatusIndicator() {
+            if (!aiStatusText) return;
+
+            if (aiSummaryEnabledState && aiActiveProviderState) {
+                aiStatusText.textContent = aiActiveProviderState;
+                aiStatusText.className = 'text-green-400';
+                if (btnSummarize) {
+                    btnSummarize.disabled = false;
+                }
+            } else if (aiSummaryEnabledState) {
+                aiStatusText.textContent = 'No provider';
+                aiStatusText.className = 'text-yellow-400';
+                if (btnSummarize) {
+                    btnSummarize.disabled = true;
+                }
+            } else {
+                aiStatusText.textContent = 'Disabled';
+                aiStatusText.className = 'text-gray-500';
+                if (btnSummarize) {
+                    btnSummarize.disabled = true;
+                }
+            }
+        }
+
+        /**
+         * Open the summary modal in loading state.
+         */
+        function openSummaryModal() {
+            summaryModal.classList.remove('hidden');
+            summaryLoading.classList.remove('hidden');
+            summaryError.classList.add('hidden');
+            summaryContent.classList.add('hidden');
+            // Reset code prompt UI when opening modal
+            resetCodePromptUI();
+        }
+
+        /**
+         * Close the summary modal.
+         */
+        function closeSummaryModal() {
+            summaryModal.classList.add('hidden');
+        }
+
+        /**
+         * Request AI summary of the current chat.
+         */
+        function requestSummarize() {
+            if (!aiSummaryEnabledState || !aiActiveProviderState) {
+                console.warn('[WebView] Cannot summarize: AI not available');
+                vscode.postMessage({
+                    command: 'alert',
+                    text: 'AI summarization is not available. Please check AI configuration.'
+                });
+                return;
+            }
+
+            if (chatMessages.length === 0) {
+                console.warn('[WebView] No messages to summarize');
+                vscode.postMessage({
+                    command: 'alert',
+                    text: 'No messages to summarize. Start a conversation first.'
+                });
+                return;
+            }
+
+            // Open modal and show loading state
+            openSummaryModal();
+
+            // Update button state
+            if (btnSummarize) {
+                btnSummarize.disabled = true;
+            }
+            if (btnSummarizeText) {
+                btnSummarizeText.textContent = 'Summarizing...';
+            }
+
+            console.log('[WebView] Requesting summary for', chatMessages.length, 'messages');
+
+            // Request summary from extension with properly formatted messages
+            vscode.postMessage({
+                command: 'summarize',
+                messages: chatMessages
+            });
+        }
+
+        /**
+         * Handle summarize response from extension.
+         * @param {Object} data - The structured summary response or error
+         */
+        function handleSummarizeResponse(data) {
+            // Reset button state
+            if (btnSummarize) {
+                btnSummarize.disabled = false;
+            }
+            if (btnSummarizeText) {
+                btnSummarizeText.textContent = 'Summarize Chat';
+            }
+
+            // Hide loading
+            summaryLoading.classList.add('hidden');
+
+            if (data.error) {
+                console.error('[WebView] Summarize error:', data.error);
+                summaryError.classList.remove('hidden');
+                summaryErrorText.textContent = data.error;
+                summaryContent.classList.add('hidden');
+                return;
+            }
+
+            // Store summary data for code prompt generation
+            currentSummaryData = data;
+
+            // Display structured summary
+            summaryError.classList.add('hidden');
+            summaryContent.classList.remove('hidden');
+
+            // Topic
+            summaryTopic.textContent = data.topic || 'No topic identified';
+
+            // Problem Statement
+            summaryProblem.textContent = data.problem_statement || 'No problem statement identified';
+
+            // Proposed Solution
+            summarySolution.textContent = data.proposed_solution || 'No solution proposed';
+
+            // Risk Level with color coding
+            const riskLevel = data.risk_level || 'low';
+            summaryRisk.textContent = riskLevel.charAt(0).toUpperCase() + riskLevel.slice(1);
+            if (riskLevel === 'high') {
+                summaryRisk.className = 'px-2 py-0.5 rounded text-xs font-medium bg-red-600 text-white';
+            } else if (riskLevel === 'medium') {
+                summaryRisk.className = 'px-2 py-0.5 rounded text-xs font-medium bg-yellow-600 text-white';
+            } else {
+                summaryRisk.className = 'px-2 py-0.5 rounded text-xs font-medium bg-green-600 text-white';
+            }
+
+            // Affected Components
+            const components = data.affected_components || [];
+            if (components.length > 0) {
+                summaryComponentsSection.classList.remove('hidden');
+                summaryComponents.innerHTML = components.map(c =>
+                    `<span class="px-2 py-1 bg-gray-700 text-gray-200 text-xs rounded">${escapeHtml(c)}</span>`
+                ).join('');
+            } else {
+                summaryComponentsSection.classList.add('hidden');
+            }
+
+            // Next Steps
+            const steps = data.next_steps || [];
+            if (steps.length > 0) {
+                summaryStepsSection.classList.remove('hidden');
+                summarySteps.innerHTML = steps.map(s =>
+                    `<li>${escapeHtml(s)}</li>`
+                ).join('');
+            } else {
+                summaryStepsSection.classList.add('hidden');
+            }
+
+            // Code Change Required section
+            if (data.requires_code_change) {
+                summaryCodeChangeSection.classList.remove('hidden');
+            } else {
+                summaryCodeChangeSection.classList.add('hidden');
+            }
+
+            console.log('[WebView] Summary displayed successfully');
+        }
+
+        // Summary modal event listeners
+        if (btnCloseSummary) {
+            btnCloseSummary.addEventListener('click', closeSummaryModal);
+        }
+        if (btnDismissSummary) {
+            btnDismissSummary.addEventListener('click', closeSummaryModal);
+        }
+        if (summaryModalBackdrop) {
+            summaryModalBackdrop.addEventListener('click', closeSummaryModal);
+        }
+
+        /**
+         * Request code prompt generation from the backend.
+         */
+        function requestCodePrompt() {
+            if (!currentSummaryData) {
+                console.warn('[WebView] No summary data available for code prompt generation');
+                return;
+            }
+
+            // Show loading state
+            codePromptInitial.classList.add('hidden');
+            codePromptLoading.classList.remove('hidden');
+            codePromptError.classList.add('hidden');
+            codePromptResult.classList.add('hidden');
+
+            // Disable button
+            if (btnGenerateCodePrompt) {
+                btnGenerateCodePrompt.disabled = true;
+            }
+
+            console.log('[WebView] Requesting code prompt for summary:', currentSummaryData.topic);
+
+            // Request code prompt from extension
+            vscode.postMessage({
+                command: 'generateCodePrompt',
+                decisionSummary: currentSummaryData
+            });
+        }
+
+        /**
+         * Handle code prompt response from extension.
+         * @param {Object} data - The code prompt response or error
+         */
+        function handleCodePromptResponse(data) {
+            // Hide loading
+            codePromptLoading.classList.add('hidden');
+
+            // Re-enable button
+            if (btnGenerateCodePrompt) {
+                btnGenerateCodePrompt.disabled = false;
+            }
+
+            if (data.error) {
+                console.error('[WebView] Code prompt error:', data.error);
+                codePromptError.classList.remove('hidden');
+                codePromptErrorText.textContent = data.error;
+                codePromptInitial.classList.remove('hidden');
+                return;
+            }
+
+            if (data.code_prompt) {
+                // Store the generated prompt
+                generatedCodePrompt = data.code_prompt;
+
+                // Show the result
+                codePromptError.classList.add('hidden');
+                codePromptResult.classList.remove('hidden');
+                codePromptTextarea.value = data.code_prompt;
+
+                console.log('[WebView] Code prompt generated successfully');
+            }
+        }
+
+        /**
+         * Copy code prompt to clipboard.
+         */
+        function copyCodePromptToClipboard() {
+            if (!generatedCodePrompt) {
+                return;
+            }
+
+            navigator.clipboard.writeText(generatedCodePrompt).then(() => {
+                // Show success feedback
+                if (btnCopyCodePromptText) {
+                    const originalText = btnCopyCodePromptText.textContent;
+                    btnCopyCodePromptText.textContent = 'Copied!';
+                    setTimeout(() => {
+                        btnCopyCodePromptText.textContent = originalText;
+                    }, 2000);
+                }
+                console.log('[WebView] Code prompt copied to clipboard');
+            }).catch(err => {
+                console.error('[WebView] Failed to copy code prompt:', err);
+            });
+        }
+
+        /**
+         * Reset code prompt UI state (called when summary modal is opened).
+         */
+        function resetCodePromptUI() {
+            codePromptInitial.classList.remove('hidden');
+            codePromptLoading.classList.add('hidden');
+            codePromptError.classList.add('hidden');
+            codePromptResult.classList.add('hidden');
+            generatedCodePrompt = null;
+            if (codePromptTextarea) {
+                codePromptTextarea.value = '';
+            }
+        }
+
+        // Generate Code Prompt button handler
+        if (btnGenerateCodePrompt) {
+            btnGenerateCodePrompt.addEventListener('click', requestCodePrompt);
+        }
+
+        // Copy Code Prompt button handler
+        if (btnCopyCodePrompt) {
+            btnCopyCodePrompt.addEventListener('click', copyCodePromptToClipboard);
+        }
+
+        // Summarize button event listener
+        if (btnSummarize) {
+            btnSummarize.addEventListener('click', requestSummarize);
+        }
+
+        // Fetch AI status on load to update the indicator
+        vscode.postMessage({ command: 'getAiStatus' });
 
         // Initialize UI from the current FSM state
         render(conductorState, null);
