@@ -118,6 +118,16 @@ npm run compile
 
 Open `extension/` in VS Code and press `F5`.
 
+4. Build extension package (VSIX, sometimes referred to as VSX):
+
+```bash
+cd extension
+npx @vscode/vsce package
+```
+
+This generates `ai-collab-0.0.1.vsix`.  
+Install it in VS Code via `Extensions: Install from VSIX...`.
+
 ### Docs
 
 - Backend guide: `backend/README.md`
@@ -240,6 +250,16 @@ npm run compile
 ```
 
 在 VS Code 打开 `extension/` 后按 `F5`。
+
+4. 打包扩展（VSIX，你说的 VSX 一般指这个）：
+
+```bash
+cd extension
+npx @vscode/vsce package
+```
+
+会生成 `ai-collab-0.0.1.vsix`。  
+在 VS Code 里通过 `Extensions: Install from VSIX...` 安装即可。
 
 ### 文档索引
 

@@ -122,6 +122,23 @@ class LoggingConfig(BaseModel):
     audit_path: str = "audit_logs.duckdb"
 
 
+class SummaryConfig(BaseModel):
+    """Summary/AI provider configuration.
+
+    API keys are configured directly in YAML. Empty string means the provider is disabled.
+    The resolver will try providers in order: claude_bedrock first, then claude_direct.
+    Only providers with non-empty API keys will be health-checked.
+
+    Attributes:
+        enabled: Whether AI-powered summarization is enabled.
+        claude_bedrock_api_key: AWS credentials for Bedrock (format: "ACCESS_KEY:SECRET_KEY" or "ACCESS_KEY:SECRET_KEY:SESSION_TOKEN").
+        claude_direct_api_key: Anthropic API key for direct Claude access.
+    """
+    enabled: bool = False
+    claude_bedrock_api_key: str = ""
+    claude_direct_api_key: str = ""
+
+
 class ConductorConfig(BaseModel):
     """Main configuration container for all Conductor settings.
 
@@ -132,6 +149,7 @@ class ConductorConfig(BaseModel):
         change_limits: Code change limits.
         session: Chat session settings.
         logging: Logging and audit settings.
+        summary: Summary/AI provider settings.
     """
     server: ServerConfig = ServerConfig()
     ngrok: NgrokConfig = NgrokConfig()
@@ -139,6 +157,7 @@ class ConductorConfig(BaseModel):
     change_limits: ChangeLimitsConfig = ChangeLimitsConfig()
     session: SessionConfig = SessionConfig()
     logging: LoggingConfig = LoggingConfig()
+    summary: SummaryConfig = SummaryConfig()
 
 
 # =============================================================================

@@ -317,6 +317,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 case 'navigateToCode':
                     this._handleNavigateToCode(message);
                     return;
+                case 'getAiStatus':
+                    this._handleGetAiStatus();
+                    return;
+                case 'summarize':
+                    this._handleSummarize(message.messages);
+                    return;
+                case 'generateCodePrompt':
+                    this._handleGenerateCodePrompt(message.decisionSummary);
+                    return;
             }
         });
 
@@ -994,6 +1003,152 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         } catch (error) {
             console.error('[Conductor] Navigation error:', error);
             vscode.window.showErrorMessage(`Failed to navigate to code: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+
+    /**
+     * Handle request to get AI status from the backend.
+     * Fetches /ai/status and sends the result to the WebView.
+     */
+    private async _handleGetAiStatus(): Promise<void> {
+        try {
+            console.log('[Conductor] Fetching AI status...');
+            const response = await fetch(`${getBackendUrl()}/ai/status`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.warn('[Conductor] AI status request failed:', response.status, errorText);
+                this._view?.webview.postMessage({
+                    command: 'aiStatus',
+                    data: { error: `Failed to fetch AI status: ${response.status}` }
+                });
+                return;
+            }
+
+            const data = await response.json() as {
+                summary_enabled: boolean;
+                active_provider: string | null;
+                providers: Array<{ name: string; healthy: boolean }>;
+            };
+            console.log('[Conductor] AI status received:', data);
+
+            this._view?.webview.postMessage({
+                command: 'aiStatus',
+                data: data
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] Failed to get AI status:', msg);
+            this._view?.webview.postMessage({
+                command: 'aiStatus',
+                data: { error: `Cannot connect to backend: ${msg}` }
+            });
+        }
+    }
+
+    /**
+     * Handle request to summarize chat messages.
+     * Sends messages to /ai/summarize and returns the structured decision summary.
+     *
+     * @param messages Array of message objects with role, text, and timestamp
+     */
+    private async _handleSummarize(messages: Array<{ role: 'host' | 'engineer'; text: string; timestamp: number }>): Promise<void> {
+        try {
+            console.log('[Conductor] Requesting AI summary for', messages.length, 'messages');
+            const response = await fetch(`${getBackendUrl()}/ai/summarize`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ messages })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.warn('[Conductor] Summarize request failed:', response.status, errorText);
+                this._view?.webview.postMessage({
+                    command: 'summarizeResult',
+                    data: { error: `Failed to summarize: ${response.status} - ${errorText}` }
+                });
+                return;
+            }
+
+            // Structured DecisionSummaryResponse from backend
+            const data = await response.json() as {
+                type: 'decision_summary';
+                topic: string;
+                problem_statement: string;
+                proposed_solution: string;
+                requires_code_change: boolean;
+                affected_components: string[];
+                risk_level: 'low' | 'medium' | 'high';
+                next_steps: string[];
+            };
+            console.log('[Conductor] Summary received:', data.topic);
+
+            this._view?.webview.postMessage({
+                command: 'summarizeResult',
+                data: data
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] Failed to summarize:', msg);
+            this._view?.webview.postMessage({
+                command: 'summarizeResult',
+                data: { error: `Cannot connect to backend: ${msg}` }
+            });
+        }
+    }
+
+    /**
+     * Handle code prompt generation request.
+     * Calls POST /ai/code-prompt with the decision summary.
+     * @param decisionSummary The decision summary from the summarize result
+     */
+    private async _handleGenerateCodePrompt(decisionSummary: {
+        type: 'decision_summary';
+        topic: string;
+        problem_statement: string;
+        proposed_solution: string;
+        requires_code_change: boolean;
+        affected_components: string[];
+        risk_level: 'low' | 'medium' | 'high';
+        next_steps: string[];
+    }): Promise<void> {
+        try {
+            console.log('[Conductor] Requesting code prompt for:', decisionSummary.topic);
+            const response = await fetch(`${getBackendUrl()}/ai/code-prompt`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ decision_summary: decisionSummary })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.warn('[Conductor] Code prompt request failed:', response.status, errorText);
+                this._view?.webview.postMessage({
+                    command: 'codePromptResult',
+                    data: { error: `Failed to generate code prompt: ${response.status} - ${errorText}` }
+                });
+                return;
+            }
+
+            const data = await response.json() as { code_prompt: string };
+            console.log('[Conductor] Code prompt generated successfully');
+
+            this._view?.webview.postMessage({
+                command: 'codePromptResult',
+                data: data
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] Failed to generate code prompt:', msg);
+            this._view?.webview.postMessage({
+                command: 'codePromptResult',
+                data: { error: `Cannot connect to backend: ${msg}` }
+            });
         }
     }
 

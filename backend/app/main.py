@@ -10,6 +10,7 @@ Modules:
     - agent: AI code generation (currently MockAgent for testing)
     - policy: Auto-apply policy evaluation
     - audit: DuckDB-based audit logging
+    - ai_provider: AI provider resolution and management
 """
 import logging
 from contextlib import asynccontextmanager
@@ -17,6 +18,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.agent.router import router as agent_router
+from app.ai_provider.resolver import ProviderResolver, set_resolver
+from app.ai_provider.router import router as ai_router
 from app.audit.router import router as audit_router
 from app.chat.router import router as chat_router
 from app.config import get_config
@@ -65,6 +68,19 @@ async def lifespan(app: FastAPI):
             f"http://{config.server.host}:{config.server.port}"
         )
 
+    # Initialize AI provider resolver if summary is enabled
+    if config.summary.enabled:
+        logger.info("Summary enabled, resolving AI provider...")
+        resolver = ProviderResolver(config.summary)
+        active = resolver.resolve()
+        set_resolver(resolver)
+        if active:
+            logger.info(f"✅ AI provider active: {resolver.active_provider_name}")
+        else:
+            logger.warning("⚠️ No healthy AI provider found")
+    else:
+        logger.info("Summary disabled, skipping AI provider resolution")
+
     yield  # Application runs here
 
     # Shutdown
@@ -87,6 +103,7 @@ app.include_router(agent_router)
 app.include_router(policy_router)
 app.include_router(audit_router)
 app.include_router(files_router)
+app.include_router(ai_router)
 
 
 @app.get("/health")
