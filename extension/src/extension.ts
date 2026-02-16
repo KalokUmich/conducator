@@ -350,6 +350,12 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 case 'generateCodePromptAndPost':
                     this._handleGenerateCodePromptAndPost(message.decisionSummary, message.roomId);
                     return;
+                case 'getRoomSettings':
+                    this._handleGetRoomSettings(message.roomId);
+                    return;
+                case 'saveRoomSettings':
+                    this._handleSaveRoomSettings(message.roomId, message.codeStyle);
+                    return;
                 case 'ssoLogin':
                     this._handleSSOLogin(message.provider || 'aws');
                     return;
@@ -1259,12 +1265,13 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     }): Promise<void> {
         try {
             console.log('[Conductor] Requesting code prompt for:', decisionSummary.topic);
+            const roomId = getSessionService().getRoomId();
             const response = await fetch(`${getBackendUrl()}/ai/code-prompt`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ decision_summary: decisionSummary })
+                body: JSON.stringify({ decision_summary: decisionSummary, room_id: roomId })
             });
 
             if (!response.ok) {
@@ -1316,7 +1323,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ decision_summary: { ...decisionSummary, type: 'decision_summary' } })
+                body: JSON.stringify({ decision_summary: { ...decisionSummary, type: 'decision_summary' }, room_id: roomId })
             });
 
             if (!response.ok) {
@@ -1365,6 +1372,76 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             console.error('[Conductor] Failed to generate/post code prompt:', msg);
             this._view?.webview.postMessage({
                 command: 'codePromptPostResult',
+                data: { error: `Cannot connect to backend: ${msg}` }
+            });
+        }
+    }
+
+    // ----- Room Settings handlers ------------------------------------------
+
+    /**
+     * Handle get room settings request from WebView.
+     * Calls GET /rooms/{roomId}/settings and forwards response.
+     */
+    private async _handleGetRoomSettings(roomId: string): Promise<void> {
+        try {
+            console.log('[Conductor] Fetching room settings for:', roomId);
+            const response = await fetch(`${getBackendUrl()}/rooms/${roomId}/settings`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                this._view?.webview.postMessage({
+                    command: 'roomSettings',
+                    data: { error: `Failed to fetch settings: ${response.status} - ${errorText}` }
+                });
+                return;
+            }
+
+            const data = await response.json();
+            this._view?.webview.postMessage({
+                command: 'roomSettings',
+                data: data
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this._view?.webview.postMessage({
+                command: 'roomSettings',
+                data: { error: `Cannot connect to backend: ${msg}` }
+            });
+        }
+    }
+
+    /**
+     * Handle save room settings request from WebView.
+     * Calls PUT /rooms/{roomId}/settings and forwards result.
+     */
+    private async _handleSaveRoomSettings(roomId: string, codeStyle: string): Promise<void> {
+        try {
+            console.log('[Conductor] Saving room settings for:', roomId);
+            const response = await fetch(`${getBackendUrl()}/rooms/${roomId}/settings`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code_style: codeStyle })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                this._view?.webview.postMessage({
+                    command: 'saveRoomSettingsResult',
+                    data: { error: `Failed to save settings: ${response.status} - ${errorText}` }
+                });
+                return;
+            }
+
+            const data = await response.json();
+            this._view?.webview.postMessage({
+                command: 'saveRoomSettingsResult',
+                data: data
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this._view?.webview.postMessage({
+                command: 'saveRoomSettingsResult',
                 data: { error: `Cannot connect to backend: ${msg}` }
             });
         }
