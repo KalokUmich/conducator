@@ -64,7 +64,7 @@ VS Code Extension (TypeScript)
 Backend (FastAPI)
   ├─ /ws/chat/{room_id} + /chat/*
   ├─ /ai/* (status, summarize, code prompt)
-  ├─ /auth/* (SSO login)
+  ├─ /auth/* (AWS SSO + Google OAuth login)
   ├─ /generate-changes
   ├─ /policy/*
   ├─ /audit/*
@@ -213,7 +213,7 @@ VS Code Extension (TypeScript)
 Backend (FastAPI)
   ├─ /ws/chat/{room_id} + /chat/*
   ├─ /ai/*（status/summarize/code-prompt）
-  ├─ /auth/*（SSO 登录）
+  ├─ /auth/*（AWS SSO + Google OAuth 登录）
   ├─ /generate-changes
   ├─ /policy/*
   ├─ /audit/*

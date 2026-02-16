@@ -38,11 +38,11 @@ cd backend
 ```
 
 Current collected count:
-- `224`
+- `243`
 
 Current breakdown:
 - `tests/test_ai_provider.py`: 95
-- `tests/test_auth.py`: 19
+- `tests/test_auth.py`: 38
 - `tests/test_audit.py`: 14
 - `tests/test_auto_apply_policy.py`: 28
 - `tests/test_chat.py`: 8
@@ -221,11 +221,11 @@ cd backend
 ```
 
 当前收集数量：
-- `224`
+- `243`
 
 当前分布：
 - `tests/test_ai_provider.py`: 95
-- `tests/test_auth.py`: 19
+- `tests/test_auth.py`: 38
 - `tests/test_audit.py`: 14
 - `tests/test_auto_apply_policy.py`: 28
 - `tests/test_chat.py`: 8

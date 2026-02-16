@@ -84,8 +84,11 @@ Docs:
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/auth/sso/start` | Start SSO device authorization flow |
-| POST | `/auth/sso/poll` | Poll for token and resolve identity |
+| POST | `/auth/sso/start` | Start AWS SSO device authorization flow |
+| POST | `/auth/sso/poll` | Poll for AWS SSO token and resolve identity |
+| POST | `/auth/google/start` | Start Google OAuth device authorization flow |
+| POST | `/auth/google/poll` | Poll for Google OAuth token and resolve identity |
+| GET | `/auth/providers` | List enabled auth providers |
 
 ### AI Provider Notes
 
@@ -212,7 +215,7 @@ curl -X POST http://localhost:8000/policy/evaluate-auto-apply \
 
 ### Tests
 
-Current backend collection count is `224`.
+Current backend collection count is `243`.
 
 ```bash
 cd backend
@@ -222,7 +225,7 @@ cd backend
 
 Breakdown:
 - `tests/test_ai_provider.py`: 95
-- `tests/test_auth.py`: 19
+- `tests/test_auth.py`: 38
 - `tests/test_audit.py`: 14
 - `tests/test_auto_apply_policy.py`: 28
 - `tests/test_chat.py`: 8
@@ -318,8 +321,11 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 | Method | Path | 说明 |
 |---|---|---|
-| POST | `/auth/sso/start` | 启动 SSO 设备授权流程 |
-| POST | `/auth/sso/poll` | 轮询 token 并解析身份 |
+| POST | `/auth/sso/start` | 启动 AWS SSO 设备授权流程 |
+| POST | `/auth/sso/poll` | 轮询 AWS SSO token 并解析身份 |
+| POST | `/auth/google/start` | 启动 Google OAuth 设备授权流程 |
+| POST | `/auth/google/poll` | 轮询 Google OAuth token 并解析身份 |
+| GET | `/auth/providers` | 列出启用的认证提供商 |
 
 ### AI Provider 说明
 
@@ -341,7 +347,7 @@ cd backend
 
 分布：
 - `tests/test_ai_provider.py`: 95
-- `tests/test_auth.py`: 19
+- `tests/test_auth.py`: 38
 - `tests/test_audit.py`: 14
 - `tests/test_auto_apply_policy.py`: 28
 - `tests/test_chat.py`: 8

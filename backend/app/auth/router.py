@@ -1,8 +1,11 @@
-"""Auth router for AWS SSO login endpoints.
+"""Auth router for SSO login endpoints (AWS SSO + Google OAuth).
 
 Endpoints:
-    POST /auth/sso/start - Start SSO device authorization flow
-    POST /auth/sso/poll  - Poll for token and resolve identity
+    POST /auth/sso/start     - Start AWS SSO device authorization flow
+    POST /auth/sso/poll       - Poll for AWS SSO token and resolve identity
+    POST /auth/google/start   - Start Google OAuth device authorization flow
+    POST /auth/google/poll    - Poll for Google OAuth token and resolve identity
+    GET  /auth/providers      - List enabled auth providers
 """
 import logging
 
@@ -11,6 +14,7 @@ from pydantic import BaseModel
 
 from app.config import get_config
 
+from .google_service import GoogleSSOService
 from .service import SSOService
 
 logger = logging.getLogger(__name__)
@@ -90,3 +94,95 @@ async def sso_poll(request: SSOPollRequest) -> dict:
             return {"status": "expired", "error": error_msg}
 
         return {"status": "error", "error": error_msg}
+
+
+# =============================================================================
+# Google OAuth SSO Endpoints
+# =============================================================================
+
+
+class GooglePollRequest(BaseModel):
+    """Request body for polling Google OAuth token status."""
+    device_code: str
+
+
+@router.post("/google/start")
+async def google_start() -> dict:
+    """Start Google OAuth 2.0 device authorization flow.
+
+    Reads Google SSO config from settings and secrets.
+    Returns verification URL, user code, device code, and interval.
+    """
+    config = get_config()
+    if not config.google_sso.enabled:
+        raise HTTPException(status_code=400, detail="Google SSO is not enabled")
+    if not config.google_sso_secrets.client_id:
+        raise HTTPException(status_code=400, detail="Google SSO client_id is not configured")
+
+    try:
+        service = GoogleSSOService(
+            client_id=config.google_sso_secrets.client_id,
+            client_secret=config.google_sso_secrets.client_secret,
+        )
+        result = service.start_device_flow()
+        return result
+    except Exception as e:
+        logger.error(f"Google SSO start failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/google/poll")
+async def google_poll(request: GooglePollRequest) -> dict:
+    """Poll for Google OAuth token completion and resolve identity.
+
+    Returns status: pending, complete, expired, or error.
+    When complete, includes the user's identity information.
+    """
+    config = get_config()
+    if not config.google_sso.enabled:
+        raise HTTPException(status_code=400, detail="Google SSO is not enabled")
+
+    try:
+        service = GoogleSSOService(
+            client_id=config.google_sso_secrets.client_id,
+            client_secret=config.google_sso_secrets.client_secret,
+        )
+
+        access_token = service.poll_for_token(device_code=request.device_code)
+
+        if access_token is None:
+            return {"status": "pending"}
+
+        # Token obtained — resolve identity
+        identity = service.get_identity(access_token)
+        return {
+            "status": "complete",
+            "identity": identity,
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Google SSO poll failed: {error_msg}")
+
+        if "expired" in error_msg.lower():
+            return {"status": "expired", "error": error_msg}
+
+        return {"status": "error", "error": error_msg}
+
+
+# =============================================================================
+# Provider Discovery Endpoint
+# =============================================================================
+
+
+@router.get("/providers")
+async def auth_providers() -> dict:
+    """List authentication providers that are both enabled and properly configured.
+
+    A provider is only reported as available when its enabled flag is true
+    AND the required credentials/config are present.
+    """
+    config = get_config()
+    return {
+        "aws": config.sso.enabled and bool(config.sso.start_url),
+        "google": config.google_sso.enabled and bool(config.google_sso_secrets.client_id),
+    }
