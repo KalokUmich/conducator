@@ -103,6 +103,26 @@ class SSOConfig(BaseModel):
     region: str = "us-east-1"
 
 
+class GoogleSSOConfig(BaseModel):
+    """Google OAuth SSO settings (non-secret).
+
+    Attributes:
+        enabled: Whether Google SSO login is enabled.
+    """
+    enabled: bool = False
+
+
+class GoogleSSOSecretsConfig(BaseModel):
+    """Google OAuth SSO secrets.
+
+    Attributes:
+        client_id: Google OAuth client ID.
+        client_secret: Google OAuth client secret.
+    """
+    client_id: str = ""
+    client_secret: str = ""
+
+
 class SessionConfig(BaseModel):
     """Chat session configuration.
 
@@ -195,9 +215,11 @@ class SecretsConfig(BaseModel):
     Attributes:
         ai_providers: AI provider API keys and credentials.
         ngrok: Ngrok authentication token.
+        google_sso: Google OAuth SSO credentials.
     """
     ai_providers: AIProvidersSecretsConfig = AIProvidersSecretsConfig()
     ngrok: NgrokSecretsConfig = NgrokSecretsConfig()
+    google_sso: GoogleSSOSecretsConfig = GoogleSSOSecretsConfig()
 
 
 # =============================================================================
@@ -306,6 +328,7 @@ class SettingsConfig(BaseModel):
     session: SessionConfig = SessionConfig()
     logging: LoggingConfig = LoggingConfig()
     sso: SSOConfig = SSOConfig()
+    google_sso: GoogleSSOConfig = GoogleSSOConfig()
     summary: SummaryConfig = SummaryConfig()
     ai_provider_settings: AIProviderSettingsConfig = AIProviderSettingsConfig()
     ai_models: list[AIModelConfig] = DEFAULT_AI_MODELS.copy()
@@ -332,6 +355,8 @@ class ConductorConfig(BaseModel):
         ai_provider_settings: AI provider enable flags.
         ai_providers: AI provider credentials (secrets).
         ai_models: AI model configurations.
+        google_sso: Google SSO settings.
+        google_sso_secrets: Google SSO credentials (secrets).
     """
     server: ServerConfig = ServerConfig()
     ngrok_settings: NgrokSettingsConfig = NgrokSettingsConfig()
@@ -340,9 +365,11 @@ class ConductorConfig(BaseModel):
     session: SessionConfig = SessionConfig()
     logging: LoggingConfig = LoggingConfig()
     sso: SSOConfig = SSOConfig()
+    google_sso: GoogleSSOConfig = GoogleSSOConfig()
     summary: SummaryConfig = SummaryConfig()
     ai_provider_settings: AIProviderSettingsConfig = AIProviderSettingsConfig()
     ai_providers: AIProvidersSecretsConfig = AIProvidersSecretsConfig()
+    google_sso_secrets: GoogleSSOSecretsConfig = GoogleSSOSecretsConfig()
     ai_models: list[AIModelConfig] = DEFAULT_AI_MODELS.copy()
 
 
@@ -462,6 +489,7 @@ def load_config(
         "ai_provider_settings": "ai_provider_settings",
         "ai_models": "ai_models",
         "sso": "sso",
+        "google_sso": "google_sso",
     }
     for yaml_key, config_key in settings_key_map.items():
         if yaml_key in settings_data:
@@ -471,6 +499,7 @@ def load_config(
     secrets_key_map = {
         "ai_providers": "ai_providers",
         "ngrok": "ngrok_secrets",
+        "google_sso": "google_sso_secrets",
     }
     for yaml_key, config_key in secrets_key_map.items():
         if yaml_key in secrets_data:

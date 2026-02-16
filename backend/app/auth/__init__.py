@@ -1,5 +1,6 @@
-"""AWS SSO authentication module.
+"""Authentication module (AWS SSO + Google OAuth).
 
-Provides SSO login via the OIDC device authorization flow,
-allowing users to identify themselves through AWS IAM Identity Center.
+Provides SSO login via device authorization flows:
+- AWS IAM Identity Center (OIDC device flow)
+- Google OAuth 2.0 (device flow)
 """

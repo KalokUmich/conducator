@@ -78,6 +78,8 @@
         .role-pill-host { background: rgba(245,158,11,0.15); color: #fbbf24; }
         .role-pill-guest { background: rgba(59,130,246,0.15); color: #60a5fa; }
         .role-pill-sso { background: rgba(34,197,94,0.15); color: #4ade80; }
+        .role-pill-aws { background: rgba(251,191,36,0.15); color: #fbbf24; }
+        .role-pill-google { background: rgba(96,165,250,0.15); color: #60a5fa; }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-100 h-screen overflow-hidden">
@@ -116,9 +118,12 @@
                 </div>
                 <!-- SSO Identity Section -->
                 <div id="sso-idle" class="w-full max-w-xs mt-2">
-                    <div id="sso-idle-signin" class="sso-signin">
-                        <button class="sso-login-btn w-full text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors">
-                            Sign in with AWS SSO
+                    <div id="sso-idle-signin" class="sso-signin flex gap-2">
+                        <button class="sso-login-btn sso-login-aws flex-1 text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors" data-provider="aws">
+                            &#9729; AWS SSO
+                        </button>
+                        <button class="sso-login-btn sso-login-google flex-1 text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors" data-provider="google">
+                            G Google
                         </button>
                     </div>
                     <div id="sso-idle-pending" class="sso-pending hidden">
@@ -131,9 +136,9 @@
                     </div>
                     <div id="sso-idle-done" class="sso-done hidden">
                         <div class="flex items-center gap-2 py-1.5 px-3 bg-gray-800 border border-gray-700 rounded-lg">
-                            <span class="text-green-400 text-xs">&#10003;</span>
+                            <span class="sso-provider-badge text-xs"></span>
                             <span class="sso-email text-xs text-gray-300 truncate"></span>
-                            <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear SSO identity">&#10005;</button>
+                            <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear identity">&#10005;</button>
                         </div>
                     </div>
                 </div>
@@ -198,9 +203,12 @@
                 </button>
                 <!-- SSO Identity Section -->
                 <div id="sso-disconnected" class="w-full max-w-xs mt-2">
-                    <div id="sso-disconnected-signin" class="sso-signin">
-                        <button class="sso-login-btn w-full text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors">
-                            Sign in with AWS SSO
+                    <div id="sso-disconnected-signin" class="sso-signin flex gap-2">
+                        <button class="sso-login-btn sso-login-aws flex-1 text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors" data-provider="aws">
+                            &#9729; AWS SSO
+                        </button>
+                        <button class="sso-login-btn sso-login-google flex-1 text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors" data-provider="google">
+                            G Google
                         </button>
                     </div>
                     <div id="sso-disconnected-pending" class="sso-pending hidden">
@@ -213,9 +221,9 @@
                     </div>
                     <div id="sso-disconnected-done" class="sso-done hidden">
                         <div class="flex items-center gap-2 py-1.5 px-3 bg-gray-800 border border-gray-700 rounded-lg">
-                            <span class="text-green-400 text-xs">&#10003;</span>
+                            <span class="sso-provider-badge text-xs"></span>
                             <span class="sso-email text-xs text-gray-300 truncate"></span>
-                            <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear SSO identity">&#10005;</button>
+                            <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear identity">&#10005;</button>
                         </div>
                     </div>
                 </div>
@@ -252,9 +260,12 @@
                 </div>
                 <!-- SSO Identity Section -->
                 <div id="sso-ready" class="w-full max-w-xs mt-2">
-                    <div id="sso-ready-signin" class="sso-signin">
-                        <button class="sso-login-btn w-full text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors">
-                            Sign in with AWS SSO
+                    <div id="sso-ready-signin" class="sso-signin flex gap-2">
+                        <button class="sso-login-btn sso-login-aws flex-1 text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors" data-provider="aws">
+                            &#9729; AWS SSO
+                        </button>
+                        <button class="sso-login-btn sso-login-google flex-1 text-gray-400 hover:text-gray-200 text-xs py-1.5 px-3 border border-gray-700 rounded-lg hover:border-gray-500 transition-colors" data-provider="google">
+                            G Google
                         </button>
                     </div>
                     <div id="sso-ready-pending" class="sso-pending hidden">
@@ -267,9 +278,9 @@
                     </div>
                     <div id="sso-ready-done" class="sso-done hidden">
                         <div class="flex items-center gap-2 py-1.5 px-3 bg-gray-800 border border-gray-700 rounded-lg">
-                            <span class="text-green-400 text-xs">&#10003;</span>
+                            <span class="sso-provider-badge text-xs"></span>
                             <span class="sso-email text-xs text-gray-300 truncate"></span>
-                            <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear SSO identity">&#10005;</button>
+                            <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear identity">&#10005;</button>
                         </div>
                     </div>
                 </div>
@@ -1167,6 +1178,7 @@
 
         // SSO state
         let ssoIdentity = window.initialSSOIdentity || null;
+        let ssoProvider = window.initialSSOProvider || null;
 
         function getSSODisplayName(identity) {
             if (!identity) return null;
@@ -1174,6 +1186,7 @@
                 const at = identity.email.indexOf('@');
                 return at > 0 ? identity.email.substring(0, at) : identity.email;
             }
+            if (identity.name) return identity.name;
             return identity.user_id || null;
         }
 
@@ -1183,6 +1196,12 @@
             return 'anonymous';
         }
 
+        function getProviderBadge(provider) {
+            if (provider === 'aws') return '\u2601 AWS';
+            if (provider === 'google') return 'G Google';
+            return '\u2713';
+        }
+
         const ssoDisplayName = getSSODisplayName(ssoIdentity);
         if (ssoDisplayName) session.displayName = ssoDisplayName;
 
@@ -1190,9 +1209,34 @@
         const ssoPanels = ['sso-idle', 'sso-disconnected', 'sso-ready'].map(id => document.getElementById(id));
         const ssoHeaderBadge = document.getElementById('sso-header-badge');
 
+        /**
+         * Show/hide SSO provider buttons based on which providers are enabled.
+         * If no providers are enabled, the entire sign-in row is hidden.
+         */
+        function applySSOProviderVisibility(providers) {
+            document.querySelectorAll('.sso-login-aws').forEach(btn => {
+                btn.classList.toggle('hidden', !providers.aws);
+            });
+            document.querySelectorAll('.sso-login-google').forEach(btn => {
+                btn.classList.toggle('hidden', !providers.google);
+            });
+            // If neither provider is enabled, hide the entire signin row
+            const noneEnabled = !providers.aws && !providers.google;
+            document.querySelectorAll('.sso-signin').forEach(row => {
+                row.classList.toggle('hidden', noneEnabled);
+            });
+        }
+
+        // Apply initial provider visibility from injected config
+        let enabledProviders = window.initialEnabledSSOProviders || { aws: false, google: false };
+        applySSOProviderVisibility(enabledProviders);
+
         // Attach SSO button handlers (login + cancel) for all three panels
         document.querySelectorAll('.sso-login-btn').forEach(btn => {
-            btn.addEventListener('click', () => vscode.postMessage({ command: 'ssoLogin' }));
+            btn.addEventListener('click', () => {
+                const provider = btn.dataset.provider || 'aws';
+                vscode.postMessage({ command: 'ssoLogin', provider });
+            });
         });
         document.querySelectorAll('.sso-cancel-btn').forEach(btn => {
             btn.addEventListener('click', () => vscode.postMessage({ command: 'ssoCancel' }));
@@ -1211,6 +1255,8 @@
                 panel.querySelector('.sso-pending')?.classList.add('hidden');
                 panel.querySelector('.sso-done')?.classList.add('hidden');
             });
+            // Re-apply provider visibility (hides row if no providers enabled)
+            applySSOProviderVisibility(enabledProviders);
         }
 
         /**
@@ -1228,15 +1274,20 @@
         }
 
         /**
-         * Update all SSO UI panels to show the signed-in state with email.
+         * Update all SSO UI panels to show the signed-in state with email and provider badge.
          */
-        function showSSOSignedInState(identity) {
+        function showSSOSignedInState(identity, provider) {
             const email = identity?.email || identity?.arn || 'Signed in';
+            const badge = getProviderBadge(provider || ssoProvider);
             ssoPanels.forEach(panel => {
                 if (!panel) return;
                 panel.querySelector('.sso-signin')?.classList.add('hidden');
                 panel.querySelector('.sso-pending')?.classList.add('hidden');
                 panel.querySelector('.sso-done')?.classList.remove('hidden');
+                const badgeEl = panel.querySelector('.sso-provider-badge');
+                if (badgeEl) {
+                    badgeEl.textContent = badge;
+                }
                 const emailEl = panel.querySelector('.sso-email');
                 if (emailEl) {
                     emailEl.textContent = email;
@@ -1248,7 +1299,7 @@
 
         // Restore SSO state on page load
         if (ssoIdentity) {
-            showSSOSignedInState(ssoIdentity);
+            showSSOSignedInState(ssoIdentity, ssoProvider);
         }
 
         // Track session state
@@ -1450,7 +1501,7 @@
 
             // Re-apply SSO identity state after panel switch
             if (ssoIdentity) {
-                showSSOSignedInState(ssoIdentity);
+                showSSOSignedInState(ssoIdentity, ssoProvider);
             }
 
             console.log('[WebView] render:', prevState, '→', state, roomIdChanged ? '(roomId changed)' : '');
@@ -1642,6 +1693,7 @@
                     // Restore SSO identity from extension's globalState if available
                     if (message.ssoIdentity && !ssoIdentity) {
                         ssoIdentity = message.ssoIdentity;
+                        ssoProvider = message.ssoProvider || ssoProvider;
                     }
                     render(message.state, message.session);
                     break;
@@ -1680,10 +1732,11 @@
                 case 'ssoLoginResult':
                     if (message.identity) {
                         ssoIdentity = message.identity;
-                        showSSOSignedInState(message.identity);
+                        ssoProvider = message.provider || ssoProvider;
+                        showSSOSignedInState(message.identity, message.provider);
                         const loginName = getSSODisplayName(message.identity);
                         if (loginName) session.displayName = loginName;
-                        console.log('[WebView] SSO identity:', message.identity);
+                        console.log('[WebView] SSO identity:', message.identity, 'provider:', message.provider);
                     } else {
                         showSSOSignInState();
                         if (message.error) {
@@ -1693,11 +1746,16 @@
                     break;
                 case 'ssoCacheCleared':
                     ssoIdentity = null;
+                    ssoProvider = null;
                     session.displayName = 'User';
                     showSSOSignInState();
                     if (ssoHeaderBadge) {
                         ssoHeaderBadge.classList.add('hidden');
                     }
+                    break;
+                case 'ssoProvidersUpdate':
+                    enabledProviders = message.providers;
+                    applySSOProviderVisibility(enabledProviders);
                     break;
             }
         });

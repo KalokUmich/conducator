@@ -89,6 +89,9 @@ backend/app/
 - `auth`:
   - `POST /auth/sso/start`
   - `POST /auth/sso/poll`
+  - `POST /auth/google/start`
+  - `POST /auth/google/poll`
+  - `GET /auth/providers`
 - `files`:
   - `POST /files/upload/{room_id}`
   - `GET /files/download/{file_id}`
@@ -254,7 +257,7 @@ Conductor 由两部分运行时组成：
 - `agent`：`/generate-changes`（MockAgent）
 - `policy`：`/policy/evaluate-auto-apply`
 - `audit`：`/audit/log-apply`、`/audit/logs`
-- `auth`：`/auth/sso/start`、`/auth/sso/poll`
+- `auth`：`/auth/sso/start`、`/auth/sso/poll`、`/auth/google/start`、`/auth/google/poll`、`/auth/providers`
 - `files`：上传/下载/房间清理
 
 ### 3. AI 摘要流水线

@@ -11,6 +11,7 @@ import {
     SSO_EXPIRY_MS,
     wrapIdentity,
     getValidIdentity,
+    getStoredProvider,
     isStale,
 } from '../services/ssoIdentityCache';
 
@@ -36,7 +37,7 @@ const SAMPLE_IDENTITY: Record<string, unknown> = {
 describe('wrapIdentity', () => {
     it('wraps identity with provided timestamp', () => {
         const now = 1700000000000;
-        const result = wrapIdentity(SAMPLE_IDENTITY, now);
+        const result = wrapIdentity(SAMPLE_IDENTITY, undefined, now);
 
         assert.deepEqual(result.identity, SAMPLE_IDENTITY);
         assert.equal(result.storedAt, now);
@@ -63,7 +64,7 @@ describe('getValidIdentity', () => {
     // --- Valid (non-expired) ---
 
     it('returns identity when stored just now', () => {
-        const stored = wrapIdentity(SAMPLE_IDENTITY, now);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, now);
         const result = getValidIdentity(stored, now);
 
         assert.deepEqual(result, SAMPLE_IDENTITY);
@@ -71,14 +72,14 @@ describe('getValidIdentity', () => {
 
     it('returns identity when stored 23h59m ago', () => {
         const almostExpired = now - SSO_EXPIRY_MS + 60_000; // 1 minute before expiry
-        const stored = wrapIdentity(SAMPLE_IDENTITY, almostExpired);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, almostExpired);
         const result = getValidIdentity(stored, now);
 
         assert.deepEqual(result, SAMPLE_IDENTITY);
     });
 
     it('returns identity when stored 1 second ago', () => {
-        const stored = wrapIdentity(SAMPLE_IDENTITY, now - 1000);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, now - 1000);
         const result = getValidIdentity(stored, now);
 
         assert.deepEqual(result, SAMPLE_IDENTITY);
@@ -87,21 +88,21 @@ describe('getValidIdentity', () => {
     // --- Expired ---
 
     it('returns null when stored exactly 24h ago', () => {
-        const stored = wrapIdentity(SAMPLE_IDENTITY, now - SSO_EXPIRY_MS);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, now - SSO_EXPIRY_MS);
         const result = getValidIdentity(stored, now);
 
         assert.equal(result, null);
     });
 
     it('returns null when stored 25h ago', () => {
-        const stored = wrapIdentity(SAMPLE_IDENTITY, now - SSO_EXPIRY_MS - 3600_000);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, now - SSO_EXPIRY_MS - 3600_000);
         const result = getValidIdentity(stored, now);
 
         assert.equal(result, null);
     });
 
     it('returns null when stored 7 days ago', () => {
-        const stored = wrapIdentity(SAMPLE_IDENTITY, now - 7 * 24 * 60 * 60 * 1000);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, now - 7 * 24 * 60 * 60 * 1000);
         const result = getValidIdentity(stored, now);
 
         assert.equal(result, null);
@@ -175,12 +176,12 @@ describe('isStale', () => {
     });
 
     it('returns false for valid (non-expired) wrapper', () => {
-        const stored = wrapIdentity(SAMPLE_IDENTITY, now);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, now);
         assert.equal(isStale(stored, now), false);
     });
 
     it('returns true for expired wrapper', () => {
-        const stored = wrapIdentity(SAMPLE_IDENTITY, now - SSO_EXPIRY_MS - 1000);
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, now - SSO_EXPIRY_MS - 1000);
         assert.equal(isStale(stored, now), true);
     });
 
@@ -200,7 +201,7 @@ describe('isStale', () => {
 describe('round-trip', () => {
     it('wrap then validate immediately returns the original identity', () => {
         const now = Date.now();
-        const wrapped = wrapIdentity(SAMPLE_IDENTITY, now);
+        const wrapped = wrapIdentity(SAMPLE_IDENTITY, undefined, now);
         const result = getValidIdentity(wrapped, now);
 
         assert.deepEqual(result, SAMPLE_IDENTITY);
@@ -208,7 +209,7 @@ describe('round-trip', () => {
 
     it('wrap then validate after 24h returns null', () => {
         const storeTime = Date.now();
-        const wrapped = wrapIdentity(SAMPLE_IDENTITY, storeTime);
+        const wrapped = wrapIdentity(SAMPLE_IDENTITY, undefined, storeTime);
         const result = getValidIdentity(wrapped, storeTime + SSO_EXPIRY_MS);
 
         assert.equal(result, null);
@@ -217,9 +218,68 @@ describe('round-trip', () => {
     it('identity object is not mutated by wrap/validate', () => {
         const original = { ...SAMPLE_IDENTITY };
         const now = Date.now();
-        const wrapped = wrapIdentity(original, now);
+        const wrapped = wrapIdentity(original, undefined, now);
         getValidIdentity(wrapped, now);
 
         assert.deepEqual(original, SAMPLE_IDENTITY);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Provider field
+// ---------------------------------------------------------------------------
+
+describe('wrapIdentity with provider', () => {
+    it('includes provider when specified', () => {
+        const now = 1700000000000;
+        const result = wrapIdentity(SAMPLE_IDENTITY, 'aws', now);
+
+        assert.deepEqual(result.identity, SAMPLE_IDENTITY);
+        assert.equal(result.storedAt, now);
+        assert.equal(result.provider, 'aws');
+    });
+
+    it('includes google provider', () => {
+        const now = 1700000000000;
+        const result = wrapIdentity(SAMPLE_IDENTITY, 'google', now);
+
+        assert.equal(result.provider, 'google');
+    });
+
+    it('omits provider when not specified', () => {
+        const now = 1700000000000;
+        const result = wrapIdentity(SAMPLE_IDENTITY, undefined, now);
+
+        assert.equal(result.provider, undefined);
+        assert.equal('provider' in result, false);
+    });
+});
+
+describe('getStoredProvider', () => {
+    it('returns aws for wrapper with aws provider', () => {
+        const stored = wrapIdentity(SAMPLE_IDENTITY, 'aws', 1700000000000);
+        assert.equal(getStoredProvider(stored), 'aws');
+    });
+
+    it('returns google for wrapper with google provider', () => {
+        const stored = wrapIdentity(SAMPLE_IDENTITY, 'google', 1700000000000);
+        assert.equal(getStoredProvider(stored), 'google');
+    });
+
+    it('returns undefined for wrapper without provider', () => {
+        const stored = wrapIdentity(SAMPLE_IDENTITY, undefined, 1700000000000);
+        assert.equal(getStoredProvider(stored), undefined);
+    });
+
+    it('returns undefined for null', () => {
+        assert.equal(getStoredProvider(null), undefined);
+    });
+
+    it('returns undefined for undefined', () => {
+        assert.equal(getStoredProvider(undefined), undefined);
+    });
+
+    it('returns undefined for old format (raw identity)', () => {
+        assert.equal(getStoredProvider(SAMPLE_IDENTITY), undefined);
     });
 });

@@ -147,3 +147,12 @@ sso:
 
   # AWS region where your IAM Identity Center is configured
   region: "eu-west-2"
+
+# =============================================================================
+# Google SSO Configuration
+# =============================================================================
+# Enable Google OAuth SSO login for user identification.
+# Requires client_id and client_secret in conductor.secrets.yaml.
+google_sso:
+  # Enable Google SSO login button in the extension
+  enabled: true

@@ -109,6 +109,15 @@ sso:
   region: "us-east-1"
 
 # =============================================================================
+# Google SSO Configuration
+# =============================================================================
+# Enable Google OAuth SSO login for user identification.
+# Requires client_id and client_secret in conductor.secrets.yaml.
+google_sso:
+  # Enable Google SSO login button in the extension
+  enabled: false
+
+# =============================================================================
 # Session Configuration
 # =============================================================================
 session:

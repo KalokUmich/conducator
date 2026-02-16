@@ -26,7 +26,7 @@ import {
 import { ChangeSet, FileChange, getDiffPreviewService } from './services/diffPreview';
 import { getPermissionsService } from './services/permissions';
 import { getSessionService } from './services/session';
-import { wrapIdentity, getValidIdentity, isStale } from './services/ssoIdentityCache';
+import { wrapIdentity, getValidIdentity, getStoredProvider, isStale, SSOProvider } from './services/ssoIdentityCache';
 
 /** Output channel for logging invite links to the user. */
 let outputChannel: vscode.OutputChannel;
@@ -197,6 +197,8 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     private _ssoPolling: boolean = false;
     /** Timer ID for SSO polling interval. */
     private _ssoTimerId?: ReturnType<typeof setInterval>;
+    /** Cached enabled SSO providers from backend /auth/providers. */
+    private _enabledSSOProviders: { aws: boolean; google: boolean } = { aws: false, google: false };
 
     // Sequential change review queue
     /** Changes waiting to be reviewed/applied. */
@@ -220,6 +222,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         // Push state updates to WebView whenever FSM state changes
         this._controller.onStateChange((_prev, next) => {
             this._sendConductorState(next);
+            // Re-fetch providers when backend becomes reachable
+            if (next === ConductorState.ReadyToHost) {
+                this._fetchEnabledSSOProviders();
+            }
         });
     }
 
@@ -236,6 +242,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         };
 
         webviewView.webview.html = this._getHtmlContent(webviewView.webview);
+
+        // Fetch enabled SSO providers from backend and push to WebView
+        this._fetchEnabledSSOProviders();
 
         // Handle messages from the webview
         webviewView.webview.onDidReceiveMessage(async message => {
@@ -342,7 +351,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     this._handleGenerateCodePromptAndPost(message.decisionSummary, message.roomId);
                     return;
                 case 'ssoLogin':
-                    this._handleSSOLogin();
+                    this._handleSSOLogin(message.provider || 'aws');
                     return;
                 case 'ssoCancel':
                     this._handleSSOCancel();
@@ -619,6 +628,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 state,
                 session: getSessionService().getSessionStateForWebView(),
                 ssoIdentity: this._getValidSSOIdentity(),
+                ssoProvider: this._getStoredSSOProvider(),
             });
         }
     }
@@ -629,6 +639,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     private _getValidSSOIdentity(): Record<string, unknown> | null {
         const stored = this._context.globalState.get('conductor.ssoIdentity');
         return getValidIdentity(stored);
+    }
+
+    /**
+     * Extract the SSO provider from the stored identity wrapper, or undefined.
+     */
+    private _getStoredSSOProvider(): SSOProvider | undefined {
+        const stored = this._context.globalState.get('conductor.ssoIdentity');
+        return getStoredProvider(stored);
     }
 
     /**
@@ -1355,15 +1373,40 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     // ----- SSO handlers ---------------------------------------------------
 
     /**
-     * Handle SSO login request from WebView.
-     * Calls POST /auth/sso/start, opens browser, and starts polling.
+     * Fetch enabled SSO providers from backend and send to WebView.
+     * Called on WebView creation; result is cached and re-sent on state changes.
      */
-    private async _handleSSOLogin(): Promise<void> {
+    private async _fetchEnabledSSOProviders(): Promise<void> {
         try {
             const backendUrl = getBackendUrl();
-            const response = await fetch(`${backendUrl}/auth/sso/start`, {
-                method: 'POST',
-            });
+            const resp = await fetch(`${backendUrl}/auth/providers`);
+            if (resp.ok) {
+                const data = await resp.json() as { aws: boolean; google: boolean };
+                this._enabledSSOProviders = data;
+                this._view?.webview.postMessage({
+                    command: 'ssoProvidersUpdate',
+                    providers: data,
+                });
+            }
+        } catch {
+            // Backend may not be reachable — leave defaults
+        }
+    }
+
+    /**
+     * Handle SSO login request from WebView.
+     * Dispatches to the correct provider endpoint (AWS or Google).
+     */
+    private async _handleSSOLogin(provider: SSOProvider = 'aws'): Promise<void> {
+        try {
+            const backendUrl = getBackendUrl();
+
+            // Provider-specific start endpoint
+            const startUrl = provider === 'google'
+                ? `${backendUrl}/auth/google/start`
+                : `${backendUrl}/auth/sso/start`;
+
+            const response = await fetch(startUrl, { method: 'POST' });
 
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({})) as { detail?: string };
@@ -1376,32 +1419,46 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             }
 
             const data = await response.json() as {
-                verification_uri_complete: string;
+                verification_uri_complete?: string;
+                verification_url?: string;
                 user_code: string;
                 device_code: string;
-                client_id: string;
-                client_secret: string;
+                client_id?: string;
+                client_secret?: string;
                 expires_in: number;
                 interval: number;
             };
 
-            // Open browser to the verification URL
-            if (data.verification_uri_complete) {
-                await vscode.env.openExternal(
-                    vscode.Uri.parse(data.verification_uri_complete)
-                );
+            // Open browser to the verification URL (field name differs by provider)
+            const verifyUrl = data.verification_uri_complete || data.verification_url;
+            if (verifyUrl) {
+                await vscode.env.openExternal(vscode.Uri.parse(verifyUrl));
             }
 
             // Send pending state to WebView with user code
             this._view?.webview.postMessage({
                 command: 'ssoLoginPending',
                 userCode: data.user_code,
+                provider,
             });
 
             // Start polling
             this._ssoPolling = true;
             const pollInterval = Math.max(data.interval || 5, 5) * 1000;
             const expiresAt = Date.now() + (data.expires_in || 600) * 1000;
+
+            // Provider-specific poll endpoint and body
+            const pollUrl = provider === 'google'
+                ? `${backendUrl}/auth/google/poll`
+                : `${backendUrl}/auth/sso/poll`;
+
+            const pollBody = provider === 'google'
+                ? { device_code: data.device_code }
+                : {
+                    device_code: data.device_code,
+                    client_id: data.client_id,
+                    client_secret: data.client_secret,
+                };
 
             this._ssoTimerId = setInterval(async () => {
                 if (!this._ssoPolling || Date.now() > expiresAt) {
@@ -1416,14 +1473,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 }
 
                 try {
-                    const pollResp = await fetch(`${backendUrl}/auth/sso/poll`, {
+                    const pollResp = await fetch(pollUrl, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            device_code: data.device_code,
-                            client_id: data.client_id,
-                            client_secret: data.client_secret,
-                        }),
+                        body: JSON.stringify(pollBody),
                     });
 
                     // Guard: another overlapping callback may have already
@@ -1450,16 +1503,17 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     this._handleSSOCancel();
 
                     if (pollData.status === 'complete' && pollData.identity) {
-                        // Store identity in globalState with timestamp for 24h expiry
+                        // Store identity in globalState with timestamp and provider for 24h expiry
                         this._context.globalState.update(
                             'conductor.ssoIdentity',
-                            wrapIdentity(pollData.identity)
+                            wrapIdentity(pollData.identity, provider)
                         );
                         this._view?.webview.postMessage({
                             command: 'ssoLoginResult',
                             identity: pollData.identity,
+                            provider,
                         });
-                        console.log('[Conductor] SSO login complete:', pollData.identity);
+                        console.log(`[Conductor] ${provider} SSO login complete:`, pollData.identity);
                     } else {
                         this._view?.webview.postMessage({
                             command: 'ssoLoginResult',
@@ -1473,7 +1527,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             }, pollInterval);
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            console.error('[Conductor] SSO login failed:', msg);
+            console.error(`[Conductor] ${provider} SSO login failed:`, msg);
             this._view?.webview.postMessage({
                 command: 'ssoLoginResult',
                 error: `SSO login failed: ${msg}`,
@@ -2066,12 +2120,13 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
         // Inject SSO identity from globalState (if previously signed in, within 24h)
         const ssoIdentity = this._getValidSSOIdentity();
+        const ssoProvider = this._getStoredSSOProvider();
         // Clear expired/old-format entries from globalState
         const rawSso = this._context.globalState.get('conductor.ssoIdentity');
         if (isStale(rawSso)) {
             this._context.globalState.update('conductor.ssoIdentity', undefined);
         }
-        const ssoScript = `<script>window.initialSSOIdentity = ${JSON.stringify(ssoIdentity)};</script>`;
+        const ssoScript = `<script>window.initialSSOIdentity = ${JSON.stringify(ssoIdentity)};window.initialSSOProvider = ${JSON.stringify(ssoProvider || null)};window.initialEnabledSSOProviders = ${JSON.stringify(this._enabledSSOProviders)};</script>`;
 
         html = html.replace('</head>', `${cspMeta}${permissionsScript}${sessionScript}${conductorScript}${ssoScript}</head>`);
 

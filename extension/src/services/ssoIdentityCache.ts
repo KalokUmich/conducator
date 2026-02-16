@@ -9,17 +9,25 @@
 /** How long an SSO identity is valid (24 hours). */
 export const SSO_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
+/** SSO provider type. */
+export type SSOProvider = 'aws' | 'google';
+
 /** Shape of the wrapper object stored in globalState. */
 export interface SSOIdentityWrapper {
     identity: Record<string, unknown>;
     storedAt: number;
+    provider?: SSOProvider;
 }
 
 /**
  * Wrap a raw identity object with a timestamp for storage.
  */
-export function wrapIdentity(identity: Record<string, unknown>, now: number = Date.now()): SSOIdentityWrapper {
-    return { identity, storedAt: now };
+export function wrapIdentity(
+    identity: Record<string, unknown>,
+    provider?: SSOProvider,
+    now: number = Date.now(),
+): SSOIdentityWrapper {
+    return { identity, storedAt: now, ...(provider ? { provider } : {}) };
 }
 
 /**
@@ -52,6 +60,20 @@ export function getValidIdentity(stored: unknown, now: number = Date.now()): Rec
 
     // Old format (no storedAt) — treat as expired
     return null;
+}
+
+/**
+ * Extract the provider from a stored wrapper, or undefined if not present.
+ */
+export function getStoredProvider(stored: unknown): SSOProvider | undefined {
+    if (!stored || typeof stored !== 'object') {
+        return undefined;
+    }
+    const obj = stored as Record<string, unknown>;
+    if ('provider' in obj && (obj.provider === 'aws' || obj.provider === 'google')) {
+        return obj.provider as SSOProvider;
+    }
+    return undefined;
 }
 
 /**
