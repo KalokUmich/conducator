@@ -107,6 +107,7 @@ class CodePromptRequest(BaseModel):
     decision_summary: DecisionSummaryInput
     context_snippet: Optional[str] = None
     room_id: Optional[str] = None
+    detected_languages: Optional[List[str]] = None
 
 
 class CodePromptResponse(BaseModel):
@@ -153,6 +154,7 @@ class SelectiveCodePromptRequest(BaseModel):
     multi_type_summary: MultiTypeSummaryInput
     context_snippet: Optional[str] = None
     room_id: Optional[str] = None
+    detected_languages: Optional[List[str]] = None
 
 
 class FileLevelChange(BaseModel):
@@ -405,6 +407,7 @@ async def generate_code_prompt(request: CodePromptRequest) -> CodePromptResponse
         risk_level=summary.risk_level,
         context_snippet=request.context_snippet,
         room_code_style=room_code_style,
+        detected_languages=request.detected_languages,
     )
 
     return CodePromptResponse(code_prompt=code_prompt_str)
@@ -525,12 +528,43 @@ async def generate_selective_code_prompt(
         code_relevant_types=multi_summary.code_relevant_types,
         context_snippet=request.context_snippet,
         room_code_style=room_code_style,
+        detected_languages=request.detected_languages,
     )
 
     return SelectiveCodePromptResponse(
         code_prompt=code_prompt_str,
         implementation_plan=None,  # AI would populate this after processing the prompt
         code_relevant_types_used=types_used,
+    )
+
+
+class StyleTemplateItem(BaseModel):
+    """A single style template."""
+    name: str
+    filename: str
+    content: str
+
+
+class StyleTemplatesResponse(BaseModel):
+    """Response model for GET /ai/style-templates endpoint."""
+    templates: List[StyleTemplateItem]
+
+
+@router.get("/style-templates", response_model=StyleTemplatesResponse)
+async def get_style_templates() -> StyleTemplatesResponse:
+    """Get all available built-in code style templates.
+
+    Returns a list of style template markdown files that can be used
+    as starting points for room-level code style configuration.
+
+    Returns:
+        StyleTemplatesResponse with list of templates (name, filename, content).
+    """
+    from app.agent.style_loader import CodeStyleLoader
+
+    templates = CodeStyleLoader.list_templates()
+    return StyleTemplatesResponse(
+        templates=[StyleTemplateItem(**t) for t in templates]
     )
 
 

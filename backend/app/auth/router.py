@@ -22,6 +22,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+async def _poll_for_identity(
+    poll_fn,
+    get_identity_fn,
+    provider_label: str,
+) -> dict:
+    """Shared poll logic for SSO device authorization flows.
+
+    Args:
+        poll_fn: Callable that returns an access token string or None if pending.
+        get_identity_fn: Callable that takes an access token and returns identity dict.
+        provider_label: Label for logging (e.g., "SSO", "Google SSO").
+
+    Returns:
+        dict with status (pending, complete, expired, error) and optional identity.
+    """
+    try:
+        access_token = poll_fn()
+
+        if access_token is None:
+            return {"status": "pending"}
+
+        identity = get_identity_fn(access_token)
+        return {
+            "status": "complete",
+            "identity": identity,
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"{provider_label} poll failed: {error_msg}")
+
+        if "ExpiredTokenException" in error_msg or "expired" in error_msg.lower():
+            return {"status": "expired", "error": error_msg}
+
+        return {"status": "error", "error": error_msg}
+
+
 class SSOPollRequest(BaseModel):
     """Request body for polling SSO token status."""
     device_code: str
@@ -65,35 +101,19 @@ async def sso_poll(request: SSOPollRequest) -> dict:
     if not config.sso.enabled:
         raise HTTPException(status_code=400, detail="SSO is not enabled")
 
-    try:
-        service = SSOService(
-            start_url=config.sso.start_url,
-            region=config.sso.region,
-        )
-
-        access_token = service.poll_for_token(
+    service = SSOService(
+        start_url=config.sso.start_url,
+        region=config.sso.region,
+    )
+    return await _poll_for_identity(
+        poll_fn=lambda: service.poll_for_token(
             client_id=request.client_id,
             client_secret=request.client_secret,
             device_code=request.device_code,
-        )
-
-        if access_token is None:
-            return {"status": "pending"}
-
-        # Token obtained — resolve identity
-        identity = service.get_identity(access_token)
-        return {
-            "status": "complete",
-            "identity": identity,
-        }
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"SSO poll failed: {error_msg}")
-
-        if "ExpiredTokenException" in error_msg or "expired" in error_msg.lower():
-            return {"status": "expired", "error": error_msg}
-
-        return {"status": "error", "error": error_msg}
+        ),
+        get_identity_fn=service.get_identity,
+        provider_label="SSO",
+    )
 
 
 # =============================================================================
@@ -142,31 +162,15 @@ async def google_poll(request: GooglePollRequest) -> dict:
     if not config.google_sso.enabled:
         raise HTTPException(status_code=400, detail="Google SSO is not enabled")
 
-    try:
-        service = GoogleSSOService(
-            client_id=config.google_sso_secrets.client_id,
-            client_secret=config.google_sso_secrets.client_secret,
-        )
-
-        access_token = service.poll_for_token(device_code=request.device_code)
-
-        if access_token is None:
-            return {"status": "pending"}
-
-        # Token obtained — resolve identity
-        identity = service.get_identity(access_token)
-        return {
-            "status": "complete",
-            "identity": identity,
-        }
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Google SSO poll failed: {error_msg}")
-
-        if "expired" in error_msg.lower():
-            return {"status": "expired", "error": error_msg}
-
-        return {"status": "error", "error": error_msg}
+    service = GoogleSSOService(
+        client_id=config.google_sso_secrets.client_id,
+        client_secret=config.google_sso_secrets.client_secret,
+    )
+    return await _poll_for_identity(
+        poll_fn=lambda: service.poll_for_token(device_code=request.device_code),
+        get_identity_fn=service.get_identity,
+        provider_label="Google SSO",
+    )
 
 
 # =============================================================================

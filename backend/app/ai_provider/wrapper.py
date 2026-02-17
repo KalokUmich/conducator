@@ -41,7 +41,7 @@ class ProviderCallResult:
     """
     success: bool
     provider_name: Optional[str]
-    data: Optional[any] = None
+    data: Optional[object] = None
     error: Optional[str] = None
 
 
@@ -164,6 +164,7 @@ def call_code_prompt(
     risk_level: str,
     context_snippet: Optional[str] = None,
     room_code_style: Optional[str] = None,
+    detected_languages: Optional[List[str]] = None,
 ) -> str:
     """Generate a code prompt from decision summary components.
 
@@ -187,7 +188,7 @@ def call_code_prompt(
     policy_str = _load_policy_constraints()
 
     # Load style guidelines: room-level overrides file-level
-    style_str = _load_style_guidelines(room_code_style)
+    style_str = _load_style_guidelines(room_code_style, detected_languages)
 
     code_prompt = get_code_prompt(
         problem_statement=problem_statement,
@@ -377,7 +378,8 @@ def call_selective_code_prompt(
     code_relevant_types: List[str],
     context_snippet: Optional[str] = None,
     room_code_style: Optional[str] = None,
-) -> tuple:
+    detected_languages: Optional[List[str]] = None,
+) -> tuple[str, List[str]]:
     """Generate a selective code prompt from multi-type summaries.
 
     This function:
@@ -424,7 +426,7 @@ def call_selective_code_prompt(
     policy_str = _load_policy_constraints()
 
     # Load style guidelines: room-level overrides file-level
-    style_str = _load_style_guidelines(room_code_style)
+    style_str = _load_style_guidelines(room_code_style, detected_languages)
 
     # Generate the selective code prompt
     code_prompt = get_selective_code_prompt(
@@ -466,14 +468,21 @@ def _load_policy_constraints() -> Optional[str]:
         return None
 
 
-def _load_style_guidelines(room_code_style: Optional[str] = None) -> Optional[str]:
+def _load_style_guidelines(
+    room_code_style: Optional[str] = None,
+    detected_languages: Optional[List[str]] = None,
+) -> Optional[str]:
     """Load code style guidelines with room-level override.
 
-    Room-level code style takes precedence. If not provided,
-    falls back to CodeStyleLoader (file-based .ai/code-style.md).
+    Priority:
+    1. Room-level code style takes precedence (returned as-is).
+    2. If detected_languages is non-empty, combine universal + language-specific styles.
+    3. Otherwise fall back to CodeStyleLoader (file-based .ai/code-style.md).
 
     Args:
         room_code_style: Optional room-level code style string.
+        detected_languages: Optional list of language strings from the extension
+            (e.g., ["python", "javascript"]).
 
     Returns:
         Style guidelines string, or None if unavailable.
@@ -481,11 +490,38 @@ def _load_style_guidelines(room_code_style: Optional[str] = None) -> Optional[st
     if room_code_style:
         return room_code_style
 
+    if detected_languages:
+        try:
+            from app.agent.style_loader import Language, _read_builtin_style, _read_universal_style
+
+            parts = [_read_universal_style()]
+            loaded_languages = []
+
+            for lang_str in detected_languages:
+                try:
+                    lang_enum = Language(lang_str)
+                    parts.append(_read_builtin_style(lang_enum))
+                    loaded_languages.append(lang_str)
+                except (ValueError, FileNotFoundError):
+                    logger.debug(f"Skipping unknown/missing language style: {lang_str}")
+
+            logger.info(
+                f"Loaded style guidelines for detected languages: {loaded_languages} "
+                f"(requested: {detected_languages})"
+            )
+
+            if len(parts) > 1:
+                return "\n\n---\n\n".join(parts)
+            # Only universal was loaded (all languages were invalid)
+            return parts[0]
+        except Exception as e:
+            logger.debug(f"Could not load detected language styles: {e}")
+
     try:
         from app.agent.style_loader import CodeStyleLoader
 
         loader = CodeStyleLoader()
-        style = loader.get_style()
+        style, _source = loader.get_style()
         if style:
             return style
     except Exception as e:

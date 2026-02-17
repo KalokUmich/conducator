@@ -22,6 +22,7 @@ import logging
 from typing import List, Optional
 
 from .base import AIProvider, ChatMessage, DecisionSummary
+from .pipeline import _strip_markdown_code_block
 from .prompts import get_summary_prompt
 
 logger = logging.getLogger(__name__)
@@ -203,17 +204,7 @@ class ClaudeBedrockProvider(AIProvider):
         )
 
         response_text = response["output"]["message"]["content"][0]["text"].strip()
-
-        # Remove markdown code block wrapper if present
-        # AI sometimes returns ```json ... ``` wrapped response
-        if response_text.startswith("```"):
-            # Find the end of the first line (```json or ```)
-            first_newline = response_text.find("\n")
-            if first_newline != -1:
-                response_text = response_text[first_newline + 1:]
-            # Remove trailing ```
-            if response_text.endswith("```"):
-                response_text = response_text[:-3].strip()
+        response_text = _strip_markdown_code_block(response_text)
 
         # Parse JSON response
         try:

@@ -15,11 +15,11 @@
             background: transparent;
         }
         ::-webkit-scrollbar-thumb {
-            background: #4b5563;
-            border-radius: 4px;
+            background: rgba(99,102,241,0.35);
+            border-radius: 9999px;
         }
         ::-webkit-scrollbar-thumb:hover {
-            background: #6b7280;
+            background: rgba(99,102,241,0.55);
         }
 
         /* Ensure proper flex layout for chat */
@@ -61,9 +61,11 @@
             background: transparent !important;
         }
 
-        /* Role-based accent colors */
-        .bubble-host { border-left: 3px solid #f59e0b; }
-        .bubble-guest { border-left: 3px solid #3b82f6; }
+        /* Role-based accent colors — dot indicator instead of left border */
+        .bubble-host { position: relative; }
+        .bubble-host::before { content: ''; position: absolute; top: 8px; left: -8px; width: 5px; height: 5px; border-radius: 50%; background: #f59e0b; }
+        .bubble-guest { position: relative; }
+        .bubble-guest::before { content: ''; position: absolute; top: 8px; left: -8px; width: 5px; height: 5px; border-radius: 50%; background: #3b82f6; }
         .name-host { color: #fbbf24; }
         .name-guest { color: #60a5fa; }
         .role-pill {
@@ -80,9 +82,129 @@
         .role-pill-sso { background: rgba(34,197,94,0.15); color: #4ade80; }
         .role-pill-aws { background: rgba(251,191,36,0.15); color: #fbbf24; }
         .role-pill-google { background: rgba(96,165,250,0.15); color: #60a5fa; }
+
+        /* === Modern Visual Foundation === */
+
+        /* Glassmorphism base */
+        .glass {
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            background: rgba(17,24,39,0.7);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        /* Glow effect for primary actions */
+        .glow-primary {
+            box-shadow: 0 0 20px rgba(124,58,237,0.3);
+        }
+
+        /* Shimmer animation for loading states */
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        .shimmer {
+            background: linear-gradient(90deg, transparent 0%, rgba(139,92,246,0.1) 50%, transparent 100%);
+            background-size: 200% 100%;
+            animation: shimmer 2s infinite;
+        }
+
+        /* Message appear animation */
+        @keyframes messageSlideIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message-enter {
+            animation: messageSlideIn 0.25s ease-out;
+        }
+
+        /* Modal appear animation */
+        @keyframes modalIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .modal-enter {
+            animation: modalIn 0.2s ease-out;
+        }
+
+        /* AI thinking dots animation */
+        @keyframes aiThinking {
+            0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+            40% { opacity: 1; transform: scale(1); }
+        }
+        .ai-thinking-dots {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .ai-thinking-dots span {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #a78bfa;
+            animation: aiThinking 1.4s infinite;
+        }
+        .ai-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .ai-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+        /* Gradient text utility */
+        .text-gradient {
+            background: linear-gradient(135deg, #c084fc, #818cf8, #60a5fa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* Gradient border utility */
+        .border-gradient {
+            border-image: linear-gradient(135deg, rgba(139,92,246,0.5), rgba(99,102,241,0.5)) 1;
+        }
+
+        /* Subtle gradient background for body */
+        body.bg-conductor {
+            background: radial-gradient(ellipse at 50% 0%, rgba(88,28,135,0.15) 0%, rgba(17,24,39,1) 70%);
+        }
+
+        /* Animated gradient border for AI cards */
+        @keyframes borderGlow {
+            0%, 100% { border-color: rgba(139,92,246,0.4); }
+            50% { border-color: rgba(99,102,241,0.6); }
+        }
+        .ai-card-border {
+            animation: borderGlow 3s ease-in-out infinite;
+        }
+
+        /* Modal close button hover rotation */
+        .modal-close-btn {
+            transition: transform 0.2s ease, color 0.2s ease;
+        }
+        .modal-close-btn:hover {
+            transform: rotate(90deg);
+        }
+
+        /* Typing indicator animated dots */
+        .typing-dots {
+            display: inline-flex;
+            gap: 3px;
+            align-items: center;
+        }
+        .typing-dots span {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: #9ca3af;
+            animation: aiThinking 1.4s infinite;
+        }
+        .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+        /* Online indicator glow */
+        .online-glow {
+            box-shadow: 0 0 6px rgba(74,222,128,0.5);
+        }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 h-screen overflow-hidden">
+<body class="bg-gray-900 bg-conductor text-gray-100 h-screen overflow-hidden">
     <div class="flex h-full">
         <!-- Main Chat Area -->
         <div class="flex flex-col flex-1">
@@ -90,12 +212,12 @@
             <!-- ============================================================ -->
             <!-- STATE PANEL: Idle — Start / Join buttons                     -->
             <!-- ============================================================ -->
-            <div id="panel-idle" class="hidden flex-1 flex flex-col items-center justify-center gap-4 px-6">
-                <h2 class="text-lg font-semibold text-white">Conductor</h2>
+            <div id="panel-idle" class="hidden flex-1 flex flex-col items-center justify-center gap-4 px-6" style="background: radial-gradient(circle at 50% 40%, rgba(88,28,135,0.1) 0%, transparent 60%);">
+                <h2 class="text-xl font-semibold text-gradient">Conductor</h2>
                 <p class="text-sm text-gray-400 text-center">Start a new session or join an existing one.</p>
                 <button
                     id="btn-idle-start"
-                    class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-6 py-2 rounded-lg flex items-center gap-2"
+                    class="bg-gradient-to-r from-violet-600 to-indigo-600 hover:brightness-110 text-white text-sm font-medium px-6 py-2 rounded-lg flex items-center gap-2 transition-all duration-200 hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] hover:scale-[1.02]"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
@@ -147,7 +269,8 @@
             <!-- ============================================================ -->
             <!-- STATE PANEL: BackendDisconnected — join only mode            -->
             <!-- ============================================================ -->
-            <div id="panel-disconnected" class="hidden flex-1 flex flex-col items-center justify-center gap-4 px-6">
+            <div id="panel-disconnected" class="hidden flex-1 flex flex-col items-center justify-center gap-4 px-6" style="background: radial-gradient(circle at 50% 40%, rgba(88,28,135,0.08) 0%, transparent 60%);">
+
                 <!-- Backend status warning -->
                 <div class="flex items-center gap-2 text-amber-400 mb-2">
                     <span class="text-xl">⚠</span>
@@ -232,12 +355,12 @@
             <!-- ============================================================ -->
             <!-- STATE PANEL: ReadyToHost — start session                     -->
             <!-- ============================================================ -->
-            <div id="panel-ready" class="hidden flex-1 flex flex-col items-center justify-center gap-4 px-6">
-                <h2 class="text-lg font-semibold text-white">Ready</h2>
+            <div id="panel-ready" class="hidden flex-1 flex flex-col items-center justify-center gap-4 px-6" style="background: radial-gradient(circle at 50% 40%, rgba(88,28,135,0.1) 0%, transparent 60%);">
+                <h2 class="text-lg font-semibold text-gradient">Ready</h2>
                 <p class="text-sm text-gray-400 text-center">Backend connected. Start a session or join an existing one.</p>
                 <button
                     id="btn-start-session"
-                    class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-6 py-2 rounded-lg flex items-center gap-2"
+                    class="bg-gradient-to-r from-violet-600 to-indigo-600 hover:brightness-110 text-white text-sm font-medium px-6 py-2 rounded-lg flex items-center gap-2 transition-all duration-200 hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] hover:scale-[1.02]"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
@@ -289,8 +412,8 @@
             <!-- ============================================================ -->
             <!-- STATE PANEL: Joining — loading indicator                     -->
             <!-- ============================================================ -->
-            <div id="panel-joining" class="hidden flex-1 flex flex-col items-center justify-center gap-3 px-6">
-                <div class="h-8 w-8 border-4 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
+            <div id="panel-joining" class="hidden flex-1 flex flex-col items-center justify-center gap-3 px-6" style="background: radial-gradient(circle at 50% 40%, rgba(88,28,135,0.1) 0%, transparent 60%);">
+                <div class="ai-thinking-dots" style="transform: scale(1.5);"><span></span><span></span><span></span></div>
                 <p class="text-sm text-gray-400">Joining session…</p>
             </div>
 
@@ -302,12 +425,12 @@
             <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
 
             <!-- Header (only visible in Hosting / Joined) -->
-            <header class="bg-gray-800 border-b border-gray-700 px-6 py-4 flex-shrink-0">
+            <header class="glass border-b border-gray-700/50 px-6 py-4 flex-shrink-0" style="border-bottom: 1px solid; border-image: linear-gradient(90deg, rgba(139,92,246,0.3), rgba(99,102,241,0.1), transparent) 1;">
                 <div class="flex items-center justify-between">
                     <div>
-                        <h1 class="text-xl font-semibold text-white">AI Chat Assistant</h1>
+                        <h1 class="text-lg font-semibold tracking-tight text-gradient">Conductor</h1>
                         <p class="text-sm text-gray-400 mt-1 flex items-center gap-1">
-                            Room: <span id="room-id-display" class="font-mono text-xs text-gray-500">loading...</span>
+                            Room: <span id="room-id-display" class="font-mono text-xs text-purple-400 hover:text-purple-300 transition-colors" style="text-shadow: 0 0 8px rgba(192,132,252,0.2);">loading...</span>
                             <button id="btn-copy-room-id" class="text-gray-500 hover:text-gray-300 transition-colors p-0.5" title="Copy Room ID">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
                                     <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
@@ -320,7 +443,7 @@
                         <!-- AI Config Button -->
                         <button
                             id="btn-ai-config"
-                            class="text-gray-400 hover:text-purple-400 p-1.5 rounded transition-colors"
+                            class="text-gray-400 hover:text-purple-400 p-1.5 rounded-lg glass hover:glow-primary transition-all duration-200"
                             title="AI Configuration"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -330,7 +453,7 @@
                         <!-- Room Settings Button (Lead only) -->
                         <button
                             id="btn-room-settings"
-                            class="hidden text-gray-400 hover:text-blue-400 p-1.5 rounded transition-colors"
+                            class="hidden text-gray-400 hover:text-blue-400 p-1.5 rounded-lg glass hover:glow-primary transition-all duration-200"
                             title="Room Settings"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -391,16 +514,16 @@
             <div id="lead-actions" class="hidden mt-4 flex gap-2">
                 <button
                     id="btn-create-summary"
-                    class="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2"
+                    class="bg-gradient-to-r from-violet-600 to-indigo-600 hover:brightness-110 text-white text-sm font-medium px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 tracking-wide hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] hover:scale-[1.02]"
                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/>
                     </svg>
-                    Create Summary
+                    Distill
                 </button>
                 <button
                     id="btn-end-chat"
-                    class="bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2"
+                    class="bg-red-600/80 hover:bg-red-600 text-white text-sm font-medium px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 border border-red-500/20 hover:shadow-[0_0_15px_rgba(239,68,68,0.2)]"
                     title="End chat session for all participants"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -411,7 +534,7 @@
             </div>
 
             <!-- Pending Changes Card (hidden by default) -->
-            <div id="pending-changes-card" class="hidden mt-4 bg-gray-700/50 border border-gray-600 rounded-lg p-4">
+            <div id="pending-changes-card" class="hidden mt-4 glass border border-purple-500/20 rounded-lg p-4">
                 <div class="flex items-center justify-between mb-3">
                     <h3 class="text-sm font-medium text-white flex items-center gap-2">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
@@ -452,7 +575,7 @@
 
                 <!-- Policy Status -->
                 <div id="policy-status" class="flex items-center gap-2 text-xs mb-3">
-                    <span id="policy-status-icon" class="text-green-400">✓</span>
+                    <span id="policy-status-icon" class="inline-block w-2 h-2 rounded-full bg-green-400 online-glow"></span>
                     <span id="policy-status-text" class="text-gray-300">Safe to apply</span>
                 </div>
 
@@ -460,7 +583,7 @@
                 <div class="flex gap-2">
                     <button
                         id="btn-view-diff"
-                        class="flex-1 bg-gray-600 hover:bg-gray-500 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors duration-200 flex items-center justify-center gap-1"
+                        class="flex-1 glass hover:bg-gray-600/80 text-white text-xs font-medium px-3 py-2 rounded-lg transition-all duration-200 flex items-center justify-center gap-1"
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
                             <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
@@ -470,7 +593,7 @@
                     </button>
                     <button
                         id="btn-apply-changes"
-                        class="flex-1 bg-green-600 hover:bg-green-700 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors duration-200 flex items-center justify-center gap-1"
+                        class="flex-1 bg-gradient-to-r from-emerald-600 to-green-600 hover:brightness-110 text-white text-xs font-medium px-3 py-2 rounded-lg transition-all duration-200 flex items-center justify-center gap-1 hover:shadow-[0_0_15px_rgba(16,185,129,0.25)]"
                     >
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
                             <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
@@ -483,17 +606,17 @@
 
         <!-- Messages Area - WhatsApp-style scrollable container -->
         <div class="relative flex-1 min-h-0">
-            <div id="messages-container" class="absolute inset-0 overflow-y-auto px-4 py-4 space-y-3" style="scrollbar-width: thin; scrollbar-color: #4b5563 transparent;">
+            <div id="messages-container" class="absolute inset-0 overflow-y-auto px-4 py-4 space-y-3" style="scrollbar-width: thin; scrollbar-color: rgba(99,102,241,0.35) transparent;">
                 <!-- Messages will be rendered here by JavaScript -->
                 <div id="connection-status" class="flex justify-center">
-                    <div class="bg-gray-800/50 text-gray-400 text-xs px-3 py-1.5 rounded-full border border-gray-700">
+                    <div class="bg-gray-800/50 text-gray-400 text-xs px-3 py-1.5 rounded-full border border-gray-700 shimmer">
                         <span>Connecting to chat...</span>
                     </div>
                 </div>
             </div>
 
             <!-- Scroll to bottom button -->
-            <button id="scroll-to-bottom" class="hidden absolute bottom-4 right-4 bg-gray-700 hover:bg-gray-600 text-white p-2 rounded-full shadow-lg z-10" title="Scroll to bottom">
+            <button id="scroll-to-bottom" class="hidden absolute bottom-4 right-4 glass hover:bg-gray-600/80 text-white p-2 rounded-full shadow-lg z-10 hover:shadow-[0_0_10px_rgba(139,92,246,0.2)]" title="Scroll to bottom">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                     <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
                 </svg>
@@ -502,12 +625,12 @@
         </div>
 
         <!-- Typing Indicator -->
-        <div id="typing-indicator" class="hidden flex-shrink-0 px-6 py-2 text-xs text-gray-400 italic">
-            <span id="typing-text">Someone is typing...</span>
+        <div id="typing-indicator" class="hidden flex-shrink-0 px-6 py-2 text-xs text-gray-400">
+            <span id="typing-text" class="flex items-center gap-1.5">Someone is typing<span class="typing-dots"><span></span><span></span><span></span></span></span>
         </div>
 
         <!-- Input Area -->
-        <div class="flex-shrink-0 border-t border-gray-700 bg-gray-800 px-6 py-4">
+        <div class="flex-shrink-0 border-t border-gray-700/50 glass px-6 py-4">
             <!-- Hidden file input -->
             <input type="file" id="file-input" class="hidden"
                    accept="image/*,.pdf,audio/*,.mp3,.wav,.ogg,.m4a,.flac" />
@@ -567,7 +690,7 @@
                 <!-- Attachment Button -->
                 <button
                     id="btn-attach"
-                    class="bg-gray-700 hover:bg-gray-600 text-gray-300 p-3 rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    class="bg-gray-700/80 hover:bg-gray-600/80 text-gray-300 hover:text-violet-300 p-3 rounded-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-violet-500/30"
                     title="Attach file (images, PDF, audio, max 20MB)"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -578,7 +701,7 @@
                 <!-- Code Snippet Button -->
                 <button
                     id="btn-code-snippet"
-                    class="bg-gray-700 hover:bg-gray-600 text-gray-300 p-3 rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    class="bg-gray-700/80 hover:bg-gray-600/80 text-gray-300 hover:text-violet-300 p-3 rounded-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-violet-500/30"
                     title="Share code from editor (select code first)"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -592,14 +715,14 @@
                         id="chat-input"
                         rows="1"
                         placeholder="Type your message or paste an image..."
-                        class="w-full bg-gray-900 text-gray-100 border border-gray-700 rounded-lg px-4 py-3 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent placeholder-gray-500 text-sm"
+                        class="w-full bg-gray-900/80 text-gray-100 border border-gray-700/50 rounded-lg px-4 py-3 resize-none focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 placeholder-gray-500 text-sm transition-all duration-200"
                     ></textarea>
                 </div>
 
                 <!-- Send Button -->
                 <button
                     id="btn-send"
-                    class="bg-blue-600 hover:bg-blue-700 text-white font-medium px-6 py-3 rounded-lg transition-colors duration-200 flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-800"
+                    class="bg-gradient-to-r from-violet-600 to-blue-600 hover:brightness-110 text-white font-medium px-6 py-3 rounded-lg transition-all duration-200 flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:ring-offset-2 focus:ring-offset-gray-800 hover:shadow-[0_0_15px_rgba(124,58,237,0.25)]"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
@@ -616,10 +739,10 @@
         </div> <!-- close chat content column -->
 
         <!-- Users Sidebar (inside panel-chat) -->
-        <aside id="sidebar" class="w-56 bg-gray-800 border-l border-gray-700 flex-shrink-0 hidden md:flex flex-col">
-            <div class="px-4 py-4 border-b border-gray-700">
+        <aside id="sidebar" class="w-56 glass flex-shrink-0 hidden md:flex flex-col" style="border-left: 1px solid; border-image: linear-gradient(180deg, rgba(139,92,246,0.2), rgba(99,102,241,0.05), transparent) 1;">
+            <div class="px-4 py-4 border-b border-gray-700/50">
                 <div class="flex items-center justify-between">
-                    <h2 class="text-sm font-semibold text-gray-300">Participants</h2>
+                    <h2 class="text-[0.65rem] font-medium text-gray-400 uppercase tracking-widerr">Participants</h2>
                     <span id="user-count" class="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded-full">0</span>
                 </div>
             </div>
@@ -636,18 +759,18 @@
     <!-- ============================================================ -->
     <div id="ai-config-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
         <!-- Backdrop -->
-        <div id="ai-config-backdrop" class="absolute inset-0 bg-black/60"></div>
+        <div id="ai-config-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
         <!-- Modal Content -->
-        <div class="relative bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-md mx-4">
+        <div class="relative glass rounded-xl shadow-2xl shadow-black/50 w-full max-w-md mx-4 modal-enter">
             <!-- Header -->
-            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700/50 bg-gradient-to-r from-gray-800/80 to-gray-800/40">
                 <h3 class="text-lg font-semibold text-white flex items-center gap-2">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" />
                     </svg>
                     AI Configuration
                 </h3>
-                <button id="btn-close-ai-config" class="text-gray-400 hover:text-white p-1 rounded transition-colors">
+                <button id="btn-close-ai-config" class="text-gray-400 hover:text-white p-1 rounded transition-all modal-close-btn">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
@@ -676,7 +799,7 @@
                                     </svg>
                                 </div>
                                 <div>
-                                    <span class="text-white text-sm font-medium block">AI Summary</span>
+                                    <span class="text-white text-sm font-medium block">AI Distillation</span>
                                     <span id="ai-summary-status-text" class="text-xs text-gray-400">Checking status...</span>
                                 </div>
                             </div>
@@ -731,18 +854,18 @@
     <!-- ============================================================ -->
     <div id="room-settings-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
         <!-- Backdrop -->
-        <div id="room-settings-backdrop" class="absolute inset-0 bg-black/60"></div>
+        <div id="room-settings-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
         <!-- Modal Content -->
-        <div class="relative bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-md mx-4">
+        <div class="relative glass rounded-xl shadow-2xl shadow-black/50 w-full max-w-md mx-4 modal-enter">
             <!-- Header -->
-            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700/50 bg-gradient-to-r from-gray-800/80 to-gray-800/40">
                 <h3 class="text-lg font-semibold text-white flex items-center gap-2">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" />
                     </svg>
                     Room Settings
                 </h3>
-                <button id="btn-close-room-settings" class="text-gray-400 hover:text-white p-1 rounded transition-colors">
+                <button id="btn-close-room-settings" class="text-gray-400 hover:text-white p-1 rounded transition-all modal-close-btn">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
@@ -761,15 +884,34 @@
                 </div>
                 <!-- Content -->
                 <div id="room-settings-content" class="hidden space-y-4">
-                    <!-- Code Style Textarea -->
+                    <!-- Template Picker -->
                     <div>
-                        <label for="room-code-style" class="block text-sm font-medium text-gray-300 mb-2">Code Style Guidelines</label>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Load from Template</label>
+                        <div class="flex gap-2">
+                            <select id="style-template-select" class="flex-1 bg-gray-900 border border-gray-600 text-gray-100 text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-violet-500 focus:border-violet-500">
+                                <option value="">-- Select a template --</option>
+                            </select>
+                            <button id="btn-load-template" class="bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium px-3 py-2 rounded-lg transition-colors whitespace-nowrap">
+                                Load
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Code Style Textarea with header row -->
+                    <div>
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center gap-2">
+                                <label for="room-code-style" class="block text-sm font-medium text-gray-300">Code Style Guidelines</label>
+                                <span id="style-source-badge" class="hidden text-xs px-2 py-0.5 rounded-full font-medium">Default</span>
+                            </div>
+                            <button id="btn-toggle-preview" class="text-xs text-violet-400 hover:text-violet-300 transition-colors">Preview</button>
+                        </div>
                         <textarea
                             id="room-code-style"
                             rows="8"
-                            class="w-full bg-gray-900 border border-gray-600 text-gray-100 text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono resize-y"
+                            class="w-full bg-gray-900 border border-gray-600 text-gray-100 text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-violet-500 focus:border-violet-500 font-mono resize-y"
                             placeholder="Enter code style guidelines for this room (e.g., indentation rules, naming conventions, patterns to follow)..."
                         ></textarea>
+                        <div id="style-preview" class="hidden w-full bg-gray-900 border border-gray-600 text-gray-100 text-sm rounded-lg px-3 py-2 font-mono overflow-y-auto" style="min-height: 12rem; max-height: 20rem;"></div>
                         <p class="text-xs text-gray-500 mt-1">These guidelines will be included in AI-generated code prompts for this room.</p>
                     </div>
                 </div>
@@ -791,18 +933,18 @@
     <!-- ============================================================ -->
     <div id="summarize-options-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
         <!-- Backdrop -->
-        <div id="summarize-options-backdrop" class="absolute inset-0 bg-black/60"></div>
+        <div id="summarize-options-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
         <!-- Modal Content -->
-        <div class="relative bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-md mx-4">
+        <div class="relative glass rounded-xl shadow-2xl shadow-black/50 w-full max-w-md mx-4 modal-enter">
             <!-- Header -->
-            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700/50 bg-gradient-to-r from-gray-800/80 to-gray-800/40">
                 <h3 class="text-lg font-semibold text-white flex items-center gap-2">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" />
                     </svg>
-                    Summarize Chat
+                    Distill Conversation
                 </h3>
-                <button id="btn-close-summarize-options" class="text-gray-400 hover:text-white p-1 rounded transition-colors">
+                <button id="btn-close-summarize-options" class="text-gray-400 hover:text-white p-1 rounded transition-all modal-close-btn">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
@@ -810,7 +952,7 @@
             </div>
             <!-- Body -->
             <div class="px-5 py-4 space-y-4">
-                <p class="text-gray-300 text-sm">How would you like to summarize the conversation?</p>
+                <p class="text-gray-300 text-sm">How would you like to distill the conversation?</p>
 
                 <!-- Option: Summarize All -->
                 <button id="btn-summarize-all" class="w-full bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium px-4 py-3 rounded-lg transition-colors flex items-center gap-3">
@@ -819,7 +961,7 @@
                         <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clip-rule="evenodd" />
                     </svg>
                     <div class="text-left">
-                        <span class="block font-medium">Summarize All Messages</span>
+                        <span class="block font-medium">Distill All Messages</span>
                         <span id="summarize-all-count" class="text-xs text-purple-200">0 messages</span>
                     </div>
                 </button>
@@ -830,7 +972,7 @@
                         <path fill-rule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" />
                     </svg>
                     <div class="text-left">
-                        <span class="block font-medium">Select Messages to Summarize</span>
+                        <span class="block font-medium">Select Messages to Distill</span>
                         <span class="text-xs text-gray-400">Choose specific messages</span>
                     </div>
                 </button>
@@ -843,9 +985,9 @@
     <!-- ============================================================ -->
     <div id="message-selection-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
         <!-- Backdrop -->
-        <div id="message-selection-backdrop" class="absolute inset-0 bg-black/60"></div>
+        <div id="message-selection-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
         <!-- Modal Content -->
-        <div class="relative bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-lg mx-4 max-h-[80vh] flex flex-col">
+        <div class="relative glass rounded-xl shadow-2xl shadow-black/50 w-full max-w-lg mx-4 max-h-[80vh] flex flex-col modal-enter">
             <!-- Header -->
             <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700 flex-shrink-0">
                 <h3 class="text-lg font-semibold text-white flex items-center gap-2">
@@ -854,7 +996,7 @@
                     </svg>
                     Select Messages
                 </h3>
-                <button id="btn-close-message-selection" class="text-gray-400 hover:text-white p-1 rounded transition-colors">
+                <button id="btn-close-message-selection" class="text-gray-400 hover:text-white p-1 rounded transition-all modal-close-btn">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
@@ -879,7 +1021,7 @@
                     Cancel
                 </button>
                 <button id="btn-confirm-message-selection" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors">
-                    Summarize Selected
+                    Distill Selected
                 </button>
             </div>
         </div>
@@ -890,18 +1032,18 @@
     <!-- ============================================================ -->
     <div id="summary-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
         <!-- Backdrop -->
-        <div id="summary-modal-backdrop" class="absolute inset-0 bg-black/60"></div>
+        <div id="summary-modal-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
         <!-- Modal Content -->
-        <div class="relative bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+        <div class="relative glass rounded-xl shadow-2xl shadow-black/50 w-full max-w-lg mx-4 max-h-[90vh] flex flex-col modal-enter">
             <!-- Header -->
             <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700 flex-shrink-0">
                 <h3 class="text-lg font-semibold text-white flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-emerald-400" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-violet-400" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/>
                     </svg>
-                    Chat Summary
+                    AI Distillation
                 </h3>
-                <button id="btn-close-summary" class="text-gray-400 hover:text-white p-1 rounded transition-colors">
+                <button id="btn-close-summary" class="text-gray-400 hover:text-white p-1 rounded transition-all modal-close-btn">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
@@ -910,9 +1052,9 @@
             <!-- Body (scrollable) -->
             <div class="px-5 py-4 space-y-4 overflow-y-auto flex-1">
                 <!-- Loading State -->
-                <div id="summary-loading" class="hidden flex items-center justify-center py-8">
-                    <div class="h-6 w-6 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
-                    <span class="ml-3 text-gray-400 text-sm">Generating summary...</span>
+                <div id="summary-loading" class="hidden flex flex-col items-center justify-center py-8 gap-3">
+                    <div class="ai-thinking-dots"><span></span><span></span><span></span></div>
+                    <span class="text-gray-400 text-sm">Distilling conversation...</span>
                 </div>
                 <!-- Error State -->
                 <div id="summary-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-4">
@@ -920,40 +1062,40 @@
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
                             <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
                         </svg>
-                        <span class="text-red-400 font-medium">Summary Failed</span>
+                        <span class="text-red-400 font-medium">Distillation Failed</span>
                     </div>
-                    <p class="text-red-300 text-sm" id="summary-error-text">Unable to generate summary.</p>
+                    <p class="text-red-300 text-sm" id="summary-error-text">Unable to distill conversation.</p>
                 </div>
                 <!-- Summary Content -->
                 <div id="summary-content" class="hidden space-y-4">
                     <!-- Topic -->
                     <div>
-                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Topic</h4>
+                        <h4 class="text-[0.65rem] font-medium text-gray-400 uppercase tracking-wider mb-1">Topic</h4>
                         <p id="summary-topic" class="text-white text-sm"></p>
                     </div>
                     <!-- Problem Statement -->
                     <div>
-                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Problem</h4>
+                        <h4 class="text-[0.65rem] font-medium text-gray-400 uppercase tracking-wider mb-1">Problem</h4>
                         <p id="summary-problem" class="text-gray-200 text-sm"></p>
                     </div>
                     <!-- Proposed Solution -->
                     <div>
-                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Proposed Solution</h4>
+                        <h4 class="text-[0.65rem] font-medium text-gray-400 uppercase tracking-wider mb-1">Proposed Solution</h4>
                         <p id="summary-solution" class="text-gray-200 text-sm"></p>
                     </div>
                     <!-- Risk Level -->
                     <div class="flex items-center gap-3">
-                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Risk Level</h4>
+                        <h4 class="text-[0.65rem] font-medium text-gray-400 uppercase tracking-wider">Risk Level</h4>
                         <span id="summary-risk" class="px-2 py-0.5 rounded text-xs font-medium"></span>
                     </div>
                     <!-- Affected Components -->
                     <div id="summary-components-section">
-                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Affected Components</h4>
+                        <h4 class="text-[0.65rem] font-medium text-gray-400 uppercase tracking-wider mb-2">Affected Components</h4>
                         <div id="summary-components" class="flex flex-wrap gap-1"></div>
                     </div>
                     <!-- Next Steps -->
                     <div id="summary-steps-section">
-                        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Next Steps</h4>
+                        <h4 class="text-[0.65rem] font-medium text-gray-400 uppercase tracking-wider mb-2">Next Steps</h4>
                         <ul id="summary-steps" class="text-sm text-gray-200 list-disc list-inside space-y-1"></ul>
                     </div>
                     <!-- Code Change Required Section -->
@@ -1164,6 +1306,12 @@
         const roomSettingsContent = document.getElementById('room-settings-content');
         const roomSettingsFooter = document.getElementById('room-settings-footer');
         const roomCodeStyleTextarea = document.getElementById('room-code-style');
+        const styleTemplateSelect = document.getElementById('style-template-select');
+        const btnLoadTemplate = document.getElementById('btn-load-template');
+        const btnTogglePreview = document.getElementById('btn-toggle-preview');
+        const stylePreview = document.getElementById('style-preview');
+        const styleSourceBadge = document.getElementById('style-source-badge');
+        let styleTemplatesCache = [];
 
         // AI Summarize elements
 
@@ -1863,6 +2011,10 @@
                     // Received room settings from extension
                     handleRoomSettingsResponse(message.data);
                     break;
+                case 'styleTemplates':
+                    // Received style templates from extension
+                    handleStyleTemplatesResponse(message.data);
+                    break;
                 case 'saveRoomSettingsResult':
                     // Received save room settings result from extension
                     handleSaveRoomSettingsResult(message.data);
@@ -2140,7 +2292,7 @@
             if (session.roomId) {
                 const roomIdDisplay = document.getElementById('room-id-display');
                 const shortId = session.roomId.slice(0, 8);
-                roomIdDisplay.innerHTML = `Room: <span class="text-gray-400 font-mono">${shortId}...</span>`;
+                roomIdDisplay.innerHTML = `Room: <span class="text-purple-400 font-mono">${shortId}...</span>`;
                 roomIdDisplay.title = session.roomId;
             }
 
@@ -2179,7 +2331,7 @@
                 // Status indicator
                 const statusDot = isTyping
                     ? '<span class="absolute bottom-0 right-0 w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse"></span>'
-                    : '<span class="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border border-gray-800"></span>';
+                    : '<span class="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border border-gray-800 online-glow"></span>';
 
                 // Typing status text
                 const typingText = isTyping
@@ -2295,14 +2447,14 @@
             const names = Array.from(typingUsers.values());
             let text;
             if (names.length === 1) {
-                text = `${names[0]} is typing...`;
+                text = `${names[0]} is typing`;
             } else if (names.length === 2) {
-                text = `${names[0]} and ${names[1]} are typing...`;
+                text = `${names[0]} and ${names[1]} are typing`;
             } else {
-                text = `${names[0]} and ${names.length - 1} others are typing...`;
+                text = `${names[0]} and ${names.length - 1} others are typing`;
             }
 
-            typingText.textContent = text;
+            typingText.innerHTML = `${escapeHtml(text)}<span class="typing-dots"><span></span><span></span><span></span></span>`;
             typingIndicator.classList.remove('hidden');
         }
 
@@ -2631,7 +2783,7 @@
             const div = document.createElement('div');
             div.setAttribute('data-message-id', msg.id || '');
             div.setAttribute('data-timestamp', msg.ts || '');
-            div.className = 'flex justify-start gap-2';
+            div.className = 'flex justify-start gap-2 message-enter';
 
             const aiData = msg.aiData || {};
             const riskLevel = aiData.risk_level || 'low';
@@ -2679,17 +2831,19 @@
             ` : '';
 
             div.innerHTML = `
-                <div class="w-7 h-7 bg-purple-600 rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
-                    🤖
+                <div class="w-7 h-7 bg-gradient-to-br from-violet-600 to-indigo-600 rounded-full flex items-center justify-center text-white flex-shrink-0 mt-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/>
+                    </svg>
                 </div>
                 <div class="max-w-[85%] min-w-0 flex-1">
-                    <div class="text-xs text-gray-400 mb-1 ml-1">🤖 ${escapeHtml(msg.displayName || 'AI')}</div>
-                    <div class="bg-gradient-to-br from-purple-900/50 to-gray-800 rounded-lg overflow-hidden border border-purple-700/50 shadow-lg">
-                        <div class="px-4 py-3 bg-purple-800/30 border-b border-purple-700/50 flex items-center gap-2">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
-                                <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+                    <div class="text-xs text-gray-400 mb-1 ml-1 flex items-center gap-1"><svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-violet-400" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/></svg> ${escapeHtml(msg.displayName || 'AI')}</div>
+                    <div class="bg-gradient-to-br from-violet-950/60 via-purple-900/40 to-gray-900/80 rounded-lg overflow-hidden border border-purple-700/50 shadow-lg ai-card-border shimmer">
+                        <div class="px-4 py-3 bg-purple-800/20 border-b border-purple-700/30 flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-purple-400" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/>
                             </svg>
-                            <span class="text-sm font-medium text-purple-200">AI Summary</span>
+                            <span class="text-sm font-medium text-gradient">AI Distillation</span>
                         </div>
                         <div class="p-4 space-y-3">
                             <div>
@@ -2998,15 +3152,15 @@
             div.setAttribute('data-message-id', msg.id || '');
             div.setAttribute('data-timestamp', msg.ts || '');
             // Reduce spacing for grouped messages
-            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2 ${isGrouped ? 'mt-1' : ''}`;
+            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2 ${isGrouped ? 'mt-1' : ''} message-enter`;
 
             const displayName = msg.displayName || usersMap.get(msg.userId)?.displayName || 'Unknown';
             const idSource = msg.identitySource || usersMap.get(msg.userId)?.identitySource;
             const { nameHtml, bubbleAccent } = buildNameAndRole(displayName, msg.role, idSource);
 
             const bubbleColor = isOwnMessage
-                ? 'bg-blue-600 text-white rounded-2xl rounded-tr-sm'
-                : `bg-gray-800 text-gray-100 rounded-2xl rounded-tl-sm border border-gray-700 ${bubbleAccent}`;
+                ? 'bg-gradient-to-br from-blue-600 to-indigo-700 text-white rounded-2xl rounded-tr-sm'
+                : `bg-gray-800/60 backdrop-blur text-gray-100 rounded-2xl rounded-tl-sm border border-gray-700/50 ${bubbleAccent}`;
 
             const timeAlign = isOwnMessage ? 'text-right' : '';
 
@@ -3167,8 +3321,8 @@
             const { nameHtml, bubbleAccent } = buildNameAndRole(displayName, msg.role, idSource);
 
             const bubbleColor = isOwnMessage
-                ? 'bg-blue-600 text-white rounded-2xl rounded-tr-sm'
-                : `bg-gray-800 text-gray-100 rounded-2xl rounded-tl-sm border border-gray-700 ${bubbleAccent}`;
+                ? 'bg-gradient-to-br from-blue-600 to-indigo-700 text-white rounded-2xl rounded-tr-sm'
+                : `bg-gray-800/60 backdrop-blur text-gray-100 rounded-2xl rounded-tl-sm border border-gray-700/50 ${bubbleAccent}`;
 
             const userInfo = usersMap.get(msg.userId);
             const colorClass = userInfo ? (avatarColors[userInfo.avatarColor] || 'bg-purple-600') : 'bg-gray-600';
@@ -4147,7 +4301,12 @@
          */
         function openRoomSettingsModal() {
             roomSettingsModal.classList.remove('hidden');
+            // Reset preview state
+            if (stylePreview) stylePreview.classList.add('hidden');
+            if (roomCodeStyleTextarea) roomCodeStyleTextarea.classList.remove('hidden');
+            if (btnTogglePreview) btnTogglePreview.textContent = 'Preview';
             fetchRoomSettings();
+            fetchStyleTemplates();
         }
 
         /**
@@ -4171,6 +4330,151 @@
         }
 
         /**
+         * Fetch style templates from the backend via extension.
+         */
+        function fetchStyleTemplates() {
+            console.log('[WebView] fetchStyleTemplates called');
+            vscode.postMessage({ command: 'getStyleTemplates' });
+        }
+
+        /**
+         * Handle style templates response from extension.
+         * @param {Object} data - Templates data or error
+         */
+        function handleStyleTemplatesResponse(data) {
+            console.log('[WebView] handleStyleTemplatesResponse');
+            if (data.error || !data.templates) {
+                console.warn('[WebView] Failed to load style templates:', data.error);
+                return;
+            }
+            styleTemplatesCache = data.templates;
+            if (styleTemplateSelect) {
+                styleTemplateSelect.innerHTML = '<option value="">-- Select a template --</option>';
+                data.templates.forEach(function(t) {
+                    const opt = document.createElement('option');
+                    opt.value = t.name;
+                    opt.textContent = t.name.charAt(0).toUpperCase() + t.name.slice(1);
+                    styleTemplateSelect.appendChild(opt);
+                });
+            }
+        }
+
+        /**
+         * Load selected template content into the textarea.
+         */
+        function loadSelectedTemplate() {
+            if (!styleTemplateSelect) return;
+            const name = styleTemplateSelect.value;
+            if (!name) return;
+            const template = styleTemplatesCache.find(function(t) { return t.name === name; });
+            if (template && roomCodeStyleTextarea) {
+                roomCodeStyleTextarea.value = template.content;
+                // Switch back to edit mode if in preview
+                if (stylePreview && !stylePreview.classList.contains('hidden')) {
+                    stylePreview.classList.add('hidden');
+                    roomCodeStyleTextarea.classList.remove('hidden');
+                    if (btnTogglePreview) btnTogglePreview.textContent = 'Preview';
+                }
+                updateSourceBadge(true);
+            }
+        }
+
+        /**
+         * Toggle between edit and preview mode for the code style textarea.
+         */
+        function toggleStylePreview() {
+            if (!stylePreview || !roomCodeStyleTextarea || !btnTogglePreview) return;
+            const isPreview = !stylePreview.classList.contains('hidden');
+            if (isPreview) {
+                // Switch to edit mode
+                stylePreview.classList.add('hidden');
+                roomCodeStyleTextarea.classList.remove('hidden');
+                btnTogglePreview.textContent = 'Preview';
+            } else {
+                // Switch to preview mode
+                const md = roomCodeStyleTextarea.value || '';
+                stylePreview.innerHTML = renderSimpleMarkdown(md);
+                roomCodeStyleTextarea.classList.add('hidden');
+                stylePreview.classList.remove('hidden');
+                btnTogglePreview.textContent = 'Edit';
+            }
+        }
+
+        /**
+         * Simple markdown renderer for preview.
+         * Handles # headers, - bullets, and `inline code`.
+         * @param {string} md - Markdown text
+         * @returns {string} HTML string
+         */
+        function renderSimpleMarkdown(md) {
+            if (!md) return '<p class="text-gray-500 italic">No content</p>';
+            const escaped = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const lines = escaped.split('\n');
+            let html = '';
+            let inList = false;
+
+            lines.forEach(function(line) {
+                // Headers
+                if (line.match(/^### /)) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += '<h4 class="text-sm font-semibold text-violet-300 mt-3 mb-1">' + line.slice(4) + '</h4>';
+                } else if (line.match(/^## /)) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += '<h3 class="text-sm font-bold text-violet-200 mt-4 mb-1">' + line.slice(3) + '</h3>';
+                } else if (line.match(/^# /)) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += '<h2 class="text-base font-bold text-white mt-4 mb-2">' + line.slice(2) + '</h2>';
+                }
+                // Bullet points
+                else if (line.match(/^\s*- /)) {
+                    if (!inList) { html += '<ul class="list-disc list-inside space-y-0.5 text-gray-300">'; inList = true; }
+                    html += '<li class="text-xs">' + inlineCode(line.replace(/^\s*- /, '')) + '</li>';
+                }
+                // Numbered lists
+                else if (line.match(/^\s*\d+\. /)) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += '<p class="text-xs text-gray-300 ml-2">' + inlineCode(line) + '</p>';
+                }
+                // Blank line
+                else if (line.trim() === '') {
+                    if (inList) { html += '</ul>'; inList = false; }
+                }
+                // Regular text
+                else {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += '<p class="text-xs text-gray-300">' + inlineCode(line) + '</p>';
+                }
+            });
+            if (inList) html += '</ul>';
+            return html;
+        }
+
+        /**
+         * Replace `code` with styled inline code spans.
+         * @param {string} text - Text with backtick-delimited code
+         * @returns {string} HTML with styled code spans
+         */
+        function inlineCode(text) {
+            return text.replace(/`([^`]+)`/g, '<code class="bg-gray-800 text-violet-300 px-1 rounded text-xs">$1</code>');
+        }
+
+        /**
+         * Update the source badge to show Custom or Default.
+         * @param {boolean} hasCustomStyle - Whether the room has a custom style set
+         */
+        function updateSourceBadge(hasCustomStyle) {
+            if (!styleSourceBadge) return;
+            styleSourceBadge.classList.remove('hidden');
+            if (hasCustomStyle) {
+                styleSourceBadge.textContent = 'Custom';
+                styleSourceBadge.className = 'text-xs px-2 py-0.5 rounded-full font-medium bg-green-900/50 text-green-400 border border-green-700/50';
+            } else {
+                styleSourceBadge.textContent = 'Default';
+                styleSourceBadge.className = 'text-xs px-2 py-0.5 rounded-full font-medium bg-gray-700/50 text-gray-400 border border-gray-600/50';
+            }
+        }
+
+        /**
          * Handle room settings response from extension.
          * @param {Object} data - Room settings data or error
          */
@@ -4186,7 +4490,9 @@
 
             roomSettingsContent.classList.remove('hidden');
             roomSettingsFooter.classList.remove('hidden');
-            roomCodeStyleTextarea.value = data.code_style || '';
+            const codeStyle = data.code_style || '';
+            roomCodeStyleTextarea.value = codeStyle;
+            updateSourceBadge(!!codeStyle);
         }
 
         /**
@@ -4231,6 +4537,12 @@
         }
         if (btnSaveRoomSettings) {
             btnSaveRoomSettings.addEventListener('click', saveRoomSettings);
+        }
+        if (btnLoadTemplate) {
+            btnLoadTemplate.addEventListener('click', loadSelectedTemplate);
+        }
+        if (btnTogglePreview) {
+            btnTogglePreview.addEventListener('click', toggleStylePreview);
         }
 
         // ============================================================

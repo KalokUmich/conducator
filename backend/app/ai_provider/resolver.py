@@ -20,6 +20,7 @@ Usage:
 """
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, List, Optional
 
 from app.config import (
@@ -33,6 +34,13 @@ from .claude_direct import ClaudeDirectProvider
 from .openai_provider import OpenAIProvider
 
 logger = logging.getLogger(__name__)
+
+
+class ProviderType(str, Enum):
+    """Supported AI provider types."""
+    ANTHROPIC = "anthropic"
+    AWS_BEDROCK = "aws_bedrock"
+    OPENAI = "openai"
 
 
 @dataclass
@@ -80,8 +88,8 @@ class ProviderResolver:
         active_model_id: Currently selected model ID.
     """
 
-    # Provider type names
-    PROVIDER_TYPES = ["anthropic", "aws_bedrock", "openai"]
+    # All provider types to check during resolution
+    PROVIDER_TYPES = list(ProviderType)
 
     def __init__(self, config: ConductorConfig) -> None:
         """Initialize the provider resolver.
@@ -108,58 +116,35 @@ class ProviderResolver:
         self.active_model_id: Optional[str] = None
         self.active_provider_type: Optional[str] = None
 
-    def _is_provider_enabled(self, provider_type: str) -> bool:
-        """Check if a provider is enabled in settings.
+    def _is_provider_enabled(self, provider_type: ProviderType) -> bool:
+        """Check if a provider is enabled in settings."""
+        enabled_map = {
+            ProviderType.ANTHROPIC: self.provider_settings.anthropic_enabled,
+            ProviderType.AWS_BEDROCK: self.provider_settings.aws_bedrock_enabled,
+            ProviderType.OPENAI: self.provider_settings.openai_enabled,
+        }
+        return enabled_map.get(provider_type, False)
 
-        Args:
-            provider_type: Provider type (anthropic, aws_bedrock, openai).
-
-        Returns:
-            True if the provider is enabled in settings.
-        """
-        if provider_type == "anthropic":
-            return self.provider_settings.anthropic_enabled
-        elif provider_type == "aws_bedrock":
-            return self.provider_settings.aws_bedrock_enabled
-        elif provider_type == "openai":
-            return self.provider_settings.openai_enabled
-        return False
-
-    def _is_provider_configured(self, provider_type: str) -> bool:
-        """Check if a provider has API keys configured.
-
-        Args:
-            provider_type: Provider type (anthropic, aws_bedrock, openai).
-
-        Returns:
-            True if the provider has API keys configured.
-        """
-        if provider_type == "anthropic":
+    def _is_provider_configured(self, provider_type: ProviderType) -> bool:
+        """Check if a provider has API keys configured."""
+        if provider_type == ProviderType.ANTHROPIC:
             return bool(self.providers_config.anthropic.api_key)
-        elif provider_type == "aws_bedrock":
+        elif provider_type == ProviderType.AWS_BEDROCK:
             return bool(self.providers_config.aws_bedrock.access_key_id and
                        self.providers_config.aws_bedrock.secret_access_key)
-        elif provider_type == "openai":
+        elif provider_type == ProviderType.OPENAI:
             return bool(self.providers_config.openai.api_key)
         return False
 
-    def _create_provider(self, provider_type: str, model_name: str) -> Optional[AIProvider]:
-        """Create a provider instance for the given type and model.
-
-        Args:
-            provider_type: Provider type (anthropic, aws_bedrock, openai).
-            model_name: Model name to use with the provider.
-
-        Returns:
-            AIProvider instance or None if creation fails.
-        """
+    def _create_provider(self, provider_type: ProviderType, model_name: str) -> Optional[AIProvider]:
+        """Create a provider instance for the given type and model."""
         try:
-            if provider_type == "anthropic":
+            if provider_type == ProviderType.ANTHROPIC:
                 return ClaudeDirectProvider(
                     api_key=self.providers_config.anthropic.api_key,
                     model=model_name,
                 )
-            elif provider_type == "aws_bedrock":
+            elif provider_type == ProviderType.AWS_BEDROCK:
                 cfg = self.providers_config.aws_bedrock
                 return ClaudeBedrockProvider(
                     aws_access_key_id=cfg.access_key_id,
@@ -168,7 +153,7 @@ class ProviderResolver:
                     region_name=cfg.region,
                     model_id=model_name,
                 )
-            elif provider_type == "openai":
+            elif provider_type == ProviderType.OPENAI:
                 cfg = self.providers_config.openai
                 return OpenAIProvider(
                     api_key=cfg.api_key,
@@ -182,15 +167,8 @@ class ProviderResolver:
             logger.error(f"Failed to create provider {provider_type}: {e}")
             return None
 
-    def _check_provider_health(self, provider_type: str) -> bool:
-        """Check health of a provider type using a default model.
-
-        Args:
-            provider_type: Provider type to check.
-
-        Returns:
-            True if the provider is healthy.
-        """
+    def _check_provider_health(self, provider_type: ProviderType) -> bool:
+        """Check health of a provider type using a default model."""
         if not self._is_provider_configured(provider_type):
             return False
 
@@ -204,9 +182,9 @@ class ProviderResolver:
         if not test_model:
             # No enabled model for this provider, use a default
             default_models = {
-                "anthropic": "claude-sonnet-4-20250514",
-                "aws_bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-                "openai": "gpt-4o",
+                ProviderType.ANTHROPIC: "claude-sonnet-4-20250514",
+                ProviderType.AWS_BEDROCK: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                ProviderType.OPENAI: "gpt-4o",
             }
             model_name = default_models.get(provider_type, "")
         else:
@@ -247,7 +225,7 @@ class ProviderResolver:
             self._provider_enabled[provider_type] = enabled
 
             if not enabled:
-                logger.info(f"⏭️ Provider {provider_type} skipped (disabled in settings)")
+                logger.info(f"Provider {provider_type} skipped (disabled in settings)")
                 self._provider_configured[provider_type] = False
                 self._provider_health[provider_type] = False
                 continue
@@ -256,15 +234,15 @@ class ProviderResolver:
             self._provider_configured[provider_type] = configured
 
             if configured:
-                logger.info(f"🔍 Checking provider {provider_type}...")
+                logger.info(f"Checking provider {provider_type}...")
                 healthy = self._check_provider_health(provider_type)
                 self._provider_health[provider_type] = healthy
                 if healthy:
-                    logger.info(f"✅ Provider {provider_type} is healthy")
+                    logger.info(f"Provider {provider_type} is healthy")
                 else:
-                    logger.warning(f"⚠️ Provider {provider_type} health check failed")
+                    logger.warning(f"Provider {provider_type} health check failed")
             else:
-                logger.info(f"⏭️ Provider {provider_type} skipped (not configured)")
+                logger.info(f"Provider {provider_type} skipped (not configured)")
                 self._provider_health[provider_type] = False
 
         # Set active model based on default_model config
@@ -274,7 +252,7 @@ class ProviderResolver:
         if default_model and self._provider_health.get(default_model.provider, False):
             self.active_model_id = default_model_id
             self.active_provider_type = default_model.provider
-            logger.info(f"✅ Active model set to: {default_model_id} ({default_model.provider})")
+            logger.info(f"Active model set to: {default_model_id} ({default_model.provider})")
             return self._providers.get(default_model.provider)
 
         # Fallback: find first available model
@@ -282,7 +260,7 @@ class ProviderResolver:
             if model.enabled and self._provider_health.get(model.provider, False):
                 self.active_model_id = model.id
                 self.active_provider_type = model.provider
-                logger.info(f"✅ Fallback active model: {model.id} ({model.provider})")
+                logger.info(f"Fallback active model: {model.id} ({model.provider})")
                 return self._providers.get(model.provider)
 
         logger.warning("No healthy AI provider found")
