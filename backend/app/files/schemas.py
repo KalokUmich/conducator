@@ -90,10 +90,4 @@ def get_file_type(mime_type: str) -> FileType:
     return FileType.OTHER
 
 
-def is_allowed_mime_type(mime_type: str) -> bool:
-    """Check if MIME type is in the allowed list (images, PDF, audio).
-    
-    Note: We also allow OTHER types as long as they're under the size limit.
-    """
-    return True  # All types allowed, size limit enforced separately
 

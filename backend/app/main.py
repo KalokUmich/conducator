@@ -51,36 +51,30 @@ async def lifespan(app: FastAPI):
             region=config.ngrok_settings.region
         )
         if public_url:
-            logger.info(f"✅ Ngrok tunnel active: {public_url}")
-            print(f"\n{'='*60}")
-            print(f"🌐 PUBLIC URL: {public_url}")
-            print(f"{'='*60}\n")
+            logger.info(f"Ngrok tunnel active: {public_url}")
         else:
             logger.warning(
-                "⚠️ Failed to start ngrok tunnel. "
+                f"Failed to start ngrok tunnel. "
                 f"Falling back to localhost:{config.server.port}"
             )
-            print(f"\n{'='*60}")
-            print(f"⚠️ Ngrok failed - using http://localhost:{config.server.port}")
-            print(f"{'='*60}\n")
     else:
         logger.info(
             f"Ngrok disabled. Server running on "
             f"http://{config.server.host}:{config.server.port}"
         )
 
-    # Initialize AI provider resolver if summary is enabled
+    # Initialize AI provider resolver if AI features are enabled
     if config.summary.enabled:
-        logger.info("Summary enabled, resolving AI providers...")
+        logger.info("AI features enabled, resolving providers...")
         resolver = ProviderResolver(config)  # Pass full config for new architecture
         active = resolver.resolve()
         set_resolver(resolver)
         if active:
-            logger.info(f"✅ AI active: model={resolver.active_model_id}, provider={resolver.active_provider_type}")
+            logger.info(f"AI active: model={resolver.active_model_id}, provider={resolver.active_provider_type}")
         else:
-            logger.warning("⚠️ No healthy AI provider found")
+            logger.warning("No healthy AI provider found")
     else:
-        logger.info("Summary disabled, skipping AI provider resolution")
+        logger.info("AI features disabled, skipping provider resolution")
 
     yield  # Application runs here
 

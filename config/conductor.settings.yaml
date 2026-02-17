@@ -87,6 +87,18 @@ ai_models:
     display_name: "Claude Sonnet 4.5 (Bedrock EU)"
     enabled: true
 
+  - id: "qwen3-coder-next-bedrock"
+    provider: "aws_bedrock"
+    model_name: "qwen.qwen3-coder-next"
+    display_name: "Qwen3 Coder Next (Bedrock EU)"
+    enabled: true
+
+  - id: "qwen3-next-80b"
+    provider: "aws_bedrock"
+    model_name: "qwen.qwen3-next-80b-a3b"
+    display_name: "Qwen3 Next 80B (Bedrock EU)"
+    enabled: true
+
   - id: "gpt-4o"
     provider: "openai"
     model_name: "gpt-4o"
@@ -143,7 +155,7 @@ sso:
   enabled: true
 
   # Your AWS SSO portal start URL (from IAM Identity Center settings)
-  start_url: "https://xxxx.awsapps.com/start"
+  start_url: "https://d-9c67136d70.awsapps.com/start"
 
   # AWS region where your IAM Identity Center is configured
   region: "eu-west-2"

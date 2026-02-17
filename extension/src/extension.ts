@@ -27,6 +27,7 @@ import { ChangeSet, FileChange, getDiffPreviewService } from './services/diffPre
 import { getPermissionsService } from './services/permissions';
 import { getSessionService } from './services/session';
 import { wrapIdentity, getValidIdentity, getStoredProvider, isStale, SSOProvider } from './services/ssoIdentityCache';
+import { detectWorkspaceLanguages, clearLanguageCache } from './services/languageDetector';
 
 /** Output channel for logging invite links to the user. */
 let outputChannel: vscode.OutputChannel;
@@ -60,6 +61,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // Initialize session service - must happen before WebView creation
     getSessionService().initialize(context);
     console.log(`[AI Collab] Session initialized with roomId: ${getSessionService().getRoomId()}`);
+
+    // Clear language detection cache when workspace folders change
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(() => clearLanguageCache())
+    );
 
     // Detect ngrok URL if ngrok is running (async, non-blocking)
     getSessionService().detectNgrokUrl().then(ngrokUrl => {
@@ -362,6 +368,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     return;
                 case 'getRoomSettings':
                     this._handleGetRoomSettings(message.roomId);
+                    return;
+                case 'getStyleTemplates':
+                    this._handleGetStyleTemplates();
                     return;
                 case 'saveRoomSettings':
                     this._handleSaveRoomSettings(message.roomId, message.codeStyle);
@@ -1276,12 +1285,17 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         try {
             console.log('[Conductor] Requesting code prompt for:', decisionSummary.topic);
             const roomId = getSessionService().getRoomId();
+            const detectedLanguages = await detectWorkspaceLanguages();
             const response = await fetch(`${getBackendUrl()}/ai/code-prompt`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ decision_summary: decisionSummary, room_id: roomId })
+                body: JSON.stringify({
+                    decision_summary: decisionSummary,
+                    room_id: roomId,
+                    detected_languages: detectedLanguages,
+                })
             });
 
             if (!response.ok) {
@@ -1328,12 +1342,17 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     }, roomId: string): Promise<void> {
         try {
             console.log('[Conductor] Requesting code prompt for:', decisionSummary.topic);
+            const detectedLanguages = await detectWorkspaceLanguages();
             const response = await fetch(`${getBackendUrl()}/ai/code-prompt`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ decision_summary: { ...decisionSummary, type: 'decision_summary' }, room_id: roomId })
+                body: JSON.stringify({
+                    decision_summary: { ...decisionSummary, type: 'decision_summary' },
+                    room_id: roomId,
+                    detected_languages: detectedLanguages,
+                })
             });
 
             if (!response.ok) {
@@ -1416,6 +1435,38 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             const msg = error instanceof Error ? error.message : String(error);
             this._view?.webview.postMessage({
                 command: 'roomSettings',
+                data: { error: `Cannot connect to backend: ${msg}` }
+            });
+        }
+    }
+
+    /**
+     * Handle get style templates request from WebView.
+     * Calls GET /ai/style-templates and forwards response.
+     */
+    private async _handleGetStyleTemplates(): Promise<void> {
+        try {
+            console.log('[Conductor] Fetching style templates');
+            const response = await fetch(`${getBackendUrl()}/ai/style-templates`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                this._view?.webview.postMessage({
+                    command: 'styleTemplates',
+                    data: { error: `Failed to fetch templates: ${response.status} - ${errorText}` }
+                });
+                return;
+            }
+
+            const data = await response.json();
+            this._view?.webview.postMessage({
+                command: 'styleTemplates',
+                data: data
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this._view?.webview.postMessage({
+                command: 'styleTemplates',
                 data: { error: `Cannot connect to backend: ${msg}` }
             });
         }

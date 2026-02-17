@@ -41,11 +41,7 @@ class MockAgent:
     a fixed set of changes that are useful for testing the extension's
     change review and application flow.
 
-    Attributes:
-        MAX_LINES_CHANGED: Maximum lines changed per file (for testing).
     """
-
-    MAX_LINES_CHANGED = 5
 
     def __init__(self) -> None:
         """Initialize the mock agent."""

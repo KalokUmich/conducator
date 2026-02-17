@@ -1099,7 +1099,7 @@ class TestCodePromptEndpoint:
         data = response.json()
         assert "code_prompt" in data
         assert "def login(username, password)" in data["code_prompt"]
-        assert "Context" in data["code_prompt"]
+        assert "<context>" in data["code_prompt"]
 
     def test_code_prompt_empty_components(self):
         """Endpoint should handle empty affected_components list."""
@@ -2500,3 +2500,225 @@ class TestSelectiveCodePromptWithPolicyAndStyle:
 
         # These params are accepted but only used in the system prompt
         assert isinstance(prompt, str)
+
+
+class TestLoadStyleGuidelinesBugFix:
+    """Tests for _load_style_guidelines returning str not tuple."""
+
+    def test_load_style_guidelines_returns_string(self):
+        """_load_style_guidelines() should return a string, not a tuple."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(room_code_style=None)
+        # Should be a string (the universal style content), not a tuple
+        assert result is None or isinstance(result, str), (
+            f"Expected str or None, got {type(result)}: {repr(result)[:100]}"
+        )
+
+    def test_load_style_guidelines_with_room_style(self):
+        """_load_style_guidelines() with room style should return it directly."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(room_code_style="Use PEP 8")
+        assert result == "Use PEP 8"
+
+    def test_load_style_guidelines_fallback_is_not_tuple(self):
+        """When no room style, fallback should not be a stringified tuple."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(room_code_style=None)
+        if result is not None:
+            assert not result.startswith("("), "Result looks like a stringified tuple"
+            assert "StyleSource" not in result, "Result contains StyleSource enum text"
+
+
+class TestStyleTemplatesEndpoint:
+    """Tests for GET /ai/style-templates endpoint."""
+
+    def test_style_templates_returns_200(self):
+        """GET /ai/style-templates should return 200 with template list."""
+        from fastapi.testclient import TestClient
+        from app.ai_provider.router import router
+        from fastapi import FastAPI
+
+        test_app = FastAPI()
+        test_app.include_router(router)
+
+        client = TestClient(test_app)
+        response = client.get("/ai/style-templates")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "templates" in data
+        assert isinstance(data["templates"], list)
+        assert len(data["templates"]) >= 6
+
+    def test_style_templates_have_expected_fields(self):
+        """Each template should have name, filename, and content fields."""
+        from fastapi.testclient import TestClient
+        from app.ai_provider.router import router
+        from fastapi import FastAPI
+
+        test_app = FastAPI()
+        test_app.include_router(router)
+
+        client = TestClient(test_app)
+        response = client.get("/ai/style-templates")
+
+        data = response.json()
+        for t in data["templates"]:
+            assert "name" in t
+            assert "filename" in t
+            assert "content" in t
+            assert len(t["content"]) > 0
+
+    def test_style_templates_include_universal(self):
+        """Templates should include the universal style."""
+        from fastapi.testclient import TestClient
+        from app.ai_provider.router import router
+        from fastapi import FastAPI
+
+        test_app = FastAPI()
+        test_app.include_router(router)
+
+        client = TestClient(test_app)
+        response = client.get("/ai/style-templates")
+
+        data = response.json()
+        names = [t["name"] for t in data["templates"]]
+        assert "universal" in names
+
+
+class TestLoadStyleGuidelinesWithDetectedLanguages:
+    """Tests for _load_style_guidelines with detected_languages parameter."""
+
+    def test_load_style_guidelines_with_detected_languages(self):
+        """Passing detected languages should return universal + language styles."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(
+            room_code_style=None,
+            detected_languages=["python", "javascript"],
+        )
+        assert result is not None
+        assert isinstance(result, str)
+        # Should contain universal content
+        assert "---" in result  # separator between sections
+        # Should contain Python style content
+        assert "python" in result.lower() or "Python" in result
+        # Should contain JavaScript style content
+        assert "javascript" in result.lower() or "JavaScript" in result
+
+    def test_load_style_guidelines_with_empty_languages(self):
+        """Empty detected_languages should fall back to universal only."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(
+            room_code_style=None,
+            detected_languages=[],
+        )
+        # Empty list is falsy, so should fall back to CodeStyleLoader (universal)
+        assert result is None or isinstance(result, str)
+        if result is not None:
+            # Should not contain language-specific separator
+            assert "---" not in result or "python" not in result.lower()
+
+    def test_load_style_guidelines_with_invalid_language(self):
+        """Invalid language strings should be silently skipped."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(
+            room_code_style=None,
+            detected_languages=["rust"],
+        )
+        assert result is not None
+        assert isinstance(result, str)
+        # Should still return universal style even though "rust" is invalid
+        assert "rust" not in result.lower()
+
+    def test_load_style_guidelines_room_style_overrides_languages(self):
+        """Room code style should take precedence over detected languages."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(
+            room_code_style="Use PEP 8 everywhere",
+            detected_languages=["python", "javascript"],
+        )
+        assert result == "Use PEP 8 everywhere"
+
+    def test_load_style_guidelines_mixed_valid_invalid_languages(self):
+        """Valid languages should be included, invalid ones silently skipped."""
+        from app.ai_provider.wrapper import _load_style_guidelines
+
+        result = _load_style_guidelines(
+            room_code_style=None,
+            detected_languages=["python", "rust", "cobol"],
+        )
+        assert result is not None
+        assert isinstance(result, str)
+        # Should contain Python style content
+        assert "python" in result.lower() or "Python" in result
+        # Should contain separator (universal + python)
+        assert "---" in result
+
+
+class TestCodePromptEndpointWithDetectedLanguages:
+    """Tests for code-prompt endpoints with detected_languages field."""
+
+    def test_code_prompt_endpoint_with_detected_languages(self):
+        """POST /ai/code-prompt with detected_languages should return 200."""
+        from fastapi.testclient import TestClient
+        from app.ai_provider.router import router
+        from fastapi import FastAPI
+
+        test_app = FastAPI()
+        test_app.include_router(router)
+
+        client = TestClient(test_app)
+        response = client.post("/ai/code-prompt", json={
+            "decision_summary": {
+                "type": "decision_summary",
+                "topic": "Add user authentication",
+                "problem_statement": "Users cannot log in securely",
+                "proposed_solution": "Implement JWT-based authentication",
+                "requires_code_change": True,
+                "affected_components": ["auth/login.py"],
+                "risk_level": "medium",
+                "next_steps": ["Implement login endpoint"]
+            },
+            "detected_languages": ["python"]
+        })
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "code_prompt" in data
+        # The prompt should contain Python style content
+        prompt = data["code_prompt"]
+        assert len(prompt) > 0
+
+    def test_code_prompt_endpoint_backward_compatible(self):
+        """POST /ai/code-prompt without detected_languages should still return 200."""
+        from fastapi.testclient import TestClient
+        from app.ai_provider.router import router
+        from fastapi import FastAPI
+
+        test_app = FastAPI()
+        test_app.include_router(router)
+
+        client = TestClient(test_app)
+        response = client.post("/ai/code-prompt", json={
+            "decision_summary": {
+                "type": "decision_summary",
+                "topic": "Fix login bug",
+                "problem_statement": "Login fails silently",
+                "proposed_solution": "Add error handling",
+                "requires_code_change": True,
+                "affected_components": ["auth/login.py"],
+                "risk_level": "low",
+                "next_steps": ["Add try-catch"]
+            }
+        })
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "code_prompt" in data
