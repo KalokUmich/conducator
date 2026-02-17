@@ -289,13 +289,23 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     }
                     return;
                 case 'sessionEnded':
+                    // Transition FSM back to ReadyToHost so the UI returns to start page
+                    try {
+                        const currentState = this._controller.getState();
+                        if (currentState === 'Hosting') {
+                            this._controller.stopHosting();
+                        } else if (currentState === 'Joined') {
+                            this._controller.leaveSession();
+                        }
+                    } catch (e) {
+                        console.warn('[Conductor] FSM transition on sessionEnded failed:', e);
+                    }
                     // Reset session state and generate new roomId
                     getSessionService().resetSession();
-                    vscode.window.showInformationMessage('Chat session has ended. A new session has been created.');
-                    // Refresh WebView with new session
-                    if (this._view) {
-                        this._view.webview.html = this._getHtmlContent(this._view.webview);
-                    }
+                    vscode.window.showInformationMessage('Chat session has ended.');
+                    // Send updated state to WebView (FSM onStateChange may have already
+                    // fired, but the session data needs refreshing too)
+                    this._sendConductorState(this._controller.getState());
                     return;
 
                 // ----- Conductor FSM commands -----
