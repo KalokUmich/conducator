@@ -58,7 +58,36 @@ def _read_universal_style() -> str:
 
 
 class CodeStyleLoader:
-    """Loads code style guidelines from file or built-in defaults."""
+    """Loads code style guidelines from file or built-in defaults.
+
+    This class implements a priority chain for loading code style guidelines:
+
+    1. **Custom style** (.ai/code-style.md in workspace root)
+       - If this file exists and is non-empty, it takes precedence over all built-in styles
+       - Allows teams to define their own coding standards
+
+    2. **Built-in language-specific style** (agent/styles/{language}.md)
+       - If no custom style is found, loads the built-in style for the specified language
+       - Available built-in styles:
+         * python.md - Google Python Style Guide
+         * java.md - Google Java Style Guide
+         * javascript.md - Google JavaScript Style Guide
+         * go.md - Effective Go
+         * json.md - JSON formatting conventions
+
+    3. **Universal style** (agent/styles/universal.md)
+       - If no language is specified or no language-specific style exists
+       - Contains language-agnostic best practices (naming, comments, error handling, etc.)
+
+    Example usage:
+        loader = CodeStyleLoader(workspace_root="/path/to/workspace")
+
+        # Try custom style first, fallback to Python built-in
+        style, source = loader.get_style(language=Language.PYTHON)
+
+        # Try custom style first, fallback to universal
+        style, source = loader.get_style()
+    """
 
     DEFAULT_STYLE_PATH = ".ai/code-style.md"
 

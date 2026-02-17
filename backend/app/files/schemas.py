@@ -1,4 +1,14 @@
-"""Pydantic schemas for file upload functionality."""
+"""Pydantic schemas for file upload functionality.
+
+This module defines the data models for file sharing in Conductor:
+- FileMetadata: Complete file information stored in DuckDB
+- FileUploadResponse: API response after successful upload
+- FileMessage: Chat message with file attachment
+- FileType: Enum for categorizing files (image, pdf, audio, other)
+
+Files are stored in room-scoped directories (uploads/{room_id}/) with UUID-based
+filenames to prevent collisions. Metadata is tracked in DuckDB for querying.
+"""
 import uuid
 import time
 from enum import Enum
@@ -7,7 +17,14 @@ from pydantic import BaseModel, Field
 
 
 class FileType(str, Enum):
-    """Supported file type categories."""
+    """Supported file type categories.
+
+    Files are categorized by MIME type into these groups:
+    - IMAGE: JPEG, PNG, GIF, WebP, SVG
+    - PDF: PDF documents
+    - AUDIO: MP3, WAV, OGG, M4A, FLAC
+    - OTHER: All other file types
+    """
     IMAGE = "image"
     PDF = "pdf"
     AUDIO = "audio"
@@ -15,7 +32,15 @@ class FileType(str, Enum):
 
 
 class FileMetadata(BaseModel):
-    """Metadata for an uploaded file."""
+    """Metadata for an uploaded file.
+
+    This model represents the complete file information stored in DuckDB.
+    It includes both the original filename (for display) and the stored filename
+    (UUID-based, for disk storage).
+
+    The file_type field is automatically determined from the MIME type using
+    the get_file_type() function.
+    """
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique file ID")
     room_id: str = Field(..., description="Room ID this file belongs to")
     user_id: str = Field(..., description="User ID who uploaded the file")
@@ -29,7 +54,12 @@ class FileMetadata(BaseModel):
 
 
 class FileUploadResponse(BaseModel):
-    """Response after successful file upload."""
+    """Response after successful file upload.
+
+    This model is returned by the POST /files/upload endpoint. It contains
+    the essential file information needed by the client, including the
+    download URL for retrieving the file.
+    """
     id: str = Field(..., description="File ID")
     original_filename: str = Field(..., description="Original filename")
     file_type: FileType = Field(..., description="File type category")
@@ -39,7 +69,14 @@ class FileUploadResponse(BaseModel):
 
 
 class FileMessage(BaseModel):
-    """Chat message containing a file attachment."""
+    """Chat message containing a file attachment.
+
+    This model is used when broadcasting file uploads to all users in a room
+    via WebSocket. It combines chat message fields (id, room_id, user_id, etc.)
+    with file metadata (file_id, original_filename, etc.).
+
+    The caption field allows users to add context or description to the file.
+    """
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Message ID")
     room_id: str = Field(..., description="Room ID")
     user_id: str = Field(..., description="User ID of sender")
@@ -83,7 +120,26 @@ ALLOWED_MIME_TYPES = {
 
 
 def get_file_type(mime_type: str) -> FileType:
-    """Determine file type category from MIME type."""
+    """Determine file type category from MIME type.
+
+    Categorizes files based on their MIME type by checking against the
+    ALLOWED_MIME_TYPES mapping. If the MIME type is not recognized,
+    returns FileType.OTHER.
+
+    Args:
+        mime_type: MIME type string (e.g., "image/jpeg", "application/pdf")
+
+    Returns:
+        FileType enum value (IMAGE, PDF, AUDIO, or OTHER)
+
+    Examples:
+        >>> get_file_type("image/jpeg")
+        FileType.IMAGE
+        >>> get_file_type("application/pdf")
+        FileType.PDF
+        >>> get_file_type("text/plain")
+        FileType.OTHER
+    """
     for file_type, mime_types in ALLOWED_MIME_TYPES.items():
         if mime_type in mime_types:
             return file_type
