@@ -26,12 +26,20 @@ class FileStorageService:
     _db_path: str = "file_metadata.duckdb"
     
     def __init__(self, upload_dir: Optional[str] = None, db_path: Optional[str] = None):
-        """Initialize the file storage service."""
+        """Initialize the file storage service.
+
+        Sets up the upload directory and DuckDB connection for file metadata tracking.
+        Creates the database schema if it doesn't exist.
+
+        Args:
+            upload_dir: Optional custom upload directory path. Defaults to "uploads".
+            db_path: Optional custom DuckDB database path. Defaults to "file_metadata.duckdb".
+        """
         if upload_dir:
             self._upload_dir = upload_dir
         if db_path:
             self._db_path = db_path
-        
+
         self._connection: Optional[duckdb.DuckDBPyConnection] = None
         self._ensure_upload_dir()
         self._initialize_db()
@@ -175,7 +183,17 @@ class FileStorageService:
         return metadata
 
     def get_file(self, file_id: str) -> Optional[FileMetadata]:
-        """Get file metadata by ID."""
+        """Get file metadata by ID.
+
+        Queries the DuckDB database for file metadata. Does not check if the file
+        exists on disk - use get_file_path() for that.
+
+        Args:
+            file_id: Unique file identifier (UUID)
+
+        Returns:
+            FileMetadata object if found, None otherwise
+        """
         conn = self._get_connection()
         result = conn.execute(
             """
@@ -204,7 +222,17 @@ class FileStorageService:
         )
 
     def get_file_path(self, file_id: str) -> Optional[Path]:
-        """Get the file path on disk for a file ID."""
+        """Get the file path on disk for a file ID.
+
+        First queries the database for file metadata, then constructs the file path
+        and verifies it exists on disk.
+
+        Args:
+            file_id: Unique file identifier (UUID)
+
+        Returns:
+            Path object pointing to the file if it exists, None otherwise
+        """
         metadata = self.get_file(file_id)
         if not metadata:
             return None
@@ -216,7 +244,17 @@ class FileStorageService:
         return file_path
 
     def get_room_files(self, room_id: str) -> List[FileMetadata]:
-        """Get all files for a room."""
+        """Get all files for a room.
+
+        Queries the database for all files uploaded to a specific room, ordered by
+        upload time (oldest first).
+
+        Args:
+            room_id: Room identifier
+
+        Returns:
+            List of FileMetadata objects, ordered by upload time (ascending)
+        """
         conn = self._get_connection()
         results = conn.execute(
             """

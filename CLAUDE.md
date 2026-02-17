@@ -71,13 +71,12 @@ VS Code Extension (TypeScript)  <-->  FastAPI Backend (Python, port 8000)
 FastAPI application in `main.py`. Each feature is a separate module with its own router. Modules follow a `module/{__init__.py, router.py, service.py or domain files}` convention:
 
 - **chat/**: WebSocket real-time chat with `ConnectionManager` (room-scoped connections, in-memory message history, read receipts, message dedup). Room state is in-memory only.
-- **ai_provider/**: AI summarization pipeline (`pipeline.py`) with 3 stages: classification (7 discussion types) -> targeted summary -> code relevance scoring. Provider resolution (`resolver.py`) with priority: `claude_bedrock` -> `claude_direct`. Supports Anthropic direct, AWS Bedrock, and OpenAI.
-- **agent/**: `MockAgent` for deterministic change generation (not LLM-based yet).
-- **auth/**: SSO login via device authorization flows — AWS IAM Identity Center and Google OAuth 2.0.
-- **policy/**: Auto-apply safety policy evaluation for code changes.
-- **audit/**: DuckDB-based audit logging for applied changes.
-- **files/**: File upload/download with room-scoped storage.
-- **summary/**: Legacy keyword extraction (deprecated, router unregistered; use `ai_provider` instead).
+- **ai_provider/**: AI summarization pipeline (`pipeline.py`) with 3 stages: classification (7 discussion types) -> targeted summary -> code relevance scoring. Provider resolution (`resolver.py`) with `ProviderType` enum and priority-based fallback across Anthropic direct, AWS Bedrock, and OpenAI. Code prompt generation (`wrapper.py`) loads style guidelines based on detected workspace languages.
+- **agent/**: `MockAgent` for deterministic change generation (not LLM-based yet). `style_loader.py` loads Google-derived style guides for Python, Java, JavaScript, Go, JSON from `agent/styles/*.md`.
+- **auth/**: SSO login via device authorization flows — AWS IAM Identity Center and Google OAuth 2.0. Shared `_poll_for_identity()` helper handles the common poll-then-resolve-identity pattern.
+- **policy/**: Auto-apply safety policy evaluation for code changes (file count, line count, forbidden paths).
+- **audit/**: DuckDB-based audit logging for applied changes with SHA-256 changeset hashing.
+- **files/**: File upload/download with room-scoped storage (`uploads/{room_id}/`). DuckDB metadata tracking. 20MB size limit.
 - **config.py**: Pydantic-validated YAML config loading. Split into `conductor.secrets.yaml` (gitignored, API keys) and `conductor.settings.yaml` (commitable settings). Search order: `./config/` -> `./` -> `../config/` -> `~/.conductor/`.
 - **ngrok_service.py**: Ngrok tunnel lifecycle (`start_ngrok`, `stop_ngrok`, `get_public_url`). Started/stopped in `main.py` lifespan.
 
@@ -85,8 +84,9 @@ FastAPI application in `main.py`. Each feature is a separate module with its own
 
 Entry point: `extension.ts` which registers commands and sets up the WebView message bridge.
 
-- **services/conductorStateMachine.ts**: 6-state FSM (Idle, BackendDisconnected, ReadyToHost, Hosting, Joining, Joined). Join-only mode works via `BackendDisconnected -> Joining`.
+- **services/conductorStateMachine.ts**: 6-state FSM (Idle, BackendDisconnected, ReadyToHost, Hosting, Joining, Joined). Join-only mode works via `BackendDisconnected -> Joining`. Pure logic, no VS Code dependency.
 - **services/conductorController.ts**: Orchestrates FSM transitions, backend health checks, session lifecycle.
+- **services/languageDetector.ts**: Detects workspace languages via `findFiles` glob patterns (Python, Java, JavaScript/TypeScript, Go). Results cached; cache cleared on workspace folder changes. Sends `detected_languages` to backend for style-aware CGP generation.
 - **services/session.ts**: `globalState` persistence for room/session IDs, backend URL resolution including ngrok detection.
 - **services/permissions.ts**: Role-based access (`lead` vs `member` via `aiCollab.role` VS Code setting).
 - **services/diffPreview.ts**: Sequential diff preview and code change application.
@@ -106,8 +106,29 @@ Two YAML files in `config/`:
 
 Key VS Code extension settings: `aiCollab.role` (lead/member), `aiCollab.backendUrl`, `aiCollab.autoStartLiveShare`.
 
+## Key Data Flows
+
+### CGP (Code Generation Prompt) Flow
+1. Extension detects workspace languages (`languageDetector.ts`)
+2. Extension sends `POST /ai/code-prompt` with `decision_summary`, `room_id`, `detected_languages`
+3. Backend loads style guidelines: room-level override > detected languages (universal + language-specific `.md` files) > fallback universal only
+4. Backend constructs CGP template with problem/solution/components/risk/policy/style
+5. Response sent back to WebView for display
+
+### AI Summarization Pipeline Flow
+1. Extension sends chat messages via `POST /ai/summarize-pipeline`
+2. Stage 1: Classify discussion type (7 types: api_design, product_flow, code_change, architecture, innovation, debugging, general)
+3. Stage 2: Generate targeted summary with type-specific prompt
+4. Stage 3: Compute code-relevant types for selective CGP generation
+5. Response sent back with `PipelineSummary` including classification metadata
+
 ## Testing
 
-- Backend: pytest (243 tests). Tests are in `backend/tests/`, one file per module.
+- Backend: pytest (287 tests). Tests are in `backend/tests/`, one file per module. Shared fixtures in `tests/conftest.py`.
 - Extension: Node test runner (5 test files in `extension/src/tests/`). Run all with `cd extension && npm run test` or individually with `node --test`.
 - Extension tests cover service logic, not VS Code UI automation. Some tests start local HTTP servers and may fail in sandboxed environments.
+
+## Related Documentation
+
+- `ROADMAP.md` — Future project plan (5 phases: production readiness, LLM agent, collaboration features, security, scalability)
+- `GUIDE.md` — Code walkthrough for junior engineers (architecture, patterns, data flows)

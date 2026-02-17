@@ -92,17 +92,24 @@ class SSOService:
         """
         sso_client = boto3.client("sso", region_name=self.region)
 
-        # List accounts the user has access to
+        # STEP 1: List accounts the user has access to
+        # AWS SSO doesn't provide a direct "get user info" API, so we must walk through
+        # the account/role hierarchy to eventually get the user's ARN (which contains their email).
         accounts_resp = sso_client.list_accounts(accessToken=access_token)
         accounts = accounts_resp.get("accountList", [])
         if not accounts:
             return {"error": "No accounts found for this SSO user"}
 
+        # Use the first account for simplicity. In production, you might want to:
+        # - Let the user choose which account to use
+        # - Use a specific account based on configuration
+        # - Try all accounts until one succeeds
         first_account = accounts[0]
         account_id = first_account["accountId"]
         account_name = first_account.get("accountName", "")
 
-        # List roles in the first account
+        # STEP 2: List roles in the first account
+        # Each account can have multiple roles. We need a role to get temporary credentials.
         roles_resp = sso_client.list_account_roles(
             accessToken=access_token,
             accountId=account_id,
@@ -114,10 +121,16 @@ class SSOService:
                 "accounts": accounts,
             }
 
+        # Use the first role for simplicity. In production, you might want to:
+        # - Let the user choose which role to assume
+        # - Use a specific role based on configuration (e.g., "ReadOnlyRole")
+        # - Prefer roles with certain permissions
         first_role = roles[0]
         role_name = first_role["roleName"]
 
-        # Get temporary credentials for STS call
+        # STEP 3: Get temporary credentials for the role
+        # These credentials are needed to call STS GetCallerIdentity, which will give us
+        # the user's ARN (Amazon Resource Name) containing their email.
         creds_resp = sso_client.get_role_credentials(
             accessToken=access_token,
             accountId=account_id,
@@ -125,7 +138,10 @@ class SSOService:
         )
         role_creds = creds_resp["roleCredentials"]
 
-        # Call STS to get caller identity
+        # STEP 4: Call STS GetCallerIdentity to get the user's ARN
+        # This is the only way to get the user's email from AWS SSO. The ARN format is:
+        # arn:aws:sts::123456789012:assumed-role/RoleName/user@example.com
+        # We extract the email from the last part of the ARN.
         sts_client = boto3.client(
             "sts",
             aws_access_key_id=role_creds["accessKeyId"],
