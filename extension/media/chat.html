@@ -4167,7 +4167,7 @@
             roomSettingsContent.classList.add('hidden');
             roomSettingsFooter.classList.add('hidden');
 
-            vscode.postMessage({ command: 'getRoomSettings', roomId: currentRoomId });
+            vscode.postMessage({ command: 'getRoomSettings', roomId: session.roomId });
         }
 
         /**
@@ -4197,7 +4197,7 @@
             const codeStyle = roomCodeStyleTextarea.value;
             vscode.postMessage({
                 command: 'saveRoomSettings',
-                roomId: currentRoomId,
+                roomId: session.roomId,
                 codeStyle: codeStyle
             });
         }
