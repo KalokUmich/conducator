@@ -155,7 +155,7 @@ sso:
   enabled: true
 
   # Your AWS SSO portal start URL (from IAM Identity Center settings)
-  start_url: "https://d-9c67136d70.awsapps.com/start"
+  start_url: "https://xxxx.awsapps.com/start"
 
   # AWS region where your IAM Identity Center is configured
   region: "eu-west-2"
