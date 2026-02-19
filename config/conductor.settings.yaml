@@ -75,16 +75,16 @@ ai_models:
     display_name: "Claude 3 Haiku (Bedrock)"
     enabled: true
 
-  - id: "claude-sonnet-4-bedrock"
-    provider: "aws_bedrock"
-    model_name: "eu.anthropic.claude-sonnet-4-20250514-v1:0"
-    display_name: "Claude Sonnet 4 (Bedrock EU)"
-    enabled: true
-
   - id: "claude-sonnet-4-5-bedrock"
     provider: "aws_bedrock"
     model_name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
     display_name: "Claude Sonnet 4.5 (Bedrock EU)"
+    enabled: true
+
+  - id: "claude-sonnet-4-6-bedrock"
+    provider: "aws_bedrock"
+    model_name: "eu.anthropic.claude-sonnet-4-6"
+    display_name: "Claude Sonnet 4.6 (Bedrock EU)"
     enabled: true
 
   - id: "qwen3-coder-next-bedrock"
@@ -110,6 +110,17 @@ ai_models:
     model_name: "gpt-4o-mini"
     display_name: "GPT-4o Mini"
     enabled: true
+
+# =============================================================================
+# Prompt Configuration
+# =============================================================================
+# Controls how the code generation prompt is formatted.
+# output_mode options:
+#   "unified_diff"       - Provide changes as unified diff patches (default)
+#   "direct_repo_edits"  - Provide complete file contents
+#   "plan_then_diff"     - Provide implementation plan, then diffs
+prompt:
+  output_mode: "unified_diff"
 
 # =============================================================================
 # Session Configuration
