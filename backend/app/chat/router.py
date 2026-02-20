@@ -47,6 +47,7 @@ from .manager import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
 )
+from .stack_trace_parser import parse_stack_trace
 from app.files.service import FileStorageService
 
 router = APIRouter()
@@ -204,7 +205,8 @@ async def post_ai_message(
     import json
 
     # Validate message type
-    if message_type not in ("ai_summary", "ai_code_prompt"):
+    valid_types = ("ai_summary", "ai_code_prompt", "ai_explanation")
+    if message_type not in valid_types:
         return JSONResponse(
             {"error": f"Invalid message type: {message_type}"},
             status_code=400
@@ -226,7 +228,12 @@ async def post_ai_message(
     ai_display_name = f"AI ({model_name})"
 
     # Create the message
-    msg_type = MessageType.AI_SUMMARY if message_type == "ai_summary" else MessageType.AI_CODE_PROMPT
+    _type_map = {
+        "ai_summary": MessageType.AI_SUMMARY,
+        "ai_code_prompt": MessageType.AI_CODE_PROMPT,
+        "ai_explanation": MessageType.AI_EXPLANATION,
+    }
+    msg_type = _type_map[message_type]
     message = ChatMessage(
         type=msg_type,
         roomId=room_id,
@@ -511,6 +518,66 @@ async def websocket_chat_endpoint(
 
                 logger.info(f"[WS] Broadcasting code snippet: {code_snippet.get('relativePath', 'unknown')} lines {code_snippet.get('startLine')}-{code_snippet.get('endLine')}")
                 await manager.broadcast(snippet_message, room_id)
+                continue
+
+            # --- Handle STACK TRACE message ---
+            # SECURITY: Use backend-assigned userId and role
+            if message_type == "stack_trace":
+                message_id = str(uuid.uuid4())
+                user_info = manager.get_user(room_id, assigned_user_id)
+                display_name = user_info.displayName if user_info else data.get("displayName", "")
+
+                raw_text = data.get("rawText", "")
+                # Parse on backend so server-stored messages are structured
+                parsed = data.get("parsed") or parse_stack_trace(raw_text).to_dict()
+
+                stack_trace_message = {
+                    "type": "stack_trace",
+                    "id": message_id,
+                    "roomId": room_id,
+                    "userId": assigned_user_id,
+                    "displayName": display_name,
+                    "role": assigned_role,
+                    "content": data.get("content", ""),
+                    "rawText": raw_text,
+                    "stackTrace": parsed,
+                    "ts": time.time(),
+                }
+
+                logger.info(
+                    f"[WS] Broadcasting stack_trace from {assigned_user_id}: "
+                    f"{parsed.get('errorType', 'unknown')} – {len(parsed.get('frames', []))} frames"
+                )
+                await manager.broadcast(stack_trace_message, room_id)
+                continue
+
+            # --- Handle TEST FAILURE message ---
+            # SECURITY: Use backend-assigned userId and role
+            if message_type == "test_failure":
+                message_id = str(uuid.uuid4())
+                user_info = manager.get_user(room_id, assigned_user_id)
+                display_name = user_info.displayName if user_info else data.get("displayName", "")
+
+                test_failure = data.get("testFailure", {})
+                total_failed = test_failure.get("totalFailed", 0)
+
+                test_failure_message = {
+                    "type": "test_failure",
+                    "id": message_id,
+                    "roomId": room_id,
+                    "userId": assigned_user_id,
+                    "displayName": display_name,
+                    "role": assigned_role,
+                    "content": data.get("content", f"{total_failed} test(s) failed"),
+                    "testFailure": test_failure,
+                    "ts": time.time(),
+                }
+
+                logger.info(
+                    f"[WS] Broadcasting test_failure from {assigned_user_id}: "
+                    f"{total_failed} failures ({test_failure.get('framework', 'unknown')} framework)"
+                )
+                await manager.broadcast(test_failure_message, room_id)
                 continue
 
             # --- Handle regular CHAT message ---

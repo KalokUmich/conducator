@@ -38,6 +38,43 @@
             color: #d1d5db !important; background: transparent !important;
         }
 
+        /* === Conductor header action buttons === */
+        .conductor-action-btn {
+            font-size: 0.7rem; font-weight: 500;
+            padding: 0.2rem 0.55rem;
+            border-radius: 6px;
+            background: rgba(139,92,246,0.08);
+            border: 1px solid rgba(139,92,246,0.18);
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .conductor-action-btn:hover {
+            background: rgba(139,92,246,0.16);
+            border-color: rgba(139,92,246,0.35);
+        }
+        .conductor-quit-btn {
+            font-size: 0.7rem; font-weight: 400;
+            padding: 0.2rem 0.45rem;
+            border-radius: 6px;
+            color: rgba(156,163,175,0.75);
+            transition: color 0.15s, background 0.15s;
+        }
+        .conductor-quit-btn:hover { color: #d1d5db; background: rgba(75,85,99,0.25); }
+        .conductor-danger-btn {
+            font-size: 0.7rem; font-weight: 400;
+            padding: 0.2rem 0.45rem;
+            border-radius: 6px;
+            color: rgba(248,113,113,0.6);
+            transition: color 0.15s, background 0.15s;
+        }
+        .conductor-danger-btn:hover { color: #f87171; background: rgba(239,68,68,0.1); }
+
+        /* === Explain Code — loading bubble in chat === */
+        @keyframes explainPulse {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+        #ai-explain-loading { animation: explainPulse 2s ease-in-out infinite; }
+
         /* === Role-based accent colors === */
         .bubble-host { position: relative; }
         .bubble-host::before { content: ''; position: absolute; top: 8px; left: -8px; width: 5px; height: 5px; border-radius: 50%; background: #f59e0b; }
@@ -650,115 +687,105 @@
             <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
 
             <!-- Header (only visible in Hosting / Joined) -->
-            <header class="glass px-5 py-3 flex-shrink-0" style="border-bottom: 1px solid; border-image: linear-gradient(90deg, rgba(139,92,246,0.25), rgba(99,102,241,0.08), transparent) 1;">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h1 class="text-base font-semibold tracking-tight text-gradient">Conductor</h1>
-                        <p class="text-xs text-gray-500 mt-0.5 flex items-center gap-1">
-                            <span id="room-id-display" class="font-mono text-violet-400/80 hover:text-violet-300 transition-colors cursor-default">loading...</span>
-                            <button id="btn-copy-room-id" class="text-gray-500 hover:text-gray-300 transition-colors p-0.5" title="Copy Room ID">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
-                                    <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
-                                    <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" />
+            <header class="flex-shrink-0 px-4 pt-3 pb-2" style="background:rgba(10,13,20,0.85);border-bottom:1px solid rgba(255,255,255,0.055);">
+
+                <!-- Row 1: Brand + Controls -->
+                <div class="flex items-center gap-2">
+                    <!-- Brand -->
+                    <div class="flex items-center gap-2 min-w-0 flex-1">
+                        <div class="w-5 h-5 rounded flex items-center justify-center flex-shrink-0" style="background:rgba(139,92,246,0.18);border:1px solid rgba(139,92,246,0.28);">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-violet-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>
+                            </svg>
+                        </div>
+                        <span class="text-sm font-semibold text-white/90 tracking-tight">Conductor</span>
+                        <div class="flex items-center gap-0.5 min-w-0">
+                            <span id="room-id-display" class="font-mono text-[0.58rem] text-gray-600 truncate max-w-[72px]">loading…</span>
+                            <button id="btn-copy-room-id" class="text-gray-600 hover:text-gray-400 p-0.5 flex-shrink-0 transition-colors" title="Copy Room ID">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" viewBox="0 0 20 20" fill="currentColor">
+                                    <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z"/>
+                                    <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z"/>
                                 </svg>
                             </button>
-                        </p>
+                        </div>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <!-- AI Config Button -->
-                        <button
-                            id="btn-ai-config"
-                            class="text-gray-500 hover:text-violet-400 p-1.5 rounded-lg hover:bg-violet-500/10 transition-all duration-200"
-                            title="AI Configuration"
-                        >
+                    <!-- Right: icon controls + role badge -->
+                    <div class="flex items-center gap-0.5 flex-shrink-0">
+                        <!-- AI Config (visibility controlled via style.display by JS) -->
+                        <button id="btn-ai-config"
+                            class="p-1.5 rounded-md text-gray-500 hover:text-violet-400 hover:bg-violet-500/10 transition-all duration-150"
+                            title="AI Configuration">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                                <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" />
+                                <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>
                             </svg>
                         </button>
-                        <!-- Room Settings Button (Lead only) -->
-                        <button
-                            id="btn-room-settings"
-                            class="hidden text-gray-500 hover:text-blue-400 p-1.5 rounded-lg hover:bg-blue-500/10 transition-all duration-200"
-                            title="Room Settings"
-                        >
+                        <!-- Room Settings (hidden until lead) -->
+                        <button id="btn-room-settings"
+                            class="hidden p-1.5 rounded-md text-gray-500 hover:text-gray-300 hover:bg-gray-700/50 transition-all duration-150"
+                            title="Room Settings">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                                <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd" />
+                                <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
                             </svg>
                         </button>
-                        <!-- Auto Apply Toggle (Lead only) -->
-                        <div id="auto-apply-toggle-container" class="hidden flex items-center gap-2">
-                            <span class="text-xs text-gray-500">Auto</span>
+                        <!-- Auto Apply Toggle -->
+                        <div id="auto-apply-toggle-container" class="hidden items-center gap-1.5 pl-1 pr-0.5">
+                            <span class="text-[0.6rem] text-gray-600 uppercase tracking-wide font-medium">Auto</span>
                             <label class="relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="auto-apply-toggle" class="sr-only peer">
-                                <div class="w-8 h-[18px] bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-violet-500/30 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-violet-600"></div>
+                                <div class="w-8 h-[18px] bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-violet-600"></div>
                             </label>
                         </div>
-                        <div id="sso-header-badge" class="hidden px-2 py-1 rounded-full text-xs bg-gray-700 text-gray-400 truncate max-w-[120px]" title="">
-                        </div>
-                        <div id="role-badge" class="px-3 py-1 rounded-full text-xs font-medium bg-gray-700 text-gray-300">
-                            <!-- Role badge will be updated by JavaScript -->
-                        </div>
+                        <!-- SSO identity badge (hidden by default) -->
+                        <div id="sso-header-badge" class="hidden text-[0.6rem] px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-500 truncate max-w-[90px] border border-gray-700/50" title=""></div>
+                        <!-- Role / user badge -->
+                        <div id="role-badge" class="ml-1 text-[0.65rem] px-2.5 py-1 rounded-full font-medium bg-gray-800/80 text-gray-400 border border-gray-700/40 whitespace-nowrap"></div>
                     </div>
                 </div>
 
-            <!-- Hosting-only controls: invite + stop -->
-            <div id="hosting-controls" class="hidden mt-3 flex items-center gap-2">
-                <span class="text-xs text-emerald-400 flex items-center gap-1.5">
-                    <span class="status-dot bg-emerald-400" style="width:6px;height:6px;color:rgba(52,211,153,0.4);"></span>
-                    Hosting
-                </span>
-                <button
-                    id="btn-copy-invite"
-                    class="btn-primary text-xs px-3 py-1.5 flex items-center gap-1"
-                >
-                    Copy Invite Link
-                </button>
-                <button
-                    id="btn-stop-session"
-                    class="btn-secondary text-xs px-3 py-1.5"
-                    title="Leave session — your chat data is preserved"
-                >
-                    Quit
-                </button>
-            </div>
+                <!-- Row 2: Unified session action bar -->
+                <div class="mt-2.5 flex items-center gap-1 flex-wrap">
+                    <!-- Hosting controls -->
+                    <div id="hosting-controls" class="hidden items-center gap-1">
+                        <span class="flex items-center gap-1.5 text-[0.65rem] font-medium text-emerald-400 pr-0.5">
+                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" style="box-shadow:0 0 5px rgba(52,211,153,0.6)"></span>
+                            Live
+                        </span>
+                        <span class="w-px h-3 bg-gray-700/70 mx-0.5"></span>
+                        <button id="btn-copy-invite" class="conductor-action-btn text-violet-300 flex items-center gap-1" style="border-color:rgba(139,92,246,0.25);">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M8 9a3 3 0 100-6 3 3 0 000 6zM8 11a6 6 0 016 6H2a6 6 0 016-6zM16 7a1 1 0 10-2 0v1h-1a1 1 0 100 2h1v1a1 1 0 102 0v-1h1a1 1 0 100-2h-1V7z"/>
+                            </svg>
+                            Invite
+                        </button>
+                        <button id="btn-stop-session" class="conductor-quit-btn" title="Leave session — chat data is preserved">Leave</button>
+                    </div>
 
-            <!-- Joined-only controls: leave -->
-            <div id="joined-controls" class="hidden mt-3 flex items-center gap-2">
-                <span class="text-xs text-blue-400 flex items-center gap-1.5">
-                    <span class="status-dot bg-blue-400" style="width:6px;height:6px;color:rgba(96,165,250,0.4);"></span>
-                    Joined
-                </span>
-                <button
-                    id="btn-leave-session"
-                    class="btn-secondary text-xs px-3 py-1.5"
-                    title="Leave session — your chat data is preserved"
-                >
-                    Quit
-                </button>
-            </div>
+                    <!-- Joined controls -->
+                    <div id="joined-controls" class="hidden items-center gap-1">
+                        <span class="flex items-center gap-1.5 text-[0.65rem] font-medium text-blue-400 pr-0.5">
+                            <span class="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" style="box-shadow:0 0 5px rgba(96,165,250,0.6)"></span>
+                            Joined
+                        </span>
+                        <button id="btn-leave-session" class="conductor-quit-btn" title="Leave session — chat data is preserved">Leave</button>
+                    </div>
 
-            <!-- Lead-only Action Buttons -->
-            <div id="lead-actions" class="hidden mt-3 flex gap-2">
-                <button
-                    id="btn-create-summary"
-                    class="btn-primary text-sm px-4 py-2 flex items-center gap-2"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/>
-                    </svg>
-                    Distill
-                </button>
-                <button
-                    id="btn-end-chat"
-                    class="btn-danger text-sm px-4 py-2 flex items-center gap-2"
-                    title="End chat session for all participants"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
-                    </svg>
-                    End Chat
-                </button>
-            </div>
+                    <!-- Lead-only actions -->
+                    <div id="lead-actions" class="hidden items-center gap-1">
+                        <span class="w-px h-3 bg-gray-700/70 mx-0.5"></span>
+                        <button id="btn-create-summary" class="conductor-action-btn text-violet-300 flex items-center gap-1" style="border-color:rgba(139,92,246,0.25);">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/>
+                            </svg>
+                            Distill
+                        </button>
+                        <button id="btn-end-chat" class="conductor-danger-btn flex items-center gap-1" title="End session for all participants">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                            </svg>
+                            End
+                        </button>
+                    </div>
+                </div>
 
             <!-- Pending Changes Card (hidden by default) -->
             <div id="pending-changes-card" class="hidden mt-3 glass border border-violet-500/15 rounded-xl p-4">
@@ -831,9 +858,29 @@
             </div>
         </header>
 
+        <!-- Chat / Tasks Tab bar — pill segment control -->
+        <div class="flex-shrink-0 px-3 py-2" style="background:rgba(10,13,20,0.7);border-bottom:1px solid rgba(255,255,255,0.045);">
+            <div class="flex p-0.5 rounded-lg gap-0.5" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);">
+                <button id="tab-chat" class="chat-tab active flex-1 text-xs py-1.5 rounded-md font-medium transition-all duration-200 flex items-center justify-center gap-1.5 text-white" style="background:rgba(55,65,81,0.9);box-shadow:0 1px 3px rgba(0,0,0,0.4);">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/>
+                    </svg>
+                    Chat
+                </button>
+                <button id="tab-tasks" class="chat-tab flex-1 text-xs py-1.5 rounded-md font-medium transition-all duration-200 flex items-center justify-center gap-1.5 text-gray-500 hover:text-gray-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
+                        <path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clip-rule="evenodd"/>
+                    </svg>
+                    Tasks
+                    <span id="todo-count-badge" class="hidden bg-violet-500/80 text-white text-[0.55rem] px-1.5 py-px rounded-full leading-none">0</span>
+                </button>
+            </div>
+        </div>
+
         <!-- Messages Area - WhatsApp-style scrollable container -->
-        <div class="relative flex-1 min-h-0">
-            <div id="messages-container" class="absolute inset-0 overflow-y-auto px-4 py-3 space-y-2" style="scrollbar-width: thin; scrollbar-color: rgba(139,92,246,0.2) transparent;">
+        <div id="tab-panel-chat" class="relative flex-1 min-h-0">
+            <div id="messages-container" class="absolute inset-0 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-2" style="scrollbar-width: thin; scrollbar-color: rgba(139,92,246,0.2) transparent;">
                 <!-- Messages will be rendered here by JavaScript -->
                 <div id="connection-status" class="flex justify-center">
                     <div class="bg-gray-800/30 text-gray-500 text-xs px-3 py-1.5 rounded-full border border-gray-700/40 shimmer">
@@ -843,12 +890,102 @@
             </div>
 
             <!-- Scroll to bottom button -->
-            <button id="scroll-to-bottom" class="hidden absolute bottom-3 right-3 glass text-gray-300 hover:text-white p-2 rounded-full z-10 hover:shadow-[0_0_12px_rgba(139,92,246,0.2)] transition-all" title="Scroll to bottom">
+            <button id="scroll-to-bottom" class="hidden absolute bottom-3 right-3 glass text-gray-300 hover:text-white p-2 rounded-full z-10 hover:shadow-[0_0_12px_rgba(139,92,246,0.2)] transition-all" title="Scroll to bottom" style="z-index:10;">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                     <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
                 </svg>
                 <span id="unread-count" class="hidden absolute -top-1 -right-1 bg-violet-500 text-white text-[0.6rem] rounded-full h-4 w-4 flex items-center justify-center unread-badge">0</span>
             </button>
+        </div>
+
+        <!-- TODO / Tasks Tab Panel -->
+        <div id="tab-panel-tasks" class="hidden flex-1 min-h-0 flex flex-col overflow-y-auto px-3 py-3 gap-2" style="scrollbar-width:thin; scrollbar-color:rgba(139,92,246,0.2) transparent;">
+            <div class="flex items-center justify-between mb-1">
+                <div class="flex gap-1">
+                    <button data-filter="all" class="todo-filter-btn active text-[0.65rem] px-2 py-1 rounded-full bg-violet-600/20 text-violet-400 border border-violet-600/30">All</button>
+                    <button data-filter="open" class="todo-filter-btn text-[0.65rem] px-2 py-1 rounded-full text-gray-500 hover:text-gray-300 border border-gray-700/40">Open</button>
+                    <button data-filter="done" class="todo-filter-btn text-[0.65rem] px-2 py-1 rounded-full text-gray-500 hover:text-gray-300 border border-gray-700/40">Done</button>
+                </div>
+                <button id="btn-add-todo" class="text-xs text-violet-400 hover:text-violet-300 flex items-center gap-1 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd" /></svg>
+                    Add
+                </button>
+            </div>
+            <!-- Quick add form (hidden by default) -->
+            <div id="todo-add-form" class="hidden bg-gray-800/60 rounded-lg p-3 border border-gray-700/40 flex flex-col gap-2">
+                <input id="todo-title-input" type="text" placeholder="Task title *" maxlength="200"
+                    class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-violet-500 w-full" />
+                <textarea id="todo-desc-input" rows="2" placeholder="Description (optional) — helps AI understand what to do"
+                    class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-400 focus:outline-none focus:border-violet-500 w-full resize-none"></textarea>
+                <div class="flex items-center gap-2">
+                    <select id="todo-priority-select" class="bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300 focus:outline-none">
+                        <option value="high">🔴 High</option>
+                        <option value="medium" selected>🟡 Medium</option>
+                        <option value="low">🟢 Low</option>
+                    </select>
+                    <div class="flex gap-1.5 ml-auto">
+                        <button id="btn-todo-cancel" class="btn-secondary text-xs px-3 py-1.5">Cancel</button>
+                        <button id="btn-todo-save" class="btn-primary text-xs px-3 py-1.5">Add Task</button>
+                    </div>
+                </div>
+            </div>
+            <div id="todos-list" class="flex flex-col gap-1.5">
+                <div class="text-xs text-gray-600 text-center py-6">No tasks yet. They'll appear here from AI summaries or when you add them manually.</div>
+            </div>
+
+            <!-- Workspace TODOs Section -->
+            <div class="mt-3 border-t border-gray-700/40 pt-3">
+                <div class="flex items-center justify-between mb-2">
+                    <button id="btn-toggle-workspace-todos" class="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors">
+                        <svg id="workspace-todos-chevron" xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 transition-transform" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                        </svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-violet-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h7a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd"/>
+                        </svg>
+                        <span class="font-medium">Code TODOs</span>
+                        <span id="workspace-todo-count" class="hidden text-[0.6rem] bg-violet-600/40 text-violet-300 px-1.5 rounded-full">0</span>
+                    </button>
+                    <button id="btn-scan-workspace-todos" class="flex items-center gap-1 text-[0.65rem] text-violet-400 hover:text-violet-300 transition-colors" title="Scan workspace for TODO comments">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/>
+                        </svg>
+                        Scan
+                    </button>
+                </div>
+                <div id="workspace-todos-panel" class="hidden flex flex-col gap-1.5">
+                    <div id="workspace-todos-empty" class="text-xs text-gray-600 text-center py-3">
+                        Click Scan to find TODO comments in your workspace.<br>
+                        <span class="text-gray-700">Format: <code class="text-violet-500">// TODO: title</code> + optional <code class="text-violet-500">// TODO_DESC: description</code></span>
+                    </div>
+                    <div id="workspace-todos-list" class="flex flex-col gap-1"></div>
+                </div>
+            </div>
+
+            <!-- Edit Workspace TODO Modal -->
+            <div id="workspace-todo-edit-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                <div class="bg-gray-900 border border-gray-700 rounded-xl p-4 w-[90%] max-w-sm shadow-2xl flex flex-col gap-3">
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm font-medium text-gray-200">Edit Code TODO</span>
+                        <button id="btn-close-workspace-todo-modal" class="text-gray-500 hover:text-white p-1">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div id="workspace-todo-edit-location" class="text-[0.65rem] text-gray-500 font-mono truncate"></div>
+                    <input id="workspace-todo-edit-title" type="text" maxlength="200"
+                        placeholder="Task title *"
+                        class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-violet-500 w-full"/>
+                    <textarea id="workspace-todo-edit-desc" rows="3"
+                        placeholder="Description (optional) — uses // TODO_DESC: comment"
+                        class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-400 focus:outline-none focus:border-violet-500 w-full resize-none"></textarea>
+                    <div class="flex gap-2 justify-end">
+                        <button id="btn-workspace-todo-cancel" class="btn-secondary text-xs px-3 py-1.5">Cancel</button>
+                        <button id="btn-workspace-todo-save" class="btn-primary text-xs px-3 py-1.5">Save to file</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Typing Indicator -->
@@ -891,22 +1028,29 @@
             </div>
 
             <!-- Code Snippet Preview (shown when code is attached) -->
-            <div id="code-snippet-preview" class="hidden mb-3 bg-gray-900/60 border border-gray-700/40 rounded-xl overflow-hidden">
-                <div class="flex items-center justify-between px-3 py-2 bg-gray-800/50 border-b border-gray-700/30">
-                    <div class="flex items-center gap-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-violet-400" viewBox="0 0 20 20" fill="currentColor">
+            <div id="code-snippet-preview" class="hidden mb-2 bg-gray-900/60 border border-gray-700/40 rounded-xl overflow-hidden">
+                <div class="flex items-center justify-between px-3 py-1.5 bg-gray-800/50 border-b border-gray-700/30">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-violet-400 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
                             <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
                         </svg>
-                        <span id="code-snippet-filename" class="text-xs text-gray-300 font-mono truncate max-w-[200px]"></span>
-                        <span id="code-snippet-lines" class="text-xs text-gray-500"></span>
+                        <span id="code-snippet-filename" class="text-xs text-gray-300 font-mono truncate max-w-[140px]"></span>
+                        <span id="code-snippet-lines" class="text-xs text-gray-500 flex-shrink-0"></span>
+                        <span id="code-snippet-stats" class="text-[0.6rem] text-gray-600 flex-shrink-0"></span>
                     </div>
-                    <button id="btn-clear-snippet" class="text-gray-400 hover:text-white p-1 transition-colors" title="Remove code snippet">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-                        </svg>
-                    </button>
+                    <div class="flex items-center gap-1 flex-shrink-0">
+                        <button id="btn-toggle-snippet" class="text-[0.6rem] text-gray-500 hover:text-gray-300 px-1.5 py-0.5 rounded transition-colors" title="Expand/collapse preview">▼</button>
+                        <button id="btn-clear-snippet" class="text-gray-400 hover:text-white p-1 transition-colors" title="Remove code snippet">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </div>
                 </div>
-                <pre id="code-snippet-content" class="code-snippet-plain p-3 text-xs font-mono text-gray-300 overflow-x-auto max-h-32 overflow-y-auto"></pre>
+                <!-- Preview body: capped at 5 lines (~80px), collapsible -->
+                <div id="code-snippet-body" class="overflow-hidden" style="max-height: 80px;">
+                    <pre id="code-snippet-content" class="code-snippet-plain px-3 py-2 text-xs font-mono text-gray-300 overflow-x-auto overflow-y-hidden whitespace-pre"></pre>
+                </div>
             </div>
 
             <div id="input-wrapper" class="flex items-end gap-2">
@@ -929,6 +1073,28 @@
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+
+                <!-- Stack Trace Button -->
+                <button
+                    id="btn-stack-trace"
+                    class="text-gray-500 hover:text-red-400 p-2.5 rounded-lg hover:bg-red-500/10 transition-all duration-200 focus:outline-none"
+                    title="Share a stack trace"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+
+                <!-- Explain Code Button (AI) -->
+                <button
+                    id="btn-explain-code"
+                    class="text-gray-500 hover:text-emerald-400 p-2.5 rounded-lg hover:bg-emerald-500/10 transition-all duration-200 focus:outline-none"
+                    title="Explain selected code with AI and share with team"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M11 3a1 1 0 10-2 0v1a1 1 0 102 0V3zM15.657 5.757a1 1 0 00-1.414-1.414l-.707.707a1 1 0 001.414 1.414l.707-.707zM18 10a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5.05 6.464A1 1 0 106.464 5.05l-.707-.707a1 1 0 00-1.414 1.414l.707.707zM5 10a1 1 0 01-1 1H3a1 1 0 110-2h1a1 1 0 011 1zM8 16v-1h4v1a2 2 0 11-4 0zM12 14c.015-.68.166-1.32.42-1.897A5 5 0 006 10a5 5 0 006 10l-.579 2.894A1 1 0 0012 14z" />
                     </svg>
                 </button>
 
@@ -1385,6 +1551,68 @@
             <div class="px-5 py-4 border-t border-gray-700 flex justify-end flex-shrink-0">
                 <button id="btn-dismiss-summary" class="btn-secondary text-sm px-4 py-2">
                     Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- Stack Trace Share Modal                                       -->
+    <!-- ============================================================ -->
+    <div id="stack-trace-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
+        <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" id="stack-trace-backdrop"></div>
+        <div class="relative z-10 w-[90%] max-w-lg bg-gray-900 border border-red-800/40 rounded-xl shadow-2xl flex flex-col max-h-[85vh]">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700 flex-shrink-0">
+                <div class="flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                    </svg>
+                    <h3 class="text-sm font-semibold text-white">Share Stack Trace</h3>
+                </div>
+                <button id="btn-close-stack-trace-modal" class="text-gray-500 hover:text-gray-300 p-1 rounded transition-colors">✕</button>
+            </div>
+            <div class="px-5 py-4 flex-1 overflow-y-auto flex flex-col gap-3">
+                <p class="text-xs text-gray-400">Paste your stack trace below. Frames will be rendered as clickable links for your team.</p>
+                <div id="stack-trace-tabs" class="flex gap-1 bg-gray-800/50 rounded-lg p-1">
+                    <button data-tab="paste" class="stack-tab flex-1 text-xs py-1.5 rounded-md text-white bg-gray-700 transition-all">Paste Trace</button>
+                    <button data-tab="test" class="stack-tab flex-1 text-xs py-1.5 rounded-md text-gray-400 hover:text-gray-200 transition-all">Test Output</button>
+                    <button data-tab="vscode" class="stack-tab flex-1 text-xs py-1.5 rounded-md text-gray-400 hover:text-gray-200 transition-all">VS Code Tests</button>
+                </div>
+                <!-- Paste tab -->
+                <div id="stack-tab-paste" class="flex flex-col gap-2">
+                    <textarea id="stack-trace-input" rows="10"
+                        class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-xs text-gray-200 font-mono resize-none focus:outline-none focus:border-red-500"
+                        placeholder="Traceback (most recent call last):&#10;  File &quot;app/service.py&quot;, line 42, in process&#10;    result = data.split(',')&#10;AttributeError: 'NoneType' object has no attribute 'split'">
+                    </textarea>
+                </div>
+                <!-- Test output tab -->
+                <div id="stack-tab-test" class="hidden flex-col gap-2">
+                    <select id="test-framework-select" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 focus:outline-none focus:border-red-500">
+                        <option value="pytest">pytest</option>
+                        <option value="jest">Jest</option>
+                        <option value="go">Go test</option>
+                        <option value="unknown">Other</option>
+                    </select>
+                    <textarea id="test-output-input" rows="10"
+                        class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-xs text-gray-200 font-mono resize-none focus:outline-none focus:border-red-500"
+                        placeholder="Paste test output here...">
+                    </textarea>
+                </div>
+                <!-- VS Code test panel tab -->
+                <div id="stack-tab-vscode" class="hidden flex-col gap-3">
+                    <p class="text-xs text-gray-400">Share failing tests from VS Code's Test Explorer panel.</p>
+                    <button id="btn-collect-vscode-tests" class="btn-secondary text-xs py-2">Collect Failing Tests from Test Explorer</button>
+                    <div id="vscode-tests-preview" class="hidden text-xs text-gray-300 bg-gray-800 rounded-lg p-3 font-mono max-h-40 overflow-y-auto"></div>
+                </div>
+                <div id="stack-trace-error" class="hidden text-xs text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2"></div>
+            </div>
+            <div class="px-5 py-4 border-t border-gray-700 flex gap-2 justify-end flex-shrink-0">
+                <button id="btn-cancel-stack-trace" class="btn-secondary text-sm px-4 py-2">Cancel</button>
+                <button id="btn-send-stack-trace" class="btn-primary text-sm px-4 py-2 flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                    </svg>
+                    Share
                 </button>
             </div>
         </div>
@@ -1857,6 +2085,57 @@
                 leadActions.classList.add('hidden');
                 leadActions.classList.remove('flex');
             }
+
+            // Re-evaluate AI-gated buttons whenever role changes
+            updateAiDependentButtons();
+        }
+
+        /**
+         * Enable or disable buttons that require a healthy AI backend.
+         *
+         * Called from:
+         *   - handleAiStatusResponse()  — when fresh status arrives from backend
+         *   - updateLeadPermissions()   — when the user's role changes
+         *
+         * A button is considered "AI-available" when BOTH are true:
+         *   1. summary_enabled = true  (feature flag in conductor.settings.yaml)
+         *   2. active_provider is non-null (at least one healthy provider exists)
+         */
+        function updateAiDependentButtons() {
+            const aiOk = aiSummaryEnabledState && !!aiActiveProviderState;
+
+            // Explain Code button (💡) — requires AI
+            const explainBtn = document.getElementById('btn-explain-code');
+            if (explainBtn) {
+                if (aiOk) {
+                    explainBtn.removeAttribute('disabled');
+                    explainBtn.classList.remove('opacity-30', 'cursor-not-allowed');
+                    explainBtn.classList.add('hover:text-emerald-400', 'hover:bg-emerald-500/10');
+                    explainBtn.title = 'Explain selected code with AI and share with team';
+                } else {
+                    explainBtn.setAttribute('disabled', 'true');
+                    explainBtn.classList.add('opacity-30', 'cursor-not-allowed');
+                    explainBtn.classList.remove('hover:text-emerald-400', 'hover:bg-emerald-500/10');
+                    const reason = !aiSummaryEnabledState
+                        ? 'AI is disabled (summary.enabled = false in settings)'
+                        : 'No healthy AI provider available';
+                    explainBtn.title = `Explain Code unavailable: ${reason}`;
+                }
+            }
+
+            // Summarize button — also requires AI (already hidden by role, but disable too)
+            const summarizeBtn = document.getElementById('btn-create-summary');
+            if (summarizeBtn) {
+                if (aiOk) {
+                    summarizeBtn.removeAttribute('disabled');
+                    summarizeBtn.classList.remove('opacity-30', 'cursor-not-allowed');
+                } else {
+                    summarizeBtn.setAttribute('disabled', 'true');
+                    summarizeBtn.classList.add('opacity-30', 'cursor-not-allowed');
+                    const reason = !aiSummaryEnabledState ? 'AI disabled' : 'No AI provider';
+                    summarizeBtn.title = `Summarize unavailable: ${reason}`;
+                }
+            }
         }
 
         /**
@@ -2310,6 +2589,41 @@
                 case 'ssoProvidersUpdate':
                     enabledProviders = message.providers;
                     applySSOProviderVisibility(enabledProviders);
+                    break;
+
+                // ---- Stack trace ----
+                case 'stackTraceResolved':
+                    handleStackTraceResolved(message);
+                    break;
+
+                // ---- Test failures ----
+                case 'testFailuresResolved':
+                    handleTestFailuresResolved(message);
+                    break;
+
+                // ---- AI code explanation ----
+                case 'codeExplanationReady':
+                    handleCodeExplanationReady(message);
+                    break;
+
+                // ---- TODO tracking ----
+                case 'todosLoaded':
+                    renderTodoList(message.todos || []);
+                    break;
+                case 'todoCreated':
+                    if (message.todo) addTodoToList(message.todo);
+                    break;
+                case 'todoUpdated':
+                    if (message.todo) refreshTodoInList(message.todo);
+                    break;
+                case 'todoDeleted':
+                    if (message.todoId) removeTodoFromList(message.todoId);
+                    break;
+                case 'workspaceTodosScanned':
+                    handleWorkspaceTodosScanned(message);
+                    break;
+                case 'workspaceTodoUpdated':
+                    handleWorkspaceTodoUpdated(message);
                     break;
             }
         });
@@ -3016,7 +3330,7 @@
                                 </svg>
                             </button>
                         </div>
-                        <pre class="code-snippet-plain p-3 text-xs font-mono text-gray-300 overflow-x-auto max-h-48 overflow-y-auto">${escapeHtml(snippet.code || '')}</pre>
+                        <pre class="code-snippet-plain p-3 text-xs font-mono text-gray-300 whitespace-pre-wrap break-words max-h-48 overflow-y-auto max-w-full">${escapeHtml(snippet.code || '')}</pre>
                     </div>
                     <div class="text-xs text-gray-500 mt-0.5 ${timeAlign} ${isOwnMessage ? 'mr-1' : 'ml-1'} flex items-center ${isOwnMessage ? 'justify-end' : ''}">
                         <span>${formatTime(msg.ts)}</span>${statusHtml}
@@ -3046,6 +3360,280 @@
             if (!isOwnMessage && msg.id && messageReadObserver) {
                 messageReadObserver.observe(div);
             }
+        }
+
+        // ============================================================
+        // Explain Code Button
+        // ============================================================
+
+        const btnExplainCode = document.getElementById('btn-explain-code');
+        // _explainMode is set true when Explain button is clicked; handleCodeSnippetFromExtension checks it
+        let _explainMode = false;
+        let _explainLoadingEl = null;
+
+        function _showExplainLoading() {
+            _removeExplainLoading();
+            const el = document.createElement('div');
+            el.id = 'ai-explain-loading';
+            el.className = 'flex justify-start gap-2 mt-2 px-0 message-enter';
+            el.innerHTML = `
+                <div class="w-7 h-7 bg-emerald-800/60 rounded-full flex items-center justify-center text-emerald-300 text-[0.55rem] font-bold flex-shrink-0 mt-0.5 border border-emerald-700/40">AI</div>
+                <div class="flex items-center gap-3 px-4 py-2.5 rounded-xl max-w-[75%]" style="background:rgba(20,40,30,0.7);border:1px solid rgba(52,211,153,0.15);">
+                    <div class="ai-thinking-dots"><span></span><span></span><span></span></div>
+                    <span class="text-xs text-gray-400">Analysing code…</span>
+                </div>`;
+            messagesContainer.appendChild(el);
+            smartScroll(true);
+            _explainLoadingEl = el;
+        }
+
+        function _removeExplainLoading() {
+            if (_explainLoadingEl) { _explainLoadingEl.remove(); _explainLoadingEl = null; }
+        }
+
+        btnExplainCode.addEventListener('click', () => {
+            // Show informative toast when AI is not available instead of silently blocking
+            if (btnExplainCode.hasAttribute('disabled')) {
+                const reason = !aiSummaryEnabledState
+                    ? 'AI is disabled. Set summary.enabled = true in conductor.settings.yaml.'
+                    : !aiActiveProviderState
+                        ? 'No AI provider available. Configure an API key in conductor.secrets.yaml.'
+                        : 'AI backend not ready. Try again in a moment.';
+                showToast(reason, 'error');
+                return;
+            }
+            _explainMode = true;
+            _showExplainLoading();
+            // Select code in the active VS Code editor first, then click this button.
+            vscode.postMessage({ command: 'getCodeSnippet' }); // re-use same handler
+        });
+
+        // ============================================================
+        // renderStackTraceMessage
+        // ============================================================
+
+        /**
+         * Render a stack trace message in the chat.
+         * Frames with a resolved relativePath are clickable (navigate to file:line).
+         * @param {Object} msg - Stack trace message.
+         */
+        function renderStackTraceMessage(msg) {
+            const parsed = msg.stackTrace || {};
+            const frames = parsed.frames || [];
+            const isOwnMessage = msg.userId === session.userId;
+            const isGrouped = shouldGroupMessage(msg);
+            lastMessageUserId = msg.userId;
+            lastMessageTime = (msg.ts || 0) * 1000;
+
+            if (needsDateSeparator(msg)) renderDateSeparator(new Date(msg.ts * 1000));
+
+            const userInfo = usersMap.get(msg.userId);
+            const displayName = msg.displayName || userInfo?.displayName || 'Unknown';
+            const colorClass = userInfo ? (avatarColors[userInfo.avatarColor] || 'bg-red-700') : 'bg-red-700';
+            const idSource = msg.identitySource || userInfo?.identitySource;
+            const { nameHtml } = buildNameAndRole(displayName, msg.role, idSource);
+            const avatarHtml = (!isOwnMessage && !isGrouped) ? `
+                <div class="w-7 h-7 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
+                    ${getInitials(displayName)}
+                </div>` : (!isOwnMessage && isGrouped) ? '<div class="w-7 flex-shrink-0"></div>' : '';
+
+            // Build frame rows
+            const framesHtml = frames.map((frame, idx) => {
+                const navigable = !frame.isInternal && (frame.relativePath || frame.filePath);
+                const displayPath = frame.relativePath || (frame.filePath ? frame.filePath.split('/').slice(-2).join('/') : '?');
+                const lineInfo = frame.lineNumber ? `:${frame.lineNumber}` : '';
+                const funcInfo = frame.functionName ? ` in ${escapeHtml(frame.functionName)}` : '';
+                return `<div class="stack-frame flex items-center gap-2 px-3 py-1.5 text-xs font-mono border-b border-red-900/20
+                        ${navigable ? 'cursor-pointer hover:bg-red-900/20 group' : 'opacity-40'}"
+                        ${navigable ? `data-frame-path="${escapeHtml(frame.relativePath || frame.filePath || '')}" data-frame-line="${frame.lineNumber || 1}"` : ''}>
+                    <span class="text-red-400/50 text-[0.6rem] w-4 text-right flex-shrink-0">${idx + 1}</span>
+                    <span class="${navigable ? 'text-blue-400 group-hover:text-blue-300' : 'text-gray-500'} truncate">${escapeHtml(displayPath)}${escapeHtml(lineInfo)}</span>
+                    <span class="text-gray-600 truncate">${escapeHtml(funcInfo)}</span>
+                </div>`;
+            }).join('');
+
+            const msgId = `st-${msg.id || Date.now()}`;
+            const div = document.createElement('div');
+            div.setAttribute('data-message-id', msg.id || '');
+            div.setAttribute('data-timestamp', msg.ts || '');
+            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2 ${isGrouped ? 'mt-1' : 'mt-2'}`;
+            div.innerHTML = `
+                ${avatarHtml}
+                <div class="max-w-[90%] min-w-0">
+                    ${(!isOwnMessage && !isGrouped) ? nameHtml : ''}
+                    <div class="bg-red-950/30 rounded-lg overflow-hidden border border-red-800/40 shadow-lg">
+                        <div class="flex items-center gap-2 px-3 py-2 bg-red-900/20 border-b border-red-800/40">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-red-400 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                            </svg>
+                            <span class="text-xs font-semibold text-red-300 truncate">${escapeHtml(parsed.errorType || 'Error')}</span>
+                            <span class="text-xs text-red-400/70 truncate flex-1 min-w-0">${escapeHtml(parsed.errorMessage || '')}</span>
+                            <button class="copy-raw-st ml-auto p-1 rounded hover:bg-red-800/40 text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Copy raw text">⎘</button>
+                        </div>
+                        <div id="${msgId}-frames" class="divide-y divide-red-900/10 max-h-48 overflow-y-auto">${framesHtml}</div>
+                        ${frames.length === 0 ? `<div class="px-3 py-2 text-xs text-gray-500 font-mono">${escapeHtml(parsed.rawText || msg.rawText || '')}</div>` : ''}
+                        ${parsed.language && parsed.language !== 'unknown' ? `<div class="px-3 py-1 text-[0.6rem] text-gray-600 border-t border-red-900/20">${escapeHtml(parsed.language)}</div>` : ''}
+                    </div>
+                    <div class="text-xs text-gray-500 mt-0.5 ${isOwnMessage ? 'text-right mr-1' : 'ml-1'}">${formatTime(msg.ts)}</div>
+                </div>`;
+
+            messagesContainer.appendChild(div);
+
+            // Wire up frame clicks
+            div.querySelectorAll('.stack-frame[data-frame-path]').forEach(el => {
+                el.addEventListener('click', () => {
+                    vscode.postMessage({
+                        command: 'navigateToCode',
+                        relativePath: el.dataset.framePath,
+                        startLine: parseInt(el.dataset.frameLine || '1'),
+                        endLine: parseInt(el.dataset.frameLine || '1'),
+                    });
+                });
+            });
+
+            // Copy raw
+            div.querySelector('.copy-raw-st')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                navigator.clipboard.writeText(parsed.rawText || msg.rawText || '');
+            });
+
+            smartScroll(isOwnMessage);
+            if (!isOwnMessage && msg.id && messageReadObserver) messageReadObserver.observe(div);
+        }
+
+        // ============================================================
+        // renderTestFailureMessage
+        // ============================================================
+
+        /**
+         * Render a test failure message in the chat.
+         * @param {Object} msg - Test failure message.
+         */
+        function renderTestFailureMessage(msg) {
+            const tf = msg.testFailure || {};
+            const tests = tf.tests || [];
+            const isOwnMessage = msg.userId === session.userId;
+            const isGrouped = shouldGroupMessage(msg);
+            lastMessageUserId = msg.userId;
+            lastMessageTime = (msg.ts || 0) * 1000;
+
+            if (needsDateSeparator(msg)) renderDateSeparator(new Date(msg.ts * 1000));
+
+            const userInfo = usersMap.get(msg.userId);
+            const displayName = msg.displayName || userInfo?.displayName || 'Unknown';
+            const colorClass = userInfo ? (avatarColors[userInfo.avatarColor] || 'bg-orange-700') : 'bg-orange-700';
+            const idSource = msg.identitySource || userInfo?.identitySource;
+            const { nameHtml } = buildNameAndRole(displayName, msg.role, idSource);
+            const avatarHtml = (!isOwnMessage && !isGrouped) ? `
+                <div class="w-7 h-7 ${colorClass} rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
+                    ${getInitials(displayName)}
+                </div>` : (!isOwnMessage && isGrouped) ? '<div class="w-7 flex-shrink-0"></div>' : '';
+
+            const testsHtml = tests.map(t => {
+                const navigable = t.filePath;
+                return `<div class="px-3 py-2 border-b border-orange-900/20 hover:bg-orange-900/10">
+                    <div class="flex items-start gap-2">
+                        <span class="text-orange-400 text-xs flex-shrink-0">✗</span>
+                        <div class="flex-1 min-w-0">
+                            <p class="text-xs font-mono text-orange-200 break-all">${escapeHtml(t.name)}</p>
+                            ${t.errorMessage ? `<p class="text-[0.65rem] text-gray-400 mt-0.5 break-words">${escapeHtml(t.errorMessage)}</p>` : ''}
+                            ${navigable ? `<button class="test-nav-btn text-[0.6rem] text-blue-400 hover:text-blue-300 mt-0.5 underline underline-offset-2"
+                                data-path="${escapeHtml(t.filePath)}" data-line="${t.lineNumber || 1}">${escapeHtml(t.filePath)}:${t.lineNumber || '?'}</button>` : ''}
+                        </div>
+                    </div>
+                </div>`;
+            }).join('');
+
+            const div = document.createElement('div');
+            div.setAttribute('data-message-id', msg.id || '');
+            div.setAttribute('data-timestamp', msg.ts || '');
+            div.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'} gap-2 ${isGrouped ? 'mt-1' : 'mt-2'}`;
+            div.innerHTML = `
+                ${avatarHtml}
+                <div class="max-w-[90%] min-w-0">
+                    ${(!isOwnMessage && !isGrouped) ? nameHtml : ''}
+                    <div class="bg-orange-950/30 rounded-lg overflow-hidden border border-orange-800/40 shadow-lg">
+                        <div class="flex items-center gap-2 px-3 py-2 bg-orange-900/20 border-b border-orange-800/40">
+                            <span class="text-orange-400 text-sm">🧪</span>
+                            <span class="text-xs font-semibold text-orange-300">${tf.totalFailed || tests.length} test${tf.totalFailed !== 1 ? 's' : ''} failed</span>
+                            <span class="text-[0.65rem] text-gray-500 ml-1">${escapeHtml(tf.framework || '')}</span>
+                        </div>
+                        <div class="max-h-48 overflow-y-auto">${testsHtml || `<div class="px-3 py-2 text-xs text-gray-500">${escapeHtml(tf.rawOutput || 'No details')}</div>`}</div>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-0.5 ${isOwnMessage ? 'text-right mr-1' : 'ml-1'}">${formatTime(msg.ts)}</div>
+                </div>`;
+
+            messagesContainer.appendChild(div);
+
+            div.querySelectorAll('.test-nav-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    vscode.postMessage({ command: 'navigateToCode', relativePath: btn.dataset.path, startLine: parseInt(btn.dataset.line), endLine: parseInt(btn.dataset.line) });
+                });
+            });
+
+            smartScroll(isOwnMessage);
+            if (!isOwnMessage && msg.id && messageReadObserver) messageReadObserver.observe(div);
+        }
+
+        // ============================================================
+        // renderAiExplanationMessage + handleCodeExplanationReady
+        // ============================================================
+
+        function handleCodeExplanationReady(message) {
+            // Remove the loading indicator regardless of outcome.
+            // The actual explanation message arrives via WebSocket broadcast.
+            _removeExplainLoading();
+            if (message.error) {
+                showToast('Code explanation failed: ' + message.error, 'error');
+            }
+        }
+
+        function renderAiExplanationMessage(msg) {
+            const aiData = msg.aiData || {};
+            const isOwnMessage = msg.userId === session.userId;
+            const isGrouped = shouldGroupMessage(msg);
+            lastMessageUserId = msg.userId;
+            lastMessageTime = (msg.ts || 0) * 1000;
+
+            if (needsDateSeparator(msg)) renderDateSeparator(new Date(msg.ts * 1000));
+
+            const code = aiData.code || '';
+            const relativePath = aiData.relativePath || '';
+            const startLine = aiData.startLine || 1;
+            const endLine = aiData.endLine || startLine;
+            const lineInfo = startLine === endLine ? `L${startLine}` : `L${startLine}-${endLine}`;
+            const navigateBtnId = `exp-nav-${msg.id || Date.now()}`;
+
+            const div = document.createElement('div');
+            div.setAttribute('data-message-id', msg.id || '');
+            div.setAttribute('data-timestamp', msg.ts || '');
+            div.className = `flex justify-start gap-2 ${isGrouped ? 'mt-1' : 'mt-2'}`;
+            div.innerHTML = `
+                <div class="w-7 h-7 bg-emerald-700 rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">AI</div>
+                <div class="max-w-[90%] min-w-0">
+                    <div class="bg-emerald-950/30 rounded-lg overflow-hidden border border-emerald-800/40 shadow-lg">
+                        <div class="flex items-center gap-2 px-3 py-2 bg-emerald-900/20 border-b border-emerald-800/40">
+                            <span class="text-emerald-400 text-sm">💡</span>
+                            <span class="text-xs font-semibold text-emerald-300">Code Explanation</span>
+                            ${relativePath ? `<button id="${navigateBtnId}" class="ml-auto text-[0.65rem] text-blue-400 hover:text-blue-300 font-mono truncate max-w-[140px]" title="Navigate to code">${escapeHtml(relativePath)} ${lineInfo}</button>` : ''}
+                        </div>
+                        ${code ? `<pre class="px-3 pt-2 pb-1 text-xs font-mono text-gray-300 overflow-x-auto max-h-28 overflow-y-auto border-b border-emerald-900/20 bg-black/20">${escapeHtml(code)}</pre>` : ''}
+                        <div class="px-3 py-2.5 text-xs text-gray-200 leading-relaxed whitespace-pre-wrap break-words">${escapeHtml(msg.content || '')}</div>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-0.5 ml-1">${formatTime(msg.ts)}</div>
+                </div>`;
+
+            messagesContainer.appendChild(div);
+
+            const navBtn = document.getElementById(navigateBtnId);
+            if (navBtn && relativePath) {
+                navBtn.addEventListener('click', () => {
+                    vscode.postMessage({ command: 'navigateToCode', relativePath, startLine, endLine });
+                });
+            }
+
+            smartScroll(false);
+            if (msg.id && messageReadObserver) messageReadObserver.observe(div);
         }
 
         /**
@@ -3373,6 +3961,11 @@
                         `;
                     });
                 }
+            }
+
+            // Auto-populate TODOs from AI summary items
+            if (codeRelevantItems.length > 0 && session.roomId) {
+                autoPopulateTodosFromItems(codeRelevantItems, session.roomId);
             }
 
             smartScroll(false);
@@ -3982,6 +4575,10 @@
                                 // Note: userId and role are now handled by backend
                             }));
                         }
+
+                        // Proactively fetch AI status so AI-gated buttons start in the correct state.
+                        // This is a fire-and-forget call; errors are silently ignored.
+                        vscode.postMessage({ command: 'getAiStatus' });
                     } else if (data.type === 'message') {
                         if (!isDuplicateMessage(data.id)) {
                             renderMessage(data);
@@ -4043,6 +4640,21 @@
                         // Re-render user list to update lead indicator
                         if (usersMap.size > 0) {
                             renderUsersList(Array.from(usersMap.values()));
+                        }
+                    } else if (data.type === 'stack_trace') {
+                        if (!isDuplicateMessage(data.id)) {
+                            renderStackTraceMessage(data);
+                            updateLastMessageTimestamp(data.ts);
+                        }
+                    } else if (data.type === 'test_failure') {
+                        if (!isDuplicateMessage(data.id)) {
+                            renderTestFailureMessage(data);
+                            updateLastMessageTimestamp(data.ts);
+                        }
+                    } else if (data.type === 'ai_explanation') {
+                        if (!isDuplicateMessage(data.id)) {
+                            renderAiExplanationMessage(data);
+                            updateLastMessageTimestamp(data.ts);
                         }
                     } else if (data.type === 'error') {
                         // SECURITY: Handle backend error messages (e.g., permission denied)
@@ -4173,6 +4785,616 @@
         scrollToBottomBtn.addEventListener('click', scrollToBottom);
 
         // ============================================================
+        // Tab switching: Chat ↔ Tasks
+        // ============================================================
+
+        const tabChat  = document.getElementById('tab-chat');
+        const tabTasks = document.getElementById('tab-tasks');
+        const tabPanelChat  = document.getElementById('tab-panel-chat');
+        const tabPanelTasks = document.getElementById('tab-panel-tasks');
+        const todosListEl   = document.getElementById('todos-list');
+        const todoBadge     = document.getElementById('todo-count-badge');
+        let currentFilter   = 'all';
+        let allTodos        = [];
+
+        // Pill-style tab activation helpers
+        function activatePillTab(activeBtn, inactiveBtn) {
+            activeBtn.classList.add('active','text-white');
+            activeBtn.style.background = 'rgba(55,65,81,0.9)';
+            activeBtn.style.boxShadow = '0 1px 3px rgba(0,0,0,0.4)';
+            activeBtn.classList.remove('text-gray-500');
+            inactiveBtn.classList.remove('active','text-white');
+            inactiveBtn.style.background = '';
+            inactiveBtn.style.boxShadow = '';
+            inactiveBtn.classList.add('text-gray-500');
+        }
+
+        tabChat.addEventListener('click', () => {
+            activatePillTab(tabChat, tabTasks);
+            tabPanelChat.classList.remove('hidden');
+            tabPanelTasks.classList.add('hidden');
+        });
+
+        tabTasks.addEventListener('click', () => {
+            activatePillTab(tabTasks, tabChat);
+            tabPanelTasks.classList.remove('hidden');
+            tabPanelChat.classList.add('hidden');
+            // Load todos when tab opens
+            if (session.roomId) {
+                vscode.postMessage({ command: 'loadTodos', roomId: session.roomId });
+            }
+        });
+
+        // Filter buttons
+        document.querySelectorAll('.todo-filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.todo-filter-btn').forEach(b => {
+                    b.classList.remove('active','bg-violet-600/20','text-violet-400','border-violet-600/30');
+                    b.classList.add('text-gray-500','border-gray-700/40');
+                });
+                btn.classList.add('active','bg-violet-600/20','text-violet-400','border-violet-600/30');
+                btn.classList.remove('text-gray-500','border-gray-700/40');
+                currentFilter = btn.dataset.filter;
+                renderTodoList(allTodos);
+            });
+        });
+
+        // Add TODO form
+        const btnAddTodo    = document.getElementById('btn-add-todo');
+        const todoAddForm   = document.getElementById('todo-add-form');
+        const todoTitleInput = document.getElementById('todo-title-input');
+        const todoPrioritySelect = document.getElementById('todo-priority-select');
+        const btnTodoSave   = document.getElementById('btn-todo-save');
+        const btnTodoCancel = document.getElementById('btn-todo-cancel');
+
+        btnAddTodo.addEventListener('click', () => {
+            todoAddForm.classList.toggle('hidden');
+            if (!todoAddForm.classList.contains('hidden')) todoTitleInput.focus();
+        });
+        const todoDescInput = document.getElementById('todo-desc-input');
+
+        function _closeTodoForm() {
+            todoAddForm.classList.add('hidden');
+            todoTitleInput.value = '';
+            if (todoDescInput) todoDescInput.value = '';
+        }
+
+        btnTodoCancel.addEventListener('click', _closeTodoForm);
+
+        // Submit on Cmd/Ctrl+Enter inside the form
+        todoAddForm.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) btnTodoSave.click();
+        });
+
+        btnTodoSave.addEventListener('click', () => {
+            const title = todoTitleInput.value.trim();
+            if (!title || !session.roomId) return;
+            const description = todoDescInput?.value.trim() || null;
+            vscode.postMessage({
+                command: 'createTodo',
+                roomId: session.roomId,
+                todo: {
+                    title,
+                    description: description || undefined,
+                    priority: todoPrioritySelect.value,
+                    source: 'manual',
+                    created_by: session.displayName || '',
+                },
+            });
+            _closeTodoForm();
+        });
+
+        function renderTodoList(todos) {
+            allTodos = todos;
+            const filtered = currentFilter === 'all' ? todos
+                : todos.filter(t => currentFilter === 'done' ? t.status === 'done' : t.status !== 'done');
+
+            if (filtered.length === 0) {
+                if (currentFilter === 'done') {
+                    todosListEl.innerHTML = `<div class="text-xs text-gray-600 text-center py-6">No completed tasks yet.</div>`;
+                } else if (todos.length > 0) {
+                    // There are tasks, just none match the filter
+                    todosListEl.innerHTML = `<div class="text-xs text-gray-600 text-center py-6">No open tasks.</div>`;
+                } else {
+                    // Truly empty — explain how tasks are created
+                    todosListEl.innerHTML = `
+                        <div class="flex flex-col items-center gap-3 py-6 px-2 text-center">
+                            <div class="text-2xl">✅</div>
+                            <p class="text-xs text-gray-500 font-medium">No tasks yet</p>
+                            <div class="bg-gray-800/40 border border-gray-700/40 rounded-lg p-3 text-left space-y-2 w-full">
+                                <p class="text-[0.65rem] text-gray-400 font-semibold uppercase tracking-wide">How tasks are created</p>
+                                <div class="flex items-start gap-2">
+                                    <span class="text-violet-400 flex-shrink-0 mt-0.5">🤖</span>
+                                    <p class="text-[0.65rem] text-gray-400 leading-relaxed"><strong class="text-gray-300">Automatically</strong> — run <strong class="text-violet-300">Summarize</strong> in the chat. The AI extracts actionable items and adds them here.</p>
+                                </div>
+                                <div class="flex items-start gap-2">
+                                    <span class="text-emerald-400 flex-shrink-0 mt-0.5">✏️</span>
+                                    <p class="text-[0.65rem] text-gray-400 leading-relaxed"><strong class="text-gray-300">Manually</strong> — click <strong class="text-gray-300">+ Add</strong> above to create a task yourself.</p>
+                                </div>
+                            </div>
+                        </div>`;
+                }
+            } else {
+                todosListEl.innerHTML = '';
+            }
+
+            filtered.forEach(todo => {
+                const el = buildTodoEl(todo);
+                todosListEl.appendChild(el);
+            });
+
+            // Update badge
+            const openCount = todos.filter(t => t.status !== 'done').length;
+            if (openCount > 0) {
+                todoBadge.textContent = openCount;
+                todoBadge.classList.remove('hidden');
+            } else {
+                todoBadge.classList.add('hidden');
+            }
+        }
+
+        function buildTodoEl(todo) {
+            const el = document.createElement('div');
+            const isDone = todo.status === 'done';
+            el.className = `todo-item rounded-lg border transition-all
+                ${isDone ? 'bg-gray-900/20 border-gray-800/30 opacity-55' : 'bg-gray-800/40 border-gray-700/40 hover:border-gray-600/60'}`;
+            el.dataset.todoId = todo.id;
+
+            const priorityDot = { high: 'bg-red-400', medium: 'bg-yellow-400', low: 'bg-green-400' };
+            const priorityLabel = { high: 'text-red-400', medium: 'text-yellow-400', low: 'text-green-400' };
+            const dot = priorityDot[todo.priority] || 'bg-gray-500';
+            const prioText = priorityLabel[todo.priority] || 'text-gray-400';
+
+            // Description: show first 2 lines truncated; click to toggle full
+            const descHtml = todo.description ? `
+                <p class="todo-desc text-[0.65rem] text-gray-500 mt-1 leading-relaxed"
+                   style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;"
+                >${escapeHtml(todo.description)}</p>` : '';
+
+            // Source badge
+            const sourceBadge = todo.source === 'ai_summary'
+                ? `<span class="text-[0.6rem] text-violet-500/70">🤖 from AI</span>` : '';
+
+            el.innerHTML = `
+                <!-- Main row -->
+                <div class="flex items-start gap-2 p-2.5">
+                    <!-- Checkbox -->
+                    <button class="todo-check mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-all
+                        ${isDone ? 'bg-violet-600 border-violet-600' : 'border-gray-600 hover:border-violet-500'}">
+                        ${isDone ? '<svg class="w-2.5 h-2.5 text-white" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg>' : ''}
+                    </button>
+
+                    <!-- Content -->
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-start gap-1.5">
+                            <span class="w-1.5 h-1.5 rounded-full ${dot} flex-shrink-0 mt-1.5"></span>
+                            <p class="text-xs ${isDone ? 'line-through text-gray-600' : 'text-gray-200'} leading-snug break-words flex-1">${escapeHtml(todo.title)}</p>
+                        </div>
+                        ${descHtml}
+                        <!-- Meta row -->
+                        <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+                            <span class="text-[0.6rem] font-medium ${prioText} uppercase tracking-wide">${todo.priority}</span>
+                            ${todo.type && todo.type !== 'task' ? `<span class="text-[0.6rem] text-gray-500 bg-gray-700/40 px-1.5 py-0.5 rounded">${escapeHtml(todo.type)}</span>` : ''}
+                            ${todo.file_path ? `<button class="todo-nav-btn text-[0.6rem] text-blue-400 hover:text-blue-300 font-mono truncate max-w-[110px]" data-path="${escapeHtml(todo.file_path)}" data-line="${todo.line_number || 1}">📎 ${escapeHtml(todo.file_path.split('/').slice(-1)[0])}${todo.line_number ? ':' + todo.line_number : ''}</button>` : ''}
+                            ${sourceBadge}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action row — shown on hover via CSS, always accessible -->
+                <div class="todo-actions flex items-center justify-end gap-1 px-2.5 pb-2">
+                    <button class="todo-ai-btn flex items-center gap-1 text-[0.65rem] text-violet-400 hover:text-violet-300
+                        bg-violet-500/10 hover:bg-violet-500/20 border border-violet-600/20 hover:border-violet-500/40
+                        px-2 py-1 rounded-md transition-all font-medium"
+                        title="Ask AI to implement this task — generates a code prompt in chat">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2L13.09 8.26L18 6L14.74 10.91L21 12L14.74 13.09L18 18L13.09 15.74L12 22L10.91 15.74L6 18L9.26 13.09L3 12L9.26 10.91L6 6L10.91 8.26L12 2Z"/>
+                        </svg>
+                        Ask AI
+                    </button>
+                    <button class="todo-delete-btn flex items-center gap-1 text-[0.65rem] text-gray-600 hover:text-red-400
+                        hover:bg-red-500/10 border border-transparent hover:border-red-600/20
+                        px-2 py-1 rounded-md transition-all"
+                        title="Delete task">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                        Delete
+                    </button>
+                </div>`;
+
+            // Toggle done
+            el.querySelector('.todo-check').addEventListener('click', (e) => {
+                e.stopPropagation();
+                const newStatus = isDone ? 'open' : 'done';
+                vscode.postMessage({ command: 'updateTodo', roomId: session.roomId, todoId: todo.id, updates: { status: newStatus } });
+            });
+
+            // Navigate to code
+            const navBtn = el.querySelector('.todo-nav-btn');
+            if (navBtn) {
+                navBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    vscode.postMessage({ command: 'navigateToCode', relativePath: navBtn.dataset.path, startLine: parseInt(navBtn.dataset.line), endLine: parseInt(navBtn.dataset.line) });
+                });
+            }
+
+            // Toggle description expand/collapse
+            const descEl = el.querySelector('.todo-desc');
+            if (descEl) {
+                descEl.style.cursor = 'pointer';
+                let descExpanded = false;
+                descEl.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    descExpanded = !descExpanded;
+                    descEl.style.webkitLineClamp = descExpanded ? 'unset' : '2';
+                    descEl.style.overflow = descExpanded ? 'visible' : 'hidden';
+                });
+            }
+
+            // Ask AI — format task as CodeRelevantItem and trigger code prompt generation
+            el.querySelector('.todo-ai-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (!session.roomId) return;
+
+                const aiBtn = el.querySelector('.todo-ai-btn');
+                const originalHtml = aiBtn.innerHTML;
+
+                // Show loading state
+                aiBtn.disabled = true;
+                aiBtn.innerHTML = `<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg> Generating…`;
+
+                // Package the task as a CodeRelevantItem — reuses the existing CGP pipeline
+                const item = {
+                    title: todo.title,
+                    description: todo.description
+                        ? `${todo.title}\n\n${todo.description}`
+                        : todo.title,
+                    affected_components: todo.file_path ? [todo.file_path] : [],
+                    type: todo.type || 'code_change',
+                    priority: todo.priority,
+                };
+
+                vscode.postMessage({
+                    command: 'generateCodePromptFromItemsAndPost',
+                    items: [item],
+                    topic: todo.title,
+                    roomId: session.roomId,
+                });
+
+                // Restore button after a short delay (actual result appears in chat)
+                setTimeout(() => {
+                    aiBtn.disabled = false;
+                    aiBtn.innerHTML = originalHtml;
+                }, 3000);
+            });
+
+            // Delete task
+            el.querySelector('.todo-delete-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (!session.roomId) return;
+                // Optimistic UI — fade out immediately
+                el.style.transition = 'opacity 0.2s';
+                el.style.opacity = '0';
+                setTimeout(() => {
+                    vscode.postMessage({ command: 'deleteTodo', roomId: session.roomId, todoId: todo.id });
+                }, 180);
+            });
+
+            return el;
+        }
+
+        function addTodoToList(todo) {
+            allTodos.unshift(todo);
+            renderTodoList(allTodos);
+        }
+
+        function refreshTodoInList(updated) {
+            allTodos = allTodos.map(t => t.id === updated.id ? updated : t);
+            renderTodoList(allTodos);
+        }
+
+        function removeTodoFromList(todoId) {
+            allTodos = allTodos.filter(t => t.id !== todoId);
+            renderTodoList(allTodos);
+        }
+
+        // Auto-populate todos from AI summary CodeRelevantItems
+        function autoPopulateTodosFromItems(items, roomId) {
+            if (!items || !roomId) return;
+            items.forEach(item => {
+                // title and description are both populated so "Ask AI" has full context
+                const title = item.title || item.description || 'Task from AI';
+                const description = item.description && item.description !== title
+                    ? item.description : null;
+                const todo = {
+                    title,
+                    description,
+                    type: item.type || 'task',
+                    priority: item.priority || 'medium',
+                    file_path: (item.affected_components || [])[0] || null,
+                    source: 'ai_summary',
+                    created_by: 'AI',
+                };
+                vscode.postMessage({ command: 'createTodo', roomId, todo });
+            });
+        }
+
+        // ============================================================
+        // Workspace TODO Scanner
+        // ============================================================
+
+        /** @type {Array<{id:string,filePath:string,relativePath:string,lineNumber:number,title:string,description?:string,descriptionLine?:number,commentPrefix:string}>} */
+        let workspaceTodos = [];
+        /** Currently edited workspace todo item */
+        let _editingWorkspaceTodo = null;
+
+        const btnScanWorkspaceTodos      = document.getElementById('btn-scan-workspace-todos');
+        const btnToggleWorkspaceTodos    = document.getElementById('btn-toggle-workspace-todos');
+        const workspaceTodosChevron      = document.getElementById('workspace-todos-chevron');
+        const workspaceTodosPanel        = document.getElementById('workspace-todos-panel');
+        const workspaceTodosEmpty        = document.getElementById('workspace-todos-empty');
+        const workspaceTodosList         = document.getElementById('workspace-todos-list');
+        const workspaceTodoCount         = document.getElementById('workspace-todo-count');
+
+        const workspaceTodoEditModal     = document.getElementById('workspace-todo-edit-modal');
+        const workspaceTodoEditLocation  = document.getElementById('workspace-todo-edit-location');
+        const workspaceTodoEditTitle     = document.getElementById('workspace-todo-edit-title');
+        const workspaceTodoEditDesc      = document.getElementById('workspace-todo-edit-desc');
+        const btnCloseWorkspaceTodoModal = document.getElementById('btn-close-workspace-todo-modal');
+        const btnWorkspaceTodoCancel     = document.getElementById('btn-workspace-todo-cancel');
+        const btnWorkspaceTodoSave       = document.getElementById('btn-workspace-todo-save');
+
+        let _workspaceTodosExpanded = false;
+
+        btnToggleWorkspaceTodos.addEventListener('click', () => {
+            _workspaceTodosExpanded = !_workspaceTodosExpanded;
+            workspaceTodosPanel.classList.toggle('hidden', !_workspaceTodosExpanded);
+            workspaceTodosChevron.style.transform = _workspaceTodosExpanded ? 'rotate(90deg)' : '';
+        });
+
+        btnScanWorkspaceTodos.addEventListener('click', () => {
+            btnScanWorkspaceTodos.textContent = '...';
+            btnScanWorkspaceTodos.disabled = true;
+            vscode.postMessage({ command: 'scanWorkspaceTodos' });
+        });
+
+        function renderWorkspaceTodoList() {
+            workspaceTodosList.innerHTML = '';
+            if (workspaceTodos.length === 0) {
+                workspaceTodosEmpty.classList.remove('hidden');
+                workspaceTodoCount.classList.add('hidden');
+                return;
+            }
+            workspaceTodosEmpty.classList.add('hidden');
+            workspaceTodoCount.textContent = workspaceTodos.length;
+            workspaceTodoCount.classList.remove('hidden');
+
+            // Auto-expand when results arrive
+            if (!_workspaceTodosExpanded) {
+                _workspaceTodosExpanded = true;
+                workspaceTodosPanel.classList.remove('hidden');
+                workspaceTodosChevron.style.transform = 'rotate(90deg)';
+            }
+
+            workspaceTodos.forEach(todo => {
+                const el = document.createElement('div');
+                el.className = 'bg-gray-800/50 border border-gray-700/30 rounded-lg p-2.5 flex flex-col gap-1 cursor-pointer hover:border-violet-500/30 transition-colors group';
+                el.innerHTML = `
+                    <div class="flex items-start justify-between gap-2">
+                        <span class="text-xs text-gray-200 font-medium leading-snug flex-1 min-w-0">${escapeHtml(todo.title)}</span>
+                        <button class="workspace-todo-edit-btn flex-shrink-0 opacity-0 group-hover:opacity-100 p-0.5 text-gray-500 hover:text-violet-400 transition-opacity" title="Edit">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/>
+                            </svg>
+                        </button>
+                    </div>
+                    ${todo.description ? `<span class="text-[0.65rem] text-gray-500 leading-snug">${escapeHtml(todo.description)}</span>` : ''}
+                    <div class="flex items-center gap-1 mt-0.5">
+                        <span class="text-[0.6rem] text-blue-400/70 font-mono truncate">${escapeHtml(todo.relativePath)}</span>
+                        <span class="text-[0.6rem] text-gray-600 flex-shrink-0">:${todo.lineNumber}</span>
+                    </div>
+                `;
+                // Navigate to file on click (but not on edit button)
+                el.addEventListener('click', (e) => {
+                    if (e.target.closest('.workspace-todo-edit-btn')) return;
+                    vscode.postMessage({ command: 'navigateToCode', relativePath: todo.relativePath, startLine: todo.lineNumber, endLine: todo.lineNumber });
+                });
+                el.querySelector('.workspace-todo-edit-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openWorkspaceTodoEdit(todo);
+                });
+                workspaceTodosList.appendChild(el);
+            });
+        }
+
+        function openWorkspaceTodoEdit(todo) {
+            _editingWorkspaceTodo = todo;
+            workspaceTodoEditLocation.textContent = `${todo.relativePath}:${todo.lineNumber}`;
+            workspaceTodoEditTitle.value = todo.title;
+            workspaceTodoEditDesc.value = todo.description || '';
+            workspaceTodoEditModal.classList.remove('hidden');
+            workspaceTodoEditTitle.focus();
+        }
+
+        function closeWorkspaceTodoModal() {
+            workspaceTodoEditModal.classList.add('hidden');
+            _editingWorkspaceTodo = null;
+        }
+
+        btnCloseWorkspaceTodoModal.addEventListener('click', closeWorkspaceTodoModal);
+        btnWorkspaceTodoCancel.addEventListener('click', closeWorkspaceTodoModal);
+
+        btnWorkspaceTodoSave.addEventListener('click', () => {
+            if (!_editingWorkspaceTodo) return;
+            const newTitle = workspaceTodoEditTitle.value.trim();
+            if (!newTitle) { showToast('Title is required', 'error'); return; }
+            const newDescription = workspaceTodoEditDesc.value.trim();
+            vscode.postMessage({
+                command: 'updateWorkspaceTodo',
+                payload: {
+                    filePath: _editingWorkspaceTodo.filePath,
+                    lineNumber: _editingWorkspaceTodo.lineNumber,
+                    newTitle,
+                    newDescription,
+                    descriptionLine: _editingWorkspaceTodo.descriptionLine,
+                    commentPrefix: _editingWorkspaceTodo.commentPrefix,
+                },
+            });
+            // Optimistically update local state
+            _editingWorkspaceTodo.title = newTitle;
+            _editingWorkspaceTodo.description = newDescription || undefined;
+            renderWorkspaceTodoList();
+            closeWorkspaceTodoModal();
+        });
+
+        // Handle backend responses
+        function handleWorkspaceTodosScanned(data) {
+            // Reset scan button
+            const btn = document.getElementById('btn-scan-workspace-todos');
+            if (btn) { btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/></svg> Scan`; btn.disabled = false; }
+            if (data.error) { showToast('Scan failed: ' + data.error, 'error'); return; }
+            workspaceTodos = data.todos || [];
+            renderWorkspaceTodoList();
+            if (workspaceTodos.length === 0) {
+                workspaceTodosEmpty.classList.remove('hidden');
+                workspaceTodosEmpty.innerHTML = 'No TODO comments found.<br><span class="text-gray-700">Add <code class="text-violet-500">// TODO: title</code> to your code.</span>';
+                if (!_workspaceTodosExpanded) {
+                    _workspaceTodosExpanded = true;
+                    workspaceTodosPanel.classList.remove('hidden');
+                    workspaceTodosChevron.style.transform = 'rotate(90deg)';
+                }
+            }
+        }
+
+        function handleWorkspaceTodoUpdated(data) {
+            if (!data.ok) showToast('Failed to save TODO to file', 'error');
+        }
+
+        // ============================================================
+        // Stack Trace Modal & Handling
+        // ============================================================
+
+        const stackTraceModal    = document.getElementById('stack-trace-modal');
+        const btnStackTrace      = document.getElementById('btn-stack-trace');
+        const btnCloseStackTrace = document.getElementById('btn-close-stack-trace-modal');
+        const btnCancelStackTrace = document.getElementById('btn-cancel-stack-trace');
+        const btnSendStackTrace  = document.getElementById('btn-send-stack-trace');
+        const stackTraceInput    = document.getElementById('stack-trace-input');
+        const stackTraceError    = document.getElementById('stack-trace-error');
+        const stackTraceTabs     = document.querySelectorAll('.stack-tab');
+
+        // Tab switching inside modal
+        stackTraceTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const target = tab.dataset.tab;
+                stackTraceTabs.forEach(t => {
+                    t.classList.remove('text-white','bg-gray-700');
+                    t.classList.add('text-gray-400');
+                });
+                tab.classList.add('text-white','bg-gray-700');
+                tab.classList.remove('text-gray-400');
+                ['paste','test','vscode'].forEach(id => {
+                    const el = document.getElementById(`stack-tab-${id}`);
+                    if (el) el.classList.toggle('hidden', id !== target);
+                    if (el && id === target) el.classList.add('flex');
+                });
+            });
+        });
+
+        btnStackTrace.addEventListener('click', () => {
+            stackTraceError.classList.add('hidden');
+            stackTraceModal.classList.remove('hidden');
+        });
+
+        function closeStackTraceModal() {
+            stackTraceModal.classList.add('hidden');
+            stackTraceInput.value = '';
+        }
+
+        btnCloseStackTrace.addEventListener('click', closeStackTraceModal);
+        btnCancelStackTrace.addEventListener('click', closeStackTraceModal);
+        document.getElementById('stack-trace-backdrop').addEventListener('click', closeStackTraceModal);
+
+        btnSendStackTrace.addEventListener('click', () => {
+            const activeTab = document.querySelector('.stack-tab.bg-gray-700')?.dataset.tab || 'paste';
+
+            if (activeTab === 'paste') {
+                const text = stackTraceInput.value.trim();
+                if (!text) {
+                    stackTraceError.textContent = 'Please paste a stack trace.';
+                    stackTraceError.classList.remove('hidden');
+                    return;
+                }
+                stackTraceError.classList.add('hidden');
+                vscode.postMessage({ command: 'shareStackTrace', rawText: text });
+                closeStackTraceModal();
+
+            } else if (activeTab === 'test') {
+                const text = document.getElementById('test-output-input').value.trim();
+                const framework = document.getElementById('test-framework-select').value;
+                if (!text) {
+                    stackTraceError.textContent = 'Please paste test output.';
+                    stackTraceError.classList.remove('hidden');
+                    return;
+                }
+                stackTraceError.classList.add('hidden');
+                vscode.postMessage({ command: 'shareTestOutput', rawText: text, framework });
+                closeStackTraceModal();
+
+            } else if (activeTab === 'vscode') {
+                vscode.postMessage({ command: 'shareTestFailures' });
+                closeStackTraceModal();
+            }
+        });
+
+        document.getElementById('btn-collect-vscode-tests').addEventListener('click', () => {
+            vscode.postMessage({ command: 'shareTestFailures' });
+        });
+
+        // Handle resolved stack trace from extension
+        function handleStackTraceResolved(message) {
+            if (message.error) {
+                console.warn('[WebView] Stack trace parse error:', message.error);
+                return;
+            }
+            if (!ws || ws.readyState !== WebSocket.OPEN || !session.userId) {
+                console.warn('[WebView] Cannot send: not connected');
+                return;
+            }
+            ws.send(JSON.stringify({
+                type: 'stack_trace',
+                rawText: message.parsed.rawText,
+                parsed: message.parsed,
+                content: `${message.parsed.errorType || 'Error'}: ${message.parsed.errorMessage || ''}`.trim(),
+            }));
+        }
+
+        // Handle resolved test failures from extension
+        function handleTestFailuresResolved(message) {
+            if (message.error) {
+                console.warn('[WebView] Test failure error:', message.error);
+                // Show in preview area if modal still open
+                const preview = document.getElementById('vscode-tests-preview');
+                if (preview) {
+                    preview.textContent = message.error;
+                    preview.classList.remove('hidden');
+                }
+                return;
+            }
+            if (!ws || ws.readyState !== WebSocket.OPEN || !session.userId) return;
+            const tf = message.testFailure;
+            ws.send(JSON.stringify({
+                type: 'test_failure',
+                testFailure: tf,
+                content: `${tf.totalFailed} test(s) failed (${tf.framework})`,
+            }));
+        }
+
+        // ============================================================
         // Code Snippet Handling
         // ============================================================
 
@@ -4189,6 +5411,28 @@
         function handleCodeSnippetFromExtension(message) {
             if (message.error) {
                 console.warn('[WebView] Code snippet error:', message.error);
+                // If we were in explain mode, the error means no selection — clean up loading
+                if (_explainMode) { _explainMode = false; _removeExplainLoading(); }
+                return;
+            }
+
+            // If explain mode is active, route to AI explanation instead of snippet preview
+            if (_explainMode) {
+                _explainMode = false;
+                if (!session.roomId) {
+                    console.warn('[WebView] No roomId for explanation');
+                    _removeExplainLoading();
+                    return;
+                }
+                vscode.postMessage({
+                    command: 'explainCode',
+                    code: message.code,
+                    relativePath: message.relativePath || message.filename,
+                    startLine: message.startLine,
+                    endLine: message.endLine,
+                    language: message.language,
+                    roomId: session.roomId,
+                });
                 return;
             }
 
@@ -4203,11 +5447,27 @@
 
             // Show preview
             codeSnippetFilename.textContent = message.relativePath || message.filename;
-            codeSnippetFilename.title = message.filename;
+            codeSnippetFilename.title = message.relativePath || message.filename;
+
+            const lineCount = message.endLine - message.startLine + 1;
             codeSnippetLines.textContent = message.startLine === message.endLine
-                ? `Line ${message.startLine}`
-                : `Lines ${message.startLine}-${message.endLine}`;
+                ? `L${message.startLine}`
+                : `L${message.startLine}–${message.endLine}`;
+
+            // Show stats (line count + char count) so user knows how much was captured
+            const statsEl = document.getElementById('code-snippet-stats');
+            if (statsEl) {
+                statsEl.textContent = `${lineCount} line${lineCount !== 1 ? 's' : ''} · ${message.code.length} chars`;
+            }
+
             codeSnippetContent.textContent = message.code;
+
+            // Reset collapse state each time new snippet arrives
+            const snippetBody = document.getElementById('code-snippet-body');
+            const toggleBtn = document.getElementById('btn-toggle-snippet');
+            if (snippetBody) snippetBody.style.maxHeight = '80px';
+            if (toggleBtn) toggleBtn.textContent = '▼';
+
             codeSnippetPreview.classList.remove('hidden');
 
             // Focus the input for adding a comment
@@ -4231,6 +5491,23 @@
          * Clear snippet button handler
          */
         btnClearSnippet.addEventListener('click', clearCodeSnippet);
+
+        /**
+         * Toggle snippet preview between collapsed (5 lines) and expanded (20 lines).
+         */
+        const btnToggleSnippet = document.getElementById('btn-toggle-snippet');
+        const snippetBodyEl = document.getElementById('code-snippet-body');
+        let _snippetExpanded = false;
+        btnToggleSnippet?.addEventListener('click', () => {
+            _snippetExpanded = !_snippetExpanded;
+            if (snippetBodyEl) {
+                snippetBodyEl.style.maxHeight = _snippetExpanded ? '200px' : '80px';
+            }
+            if (btnToggleSnippet) {
+                btnToggleSnippet.textContent = _snippetExpanded ? '▲' : '▼';
+                btnToggleSnippet.title = _snippetExpanded ? 'Collapse preview' : 'Expand preview';
+            }
+        });
 
         // ============================================================
         // File Upload Handling
@@ -4711,6 +5988,9 @@
             aiModelsState = data.models || [];
             aiActiveModelState = data.active_model;
             console.log('[WebView] AI status updated: enabled=', aiSummaryEnabledState, ', provider=', aiActiveProviderState, ', model=', aiActiveModelState);
+
+            // Gate AI-dependent buttons based on provider availability
+            updateAiDependentButtons();
 
             // Update summary enabled section
             if (data.summary_enabled) {

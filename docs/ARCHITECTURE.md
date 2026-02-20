@@ -112,10 +112,14 @@ Implemented in `backend/app/ai_provider/pipeline.py`:
 3. Code relevance stage
 - compute `code_relevant_types` for selective code prompt generation
 
+4. Item extraction stage
+- extract actionable `CodeRelevantItem` list (title, description, affected_components, type, priority)
+- drives which code-generation prompts are offered in the extension UI
+
 Provider resolution:
 - configured in `summary` section of `conductor.settings.yaml` and provider keys in `conductor.secrets.yaml`
-- priority order: `claude_bedrock` -> `claude_direct`
-- first healthy provider becomes active
+- priority order: `anthropic` -> `aws_bedrock` -> `openai`
+- first healthy provider with a valid API key becomes active
 
 #### Chat Core: ConnectionManager
 
@@ -262,13 +266,14 @@ Conductor 由两部分运行时组成：
 
 ### 3. AI 摘要流水线
 
-`backend/app/ai_provider/pipeline.py` 当前实现三阶段：
+`backend/app/ai_provider/pipeline.py` 当前实现四阶段：
 
 1. 对话分类（7 类讨论类型）
 2. 按分类生成定向结构化摘要
 3. 计算 `code_relevant_types`（用于 selective code prompt）
+4. 条目提取——生成 `CodeRelevantItem` 列表（标题、描述、影响组件、类型、优先级）
 
-Provider 选择由 `conductor.settings.yaml` 的 `summary` 配置和 `conductor.secrets.yaml` 的 provider 密钥驱动，优先级 `claude_bedrock -> claude_direct`。
+Provider 选择由 `conductor.settings.yaml` 的 `summary` 配置和 `conductor.secrets.yaml` 的 provider 密钥驱动，优先级 `anthropic -> aws_bedrock -> openai`。
 
 ### 4. 扩展侧关键模块
 

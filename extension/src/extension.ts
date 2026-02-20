@@ -28,6 +28,9 @@ import { getPermissionsService } from './services/permissions';
 import { getSessionService } from './services/session';
 import { wrapIdentity, getValidIdentity, getStoredProvider, isStale, SSOProvider } from './services/ssoIdentityCache';
 import { detectWorkspaceLanguages, clearLanguageCache } from './services/languageDetector';
+import { parseStackTrace, resolveFramePaths } from './services/stackTraceParser';
+import { ContextGatherer } from './services/contextGatherer';
+import { scanWorkspaceTodos, updateWorkspaceTodoInFile, UpdateTodoPayload } from './services/todoScanner';
 
 /** Output channel for logging invite links to the user. */
 let outputChannel: vscode.OutputChannel;
@@ -397,6 +400,36 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     this._context.globalState.update('conductor.ssoIdentity', undefined);
                     this._view?.webview.postMessage({ command: 'ssoCacheCleared' });
                     console.log('[Conductor] SSO identity cache cleared');
+                    return;
+                case 'shareStackTrace':
+                    await this._handleShareStackTrace(message.rawText);
+                    return;
+                case 'shareTestOutput':
+                    await this._handleShareTestOutput(message.rawText, message.framework);
+                    return;
+                case 'shareTestFailures':
+                    await this._handleShareTestFailures();
+                    return;
+                case 'explainCode':
+                    await this._handleExplainCode(message);
+                    return;
+                case 'createTodo':
+                    await this._handleCreateTodo(message.roomId, message.todo);
+                    return;
+                case 'updateTodo':
+                    await this._handleUpdateTodo(message.roomId, message.todoId, message.updates);
+                    return;
+                case 'loadTodos':
+                    await this._handleLoadTodos(message.roomId);
+                    return;
+                case 'deleteTodo':
+                    await this._handleDeleteTodo(message.roomId, message.todoId);
+                    return;
+                case 'scanWorkspaceTodos':
+                    await this._handleScanWorkspaceTodos();
+                    return;
+                case 'updateWorkspaceTodo':
+                    await this._handleUpdateWorkspaceTodo(message.payload as UpdateTodoPayload);
                     return;
             }
         });
@@ -2461,6 +2494,330 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Stack Trace Sharing
+    // -----------------------------------------------------------------------
+
+    /**
+     * Parse a pasted stack trace, resolve file paths to workspace-relative
+     * paths, and send the structured result back to the WebView for broadcast.
+     */
+    private async _handleShareStackTrace(rawText: string): Promise<void> {
+        if (!rawText?.trim()) {
+            this._view?.webview.postMessage({
+                command: 'stackTraceResolved',
+                error: 'Empty stack trace.',
+            });
+            return;
+        }
+
+        const parsed = parseStackTrace(rawText);
+        await resolveFramePaths(parsed);
+
+        this._view?.webview.postMessage({
+            command: 'stackTraceResolved',
+            parsed: {
+                language: parsed.language,
+                errorType: parsed.errorType,
+                errorMessage: parsed.errorMessage,
+                frames: parsed.frames,
+                rawText: parsed.rawText,
+            },
+        });
+        console.log(
+            `[Conductor] Stack trace parsed: ${parsed.language} – ` +
+            `${parsed.errorType}: ${parsed.frames.length} frames`,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Failure Sharing
+    // -----------------------------------------------------------------------
+
+    /**
+     * Collect failing tests from VS Code's Test API and post them to chat.
+     * Falls back gracefully if the Test API is not available.
+     */
+    private async _handleShareTestFailures(): Promise<void> {
+        // The Test Results API (vscode.tests.testResults) was introduced in
+        // VS Code 1.78. Use dynamic access to stay compatible with older hosts.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const testResults: any[] = (vscode.tests as any).testResults ?? [];
+
+        if (!testResults || testResults.length === 0) {
+            this._view?.webview.postMessage({
+                command: 'testFailuresResolved',
+                error: 'No test results found. Run tests first, or use "Paste Test Output" instead.',
+            });
+            return;
+        }
+
+        interface TestFailureItem {
+            name: string;
+            filePath?: string;
+            lineNumber?: number;
+            errorMessage: string;
+            errorType: string;
+        }
+
+        const failedTests: TestFailureItem[] = [];
+        const latestRun = testResults[0];
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const collectFailed = (item: any) => {
+            if (item.taskStates) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                for (const taskState of item.taskStates as any[]) {
+                    const isFailed = taskState.state === 3 /* vscode.TestResultState.Failed */
+                        || String(taskState.state) === 'failed';
+                    if (isFailed) {
+                        const fileUri: vscode.Uri | undefined = item.uri;
+                        const relativePath = fileUri
+                            ? vscode.workspace.asRelativePath(fileUri) : undefined;
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        const messages: any[] = taskState.messages || [];
+                        const errorMsg = messages.map((m: any) =>
+                            typeof m.message === 'string' ? m.message
+                                : (m.message?.value ?? ''),
+                        ).join('\n');
+
+                        failedTests.push({
+                            name: item.label ?? '(unknown)',
+                            filePath: relativePath,
+                            lineNumber: item.range ? item.range.start.line + 1 : undefined,
+                            errorMessage: errorMsg,
+                            errorType: 'AssertionError',
+                        });
+                    }
+                }
+            }
+            if (item.children) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                for (const child of item.children as any[]) {
+                    collectFailed(child);
+                }
+            }
+        };
+
+        for (const item of (latestRun.results ?? []) as unknown[]) {
+            collectFailed(item);
+        }
+
+        if (failedTests.length === 0) {
+            this._view?.webview.postMessage({
+                command: 'testFailuresResolved',
+                error: 'No failing tests found in latest run.',
+            });
+            return;
+        }
+
+        this._view?.webview.postMessage({
+            command: 'testFailuresResolved',
+            testFailure: {
+                framework: 'vscode',
+                totalFailed: failedTests.length,
+                tests: failedTests,
+            },
+        });
+    }
+
+    /**
+     * Parse pasted test output text (pytest / Jest / Go / JUnit format)
+     * and send structured test failure data to the WebView.
+     */
+    private async _handleShareTestOutput(
+        rawText: string,
+        framework: string = 'unknown',
+    ): Promise<void> {
+        if (!rawText?.trim()) {
+            this._view?.webview.postMessage({
+                command: 'testFailuresResolved',
+                error: 'Empty test output.',
+            });
+            return;
+        }
+
+        const tests = _parseTestOutput(rawText, framework);
+        this._view?.webview.postMessage({
+            command: 'testFailuresResolved',
+            testFailure: {
+                framework,
+                totalFailed: tests.length,
+                tests,
+                rawOutput: rawText,
+            },
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // AI Code Explanation
+    // -----------------------------------------------------------------------
+
+    /**
+     * Gather rich context around the selected code snippet and call the
+     * backend /context/explain endpoint, then broadcast the explanation.
+     */
+    private async _handleExplainCode(message: {
+        code: string;
+        relativePath: string;
+        startLine: number;
+        endLine: number;
+        language: string;
+        roomId: string;
+    }): Promise<void> {
+        try {
+            const gatherer = new ContextGatherer();
+            const contextBundle = await gatherer.gather({
+                code: message.code,
+                relativePath: message.relativePath,
+                startLine: message.startLine,
+                endLine: message.endLine,
+                language: message.language,
+            });
+
+            const backendUrl = getBackendUrl();
+            const response = await fetch(`${backendUrl}/context/explain`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    room_id: message.roomId,
+                    snippet: message.code,
+                    file_path: message.relativePath,
+                    line_start: message.startLine,
+                    line_end: message.endLine,
+                    language: message.language,
+                    file_content: contextBundle.fileContent,
+                    surrounding_code: contextBundle.surroundingCode,
+                    imports: contextBundle.imports,
+                    containing_function: contextBundle.containingFunction,
+                    related_files: contextBundle.relatedFiles,
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error(`Backend error: ${response.status}`);
+            }
+
+            const data = await response.json() as { explanation: string; model: string };
+
+            // Post the explanation to the chat room via REST so all participants
+            // receive it through the WebSocket broadcast. The WebView MUST NOT call
+            // fetch() itself — that violates the WebView CSP for external (ngrok) URLs.
+            const aiData = JSON.stringify({
+                code: message.code,
+                relativePath: message.relativePath,
+                startLine: message.startLine,
+                endLine: message.endLine,
+            });
+            const postParams = new URLSearchParams({
+                message_type: 'ai_explanation',
+                model_name: data.model || 'ai',
+                content: data.explanation,
+                ai_data: aiData,
+            });
+            const postResponse = await fetch(
+                `${backendUrl}/chat/${encodeURIComponent(message.roomId)}/ai-message?${postParams.toString()}`,
+                { method: 'POST' },
+            );
+            if (!postResponse.ok) {
+                console.warn('[Conductor] Failed to post explanation to chat:', postResponse.status);
+            }
+
+            // Notify the WebView so it can dismiss any loading indicator.
+            // The actual rendered message will arrive via the WebSocket broadcast.
+            this._view?.webview.postMessage({ command: 'codeExplanationReady' });
+
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] Code explanation failed:', msg);
+            this._view?.webview.postMessage({
+                command: 'codeExplanationReady',
+                error: msg,
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TODO Tracking
+    // -----------------------------------------------------------------------
+
+    private async _handleCreateTodo(roomId: string, todo: Record<string, unknown>): Promise<void> {
+        try {
+            const response = await fetch(
+                `${getBackendUrl()}/todos/${encodeURIComponent(roomId)}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(todo),
+                },
+            );
+            const data = await response.json();
+            this._view?.webview.postMessage({ command: 'todoCreated', todo: data });
+        } catch (e) {
+            console.error('[Conductor] createTodo failed:', e);
+        }
+    }
+
+    private async _handleUpdateTodo(
+        roomId: string,
+        todoId: string,
+        updates: Record<string, unknown>,
+    ): Promise<void> {
+        try {
+            const response = await fetch(
+                `${getBackendUrl()}/todos/${encodeURIComponent(roomId)}/${encodeURIComponent(todoId)}`,
+                {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(updates),
+                },
+            );
+            const data = await response.json();
+            this._view?.webview.postMessage({ command: 'todoUpdated', todo: data });
+        } catch (e) {
+            console.error('[Conductor] updateTodo failed:', e);
+        }
+    }
+
+    private async _handleLoadTodos(roomId: string): Promise<void> {
+        try {
+            const response = await fetch(
+                `${getBackendUrl()}/todos/${encodeURIComponent(roomId)}`,
+            );
+            const data = await response.json() as unknown[];
+            this._view?.webview.postMessage({ command: 'todosLoaded', todos: data });
+        } catch (e) {
+            console.error('[Conductor] loadTodos failed:', e);
+        }
+    }
+
+    private async _handleDeleteTodo(roomId: string, todoId: string): Promise<void> {
+        try {
+            await fetch(
+                `${getBackendUrl()}/todos/${encodeURIComponent(roomId)}/${encodeURIComponent(todoId)}`,
+                { method: 'DELETE' },
+            );
+            this._view?.webview.postMessage({ command: 'todoDeleted', todoId });
+        } catch (e) {
+            console.error('[Conductor] deleteTodo failed:', e);
+        }
+    }
+
+    private async _handleScanWorkspaceTodos(): Promise<void> {
+        try {
+            const todos = await scanWorkspaceTodos();
+            this._view?.webview.postMessage({ command: 'workspaceTodosScanned', todos });
+        } catch (e) {
+            console.error('[Conductor] scanWorkspaceTodos failed:', e);
+            this._view?.webview.postMessage({ command: 'workspaceTodosScanned', todos: [], error: String(e) });
+        }
+    }
+
+    private async _handleUpdateWorkspaceTodo(payload: UpdateTodoPayload): Promise<void> {
+        const ok = updateWorkspaceTodoInFile(payload);
+        this._view?.webview.postMessage({ command: 'workspaceTodoUpdated', ok, filePath: payload.filePath });
+    }
+
     private _getHtmlContent(webview: vscode.Webview): string {
         // Get path to the chat.html file
         const htmlPath = vscode.Uri.joinPath(this._extensionUri, 'media', 'chat.html');
@@ -2516,4 +2873,80 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
         return html;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test output parser (module-level helper)
+// ---------------------------------------------------------------------------
+
+interface ParsedTestItem {
+    name: string;
+    filePath?: string;
+    lineNumber?: number;
+    errorType: string;
+    errorMessage: string;
+}
+
+/**
+ * Parse common test output formats (pytest, Jest, Go test) into structured
+ * test failure items.
+ */
+function _parseTestOutput(rawText: string, framework: string): ParsedTestItem[] {
+    const tests: ParsedTestItem[] = [];
+
+    if (framework === 'pytest' || rawText.includes('FAILED') && rawText.includes('::')) {
+        // pytest:  FAILED tests/test_auth.py::test_name - AssertionError: assert ...
+        const pytestFailed = /FAILED\s+([\w/.]+)::(\w+)\s*(?:-\s*(.+))?/g;
+        let m: RegExpExecArray | null;
+        while ((m = pytestFailed.exec(rawText)) !== null) {
+            const [, filePath, testName, errorPart] = m;
+            const errorColon = (errorPart || '').indexOf(':');
+            tests.push({
+                name: testName,
+                filePath,
+                errorType: errorColon !== -1 ? errorPart.slice(0, errorColon).trim() : 'AssertionError',
+                errorMessage: errorColon !== -1 ? errorPart.slice(errorColon + 1).trim() : errorPart?.trim() || '',
+            });
+        }
+    }
+
+    if (framework === 'jest' || rawText.includes('● ') || rawText.includes('FAIL ')) {
+        // Jest:  ● TestSuite › test name
+        const jestFailed = /●\s+(.+)/g;
+        let m: RegExpExecArray | null;
+        while ((m = jestFailed.exec(rawText)) !== null) {
+            tests.push({
+                name: m[1].trim(),
+                errorType: 'Error',
+                errorMessage: '',
+            });
+        }
+    }
+
+    if (framework === 'go' || rawText.includes('--- FAIL:')) {
+        // Go:  --- FAIL: TestName (0.00s)
+        const goFailed = /---\s+FAIL:\s+([\w/]+)\s+\([\d.]+s\)/g;
+        let m: RegExpExecArray | null;
+        while ((m = goFailed.exec(rawText)) !== null) {
+            tests.push({
+                name: m[1],
+                errorType: 'FAIL',
+                errorMessage: '',
+            });
+        }
+    }
+
+    // Generic fallback: look for lines with "Error:" or "FAIL"
+    if (tests.length === 0) {
+        const errorLine = /^.*(Error|FAIL|FAILED|Assertion).*$/gm;
+        let m: RegExpExecArray | null;
+        while ((m = errorLine.exec(rawText)) !== null) {
+            const line = m[0].trim();
+            if (line.length < 200) {
+                tests.push({ name: line, errorType: 'Error', errorMessage: line });
+            }
+        }
+    }
+
+    return tests;
 }

@@ -101,6 +101,7 @@ class MessageType(str, Enum):
     FILE = "file"
     AI_SUMMARY = "ai_summary"
     AI_CODE_PROMPT = "ai_code_prompt"
+    AI_EXPLANATION = "ai_explanation"
 
 
 class RoomUser(BaseModel):

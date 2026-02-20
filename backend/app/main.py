@@ -25,9 +25,11 @@ from app.auth.router import router as auth_router
 from app.chat.router import router as chat_router
 from app.chat.settings_router import router as room_settings_router
 from app.config import get_config
+from app.context.router import router as context_router
 from app.files.router import router as files_router
 from app.ngrok_service import get_public_url, start_ngrok, stop_ngrok
 from app.policy.router import router as policy_router
+from app.todos.router import router as todos_router
 
 # Configure logging
 logging.basicConfig(
@@ -100,6 +102,8 @@ app.include_router(files_router)
 app.include_router(ai_router)
 app.include_router(auth_router)
 app.include_router(room_settings_router)
+app.include_router(context_router)
+app.include_router(todos_router)
 
 
 @app.get("/health")

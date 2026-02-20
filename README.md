@@ -50,6 +50,7 @@ Implemented end-to-end:
 Still limited:
 - `POST /generate-changes` is deterministic MockAgent output (not LLM edits)
 - Backend supports `POST /ai/code-prompt/selective`, extension currently calls legacy `POST /ai/code-prompt`
+- AI message posting sends a fixed `model_name` label (TODO in extension code)
 
 ### Architecture (High Level)
 
@@ -139,6 +140,12 @@ Then debug in VS Code:
 4. Package extension:
 
 ```bash
+make package
+```
+
+Or manually:
+
+```bash
 cd extension
 npx @vscode/vsce package
 ```
@@ -200,6 +207,7 @@ Conductor 是一个 VS Code 协作扩展 + FastAPI 后端，提供团队聊天�
 仍有限制：
 - `POST /generate-changes` 仍是确定性 MockAgent，不是 LLM 实时改码
 - 后端已支持 `POST /ai/code-prompt/selective`，扩展目前仍调用旧的 `POST /ai/code-prompt`
+- AI 消息写回聊天时 `model_name` 仍为固定值（extension 代码中有 TODO）
 
 ### 架构概览
 
@@ -259,6 +267,12 @@ npm run compile
 - 备选：直接打开 `extension/` 后按 `F5`
 
 4. 打包扩展：
+
+```bash
+make package
+```
+
+或手动执行：
 
 ```bash
 cd extension
