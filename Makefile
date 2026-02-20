@@ -1,7 +1,7 @@
 # Conductor Project Makefile
 # ===========================
 
-.PHONY: all setup setup-backend setup-extension venv install run-backend run-backend-prod run-backend-port test test-backend test-extension compile clean help
+.PHONY: all setup setup-backend setup-extension venv install run-backend run-backend-prod run-backend-port test test-backend test-extension compile compile-ts compile-css package clean help
 
 # Python virtual environment
 VENV_DIR := .venv
@@ -133,6 +133,16 @@ compile-css:
 	cd extension && npm run build:css
 
 # ===========================
+# Package
+# ===========================
+
+## Package extension as .vsix (compiles first)
+package: compile
+	@echo "📦 Packaging VS Code extension..."
+	cd extension && npx @vscode/vsce package
+	@echo "✅ Extension packaged! (.vsix file in extension/)"
+
+# ===========================
 # Clean
 # ===========================
 
@@ -175,6 +185,7 @@ help:
 	@echo "  make compile          - Compile extension (TypeScript + CSS)"
 	@echo "  make compile-ts       - Compile TypeScript only"
 	@echo "  make compile-css      - Build Tailwind CSS only"
+	@echo "  make package          - Package extension as .vsix (compiles first)"
 	@echo ""
 	@echo "Other:"
 	@echo "  make clean            - Remove all generated files"

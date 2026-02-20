@@ -43,8 +43,8 @@ The backend is a FastAPI service that handles chat, AI integration, file sharing
 
 The backend provides:
 - **Real-time chat rooms** via WebSocket (room-scoped message history, user management)
-- **AI summarization pipeline** (3-stage: classification → targeted summary → code relevance scoring)
-- **Code prompt generation** with style-aware templates
+- **AI summarization pipeline** (4-stage: classification → targeted summary → code relevance scoring → item extraction)
+- **Code prompt generation** with `PromptBuilder` (language inference, doc-only detection, configurable output modes)
 - **File upload/download** with room-scoped storage
 - **Audit logging** for applied code changes
 - **SSO authentication** (AWS IAM Identity Center, Google OAuth)
@@ -103,7 +103,7 @@ FastAPI auto-generates interactive API docs:
 ### Running Tests
 
 ```bash
-# All backend tests (287 tests as of this writing)
+# All backend tests (368 tests as of this writing)
 make test-backend
 
 # With verbose output
@@ -140,10 +140,11 @@ backend/app/
 │   ├── claude_bedrock.py       # AWS Bedrock implementation
 │   ├── openai_provider.py      # OpenAI API implementation
 │   ├── resolver.py             # Provider resolution with health checks and model selection
-│   ├── pipeline.py             # 3-stage summarization pipeline (classify → summarize → score)
+│   ├── pipeline.py             # 4-stage summarization pipeline (classify → summarize → score → extract)
+│   ├── prompt_builder.py       # PromptBuilder fluent class (language inference, doc-only detection, output modes)
 │   ├── prompts.py              # Prompt templates for classification and targeted summaries
 │   ├── wrapper.py              # Code prompt generation with style loading
-│   └── router.py               # AI endpoints (/ai/summarize-pipeline, /ai/code-prompt)
+│   └── router.py               # AI endpoints (/ai/summarize, /ai/code-prompt, /ai/code-prompt/selective)
 │
 ├── agent/                      # Code generation agent
 │   ├── __init__.py
@@ -589,8 +590,8 @@ The AI provider system provides:
 - **Abstract interface** (`AIProvider`) for multiple AI backends
 - **Three implementations**: Anthropic direct, AWS Bedrock, OpenAI
 - **Provider resolution** with health checks and priority-based fallback
-- **3-stage summarization pipeline**: classification → targeted summary → code relevance scoring
-- **Code prompt generation** with style-aware templates
+- **4-stage summarization pipeline**: classification → targeted summary → code relevance scoring → item extraction
+- **Code prompt generation** with `PromptBuilder` (language inference from components, doc-only detection, configurable output modes)
 
 ### Abstract Interface (base.py)
 
@@ -671,9 +672,9 @@ class ProviderResolver:
 
 **Singleton Pattern**: The resolver is stored in a module-level global (`_resolver`) and accessed via `get_resolver()`.
 
-### 3-Stage Summarization Pipeline (pipeline.py)
+### 4-Stage Summarization Pipeline (pipeline.py)
 
-The pipeline processes chat messages in three stages:
+The pipeline processes chat messages in four stages:
 
 #### Stage 1: Classification
 
@@ -767,6 +768,30 @@ def compute_code_relevant_types(
 
 **Why?** Prevents generating code prompts for pure discussion (e.g., brainstorming, planning).
 
+#### Stage 4: Item Extraction
+
+Extract actionable `CodeRelevantItem` objects from the summary:
+
+```python
+def extract_code_relevant_items(
+    summary: PipelineSummary,
+    provider: AIProvider,
+) -> List[CodeRelevantItem]:
+    prompt = get_item_extraction_prompt(summary)
+    response_text = provider.call_model(prompt)
+    items = json.loads(response_text)
+    return [CodeRelevantItem(**item) for item in items]
+```
+
+**`CodeRelevantItem`** represents a concrete action extracted from the discussion:
+- `title`: Short description of the action
+- `description`: Detailed explanation
+- `affected_components`: Files/modules involved
+- `type`: Type of change (`code_change`, `api_design`, etc.)
+- `priority`: `high`, `medium`, or `low`
+
+**Why a 4th stage?** The summary gives a high-level picture; the item extraction produces a structured, machine-readable list of discrete tasks. This list drives which code-generation prompts to offer the user.
+
 ### Prompt Templates (prompts.py)
 
 The module provides prompt templates for each discussion type:
@@ -785,68 +810,54 @@ def get_targeted_summary_prompt(messages: List[ChatMessage], discussion_type: st
 
 **Design**: Prompts are engineered to return **JSON** for easy parsing. The AI is instructed to return structured data, not prose.
 
-### Code Prompt Generation (wrapper.py)
+### Code Prompt Generation (prompt_builder.py)
 
-The `generate_code_prompt()` function creates a prompt for code generation:
+The `PromptBuilder` class uses a **fluent builder pattern** to assemble task-focused code generation prompts. It replaces the old `generate_code_prompt()` function with a more intelligent approach.
 
 ```python
-def generate_code_prompt(
-    decision_summary: str,
-    room_id: str,
-    detected_languages: List[str],
-    manager: ConnectionManager
-) -> str:
-    # 1. Load style guidelines based on detected languages
-    style_loader = CodeStyleLoader()
+from app.ai_provider.prompt_builder import PromptBuilder
 
-    # Check for room-level override
-    room_settings = manager.get_room_settings(room_id)
-    if room_settings.get("code_style"):
-        style_content = room_settings["code_style"]
-    else:
-        # Load based on detected languages
-        if detected_languages:
-            # Load universal + language-specific styles
-            style_content = _load_universal_style()
-            for lang in detected_languages:
-                style_content += "\n\n" + _load_language_style(lang)
-        else:
-            # Fallback to universal only
-            style_content = _load_universal_style()
-
-    # 2. Build the code generation prompt template
-    prompt = f"""
-    # Code Generation Prompt
-
-    ## Problem
-    {decision_summary}
-
-    ## Solution
-    [Describe the proposed solution]
-
-    ## Components
-    [List affected files/modules]
-
-    ## Risk Assessment
-    [Evaluate potential risks]
-
-    ## Policy Constraints
-    - Max files: {config.change_limits.max_files_per_request}
-    - Max lines per file: {config.change_limits.max_lines_per_file}
-
-    ## Style Guidelines
-    {style_content}
-    """
-
-    return prompt
+prompt = (
+    PromptBuilder(
+        problem_statement=summary.core_problem,
+        proposed_solution=summary.proposed_solution,
+        affected_components=summary.affected_components,
+        risk_level=summary.risk_level,
+    )
+    .with_room_code_style(room_settings.get("code_style"))
+    .with_detected_languages(detected_languages)
+    .with_output_mode(room_settings.get("output_mode", "unified_diff"))
+    .with_context_snippets(context_snippets)  # Optional per-file code snippets
+    .with_policy_constraints(policy_str)
+    .build()
+)
 ```
 
-**Style Loading Priority**:
-1. **Room-level override**: If the room has a custom code style, use it
-2. **Detected languages**: Load universal + language-specific styles
-3. **Fallback**: Universal style only
+**Language inference** (from `prompt_builder.py`):
+- `PromptBuilder` infers languages from `affected_components` file extensions first (e.g., `.py` → `Language.PYTHON`)
+- Falls back to workspace-detected languages if no components have known extensions
+- Falls back to `CodeStyleLoader` for the universal style
 
-**Why detected languages?** The extension detects workspace languages (Python, Java, JavaScript, Go) and sends them to the backend. This allows loading relevant style guides (e.g., Google Python Style Guide for Python projects).
+**Style Loading Priority**:
+1. **Room-level override**: If the room has a custom `code_style` setting, use it verbatim
+2. **Inferred from components**: File extensions in `affected_components` determine which built-in styles to load
+3. **Workspace-detected languages**: Extension-provided language list used if component inference yields nothing
+4. **Fallback**: Universal style via `CodeStyleLoader`
+
+**Doc-only detection** (`is_documentation_only()`):
+- If all affected components are `.md`, `.rst`, `.txt`, or in `docs/` paths, the builder skips "add tests" and "add error handling" requirements
+- If no components provided, it checks the `proposed_solution` text for doc/code keywords
+
+**Output modes** (configurable via room settings or `conductor.settings.yaml`):
+
+| Mode | Description |
+|------|-------------|
+| `unified_diff` | Output as `git apply`-compatible unified diff patches (default) |
+| `direct_repo_edits` | Output complete updated file contents |
+| `plan_then_diff` | Short implementation plan, then unified diff |
+
+**Selective prompt** (`build_selective_prompt()`):
+For multi-type summaries (e.g., architecture + code_change), `build_selective_prompt()` collects `affected_components` from all summaries for language inference, then produces a structured JSON implementation plan.
 
 ### Error Hierarchy
 
@@ -1561,14 +1572,15 @@ This section traces end-to-end data flows through the system.
 ### Flow 3: AI Summarization
 
 1. **Extension**: Lead user clicks "Summarize Discussion" in chat UI
-2. **Extension**: Sends `POST /ai/summarize-pipeline` with chat messages and room ID
+2. **Extension**: Sends `POST /ai/summarize` with chat messages and room ID
 3. **Backend**: Router calls `run_summary_pipeline(messages, provider)`
-4. **Backend**: **Stage 1** - `classify_discussion()` calls AI to classify discussion type
+4. **Backend**: **Stage 1** - `classify_discussion()` calls AI to classify discussion type (7 types)
 5. **Backend**: **Stage 2** - `generate_targeted_summary()` calls AI with type-specific prompt
-6. **Backend**: **Stage 3** - `compute_code_relevant_types()` determines if code prompt should be generated
-7. **Backend**: Returns `PipelineSummary` with classification metadata and code relevance
-8. **Extension**: Displays summary in chat as an AI message
-9. **Extension**: If `code_relevant_types` is non-empty, shows "Generate Code Prompt" button
+6. **Backend**: **Stage 3** - `compute_code_relevant_types()` determines code relevance
+7. **Backend**: **Stage 4** - `extract_code_relevant_items()` produces `CodeRelevantItem` list
+8. **Backend**: Returns `PipelineSummary` with classification metadata, code relevance, and extracted items
+9. **Extension**: Displays summary in chat as an AI message
+10. **Extension**: If `code_relevant_types` is non-empty, shows "Generate Code Prompt" button
 
 ### Flow 4: Code Prompt Generation
 
@@ -1999,7 +2011,7 @@ def mock_config():
     """Mock configuration for testing."""
     return ConductorConfig(
         server=ServerConfig(host="localhost", port=8000),
-        summary=SummaryConfig(enabled=True, default_model="claude-3-5-sonnet-20241022"),
+        summary=SummaryConfig(enabled=True, default_model="claude-sonnet-4-anthropic"),
         # ... other config fields
     )
 
@@ -2250,7 +2262,7 @@ You've now completed the learning journey through the Conductor backend! You sho
 - **Architecture**: FastAPI app with modular routers, WebSocket chat, AI integration
 - **Configuration**: Two-file YAML system with Pydantic validation
 - **Chat System**: ConnectionManager with room-scoped state, broadcasting, deduplication
-- **AI Provider**: Abstract interface, provider resolution, 3-stage summarization pipeline
+- **AI Provider**: Abstract interface, provider resolution, 4-stage summarization pipeline
 - **Agent**: ChangeSet schema, MockAgent, style loading
 - **Auth**: AWS SSO and Google OAuth device authorization flows
 - **Policy**: Auto-apply safety checks

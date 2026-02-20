@@ -51,8 +51,8 @@ make compile-css                # Tailwind CSS only
 # Clean all generated files (venv, out/, node_modules, __pycache__)
 make clean
 
-# Package extension
-cd extension && npx @vscode/vsce package
+# Package extension as .vsix (compiles first)
+make package
 ```
 
 ## Architecture
