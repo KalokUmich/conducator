@@ -41,7 +41,8 @@ extension/
     ├─ SessionService
     ├─ PermissionsService
     ├─ ConductorStateMachine + ConductorController
-    └─ DiffPreviewService
+    ├─ DiffPreviewService
+    └─ ExplainWithContextPipeline (8 stages)
   media/chat.html
 
 backend/app/
@@ -52,7 +53,11 @@ backend/app/
     ├─ auth.router
     ├─ policy.router
     ├─ audit.router
-    └─ files.router
+    ├─ files.router
+    ├─ context.router
+    ├─ todos.router
+    ├─ embeddings.router
+    └─ rag.router
 ```
 
 ### 3. Backend Architecture
@@ -96,6 +101,21 @@ backend/app/
   - `POST /files/upload/{room_id}`
   - `GET /files/download/{file_id}`
   - `DELETE /files/room/{room_id}`
+- `context`:
+  - `POST /context/explain` — enriches request with `ContextEnricher` then calls LLM
+  - `POST /context/explain-rich` — accepts pre-assembled XML prompt, optionally injects RAG context, calls LLM directly
+- `todos`:
+  - `GET /todos/{room_id}` — list room tasks
+  - `POST /todos/{room_id}` — create task
+  - `PUT /todos/{room_id}/{todo_id}` — update task
+  - `DELETE /todos/{room_id}/{todo_id}` — delete task
+- `embeddings`:
+  - `GET /embeddings/config` — active model ID + dim + provider
+  - `POST /embeddings` — batch embed 1–32 texts → `[[float]]`
+- `rag`:
+  - `POST /rag/index` — incremental upsert/delete files in workspace index
+  - `POST /rag/reindex` — full workspace rebuild
+  - `POST /rag/search` — semantic query → ranked `SearchResult[]`
 
 #### AI Summary Pipeline
 
@@ -217,18 +237,26 @@ Change review:
 
 - audit DB: `audit_logs.duckdb`
 - file metadata DB: `file_metadata.duckdb`
+- TODO DB: `todos.duckdb`
 - file binaries: `uploads/`
+- FAISS indices: `data/rag/{workspace_id}/index.faiss` + `metadata.json`
 - chat room state: in-memory per process
+- extension symbol/vector cache: `~/.conductor/workspace.db` (SQLite, per workspace)
 
 ### 8. Implemented vs Limited
 
 Implemented:
 - chat/file/snippet/session/review workflow
 - AI provider status + summary + code prompt workflow in extension UI
+- TODO tracking (room-scoped, DuckDB, full CRUD)
+- Embeddings service (Bedrock Cohere, 1024-dim)
+- FAISS code RAG: AST chunking, workspace-scoped index, incremental updates, semantic search
+- Explain with Context 8-stage pipeline (LSP + dependency resolution + ranking + XML assembly + `/context/explain-rich`)
 
 Limited:
 - `/generate-changes` is still MockAgent-based
 - extension currently uses `/ai/code-prompt` (not selective endpoint)
+- git commit retrieval not yet implemented (planned in former Phase 2.4)
 
 ---
 
@@ -263,6 +291,10 @@ Conductor 由两部分运行时组成：
 - `audit`：`/audit/log-apply`、`/audit/logs`
 - `auth`：`/auth/sso/start`、`/auth/sso/poll`、`/auth/google/start`、`/auth/google/poll`、`/auth/providers`
 - `files`：上传/下载/房间清理
+- `context`：`/context/explain`（后端填充上下文）、`/context/explain-rich`（扩展预组装 XML 提示词直接转发至 LLM，可选 RAG 增强）
+- `todos`：`/todos/{room_id}` CRUD（GET/POST/PUT/DELETE）
+- `embeddings`：`/embeddings/config`（模型配置）、`/embeddings`（批量向量化，1–32 条文本）
+- `rag`：`/rag/index`（增量索引）、`/rag/reindex`（全量重建）、`/rag/search`（语义检索）
 
 ### 3. AI 摘要流水线
 
@@ -315,15 +347,23 @@ AI 摘要与代码提示词：
 
 - 审计库：`audit_logs.duckdb`
 - 文件元数据库：`file_metadata.duckdb`
+- TODO 库：`todos.duckdb`
 - 文件目录：`uploads/`
+- FAISS 索引：`data/rag/{workspace_id}/index.faiss` + `metadata.json`
 - 聊天房间状态：进程内内存
+- 扩展符号/向量缓存：`~/.conductor/workspace.db`（SQLite，每工作区一份）
 
 ### 7. 已实现与限制
 
 已实现：
 - 聊天、文件、片段、会话、审查流程
 - 扩展 UI 内 AI 状态/摘要/代码提示词流程
+- TODO 任务管理（DuckDB 持久化，房间隔离）
+- 向量嵌入服务（Bedrock Cohere，1024 维）
+- FAISS 代码 RAG：AST 分块、工作区级索引、增量更新、语义检索
+- 8 阶段代码解释流水线（LSP + 依赖解析 + 排名 + XML 组装 + `/context/explain-rich`）
 
 限制：
 - `/generate-changes` 仍为 MockAgent
 - 扩展目前调用 `/ai/code-prompt`，未走 selective 接口
+- Git 提交语义检索尚未实现

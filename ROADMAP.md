@@ -1,6 +1,6 @@
 # Conductor Project Roadmap
 
-Last updated: 2026-02-22
+Last updated: 2026-02-23
 
 ## Current State
 
@@ -15,7 +15,7 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. It suppor
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Real-time chat (WebSocket) | Working | In-memory only, lost on restart |
-| AI summarization pipeline | Working | 4-stage: classify -> summarize -> score -> extract items |
+| AI summarization pipeline | Working | 4-stage: classify → summarize → score → extract items |
 | Code generation prompts | Working | With auto-detected language styles |
 | File upload/download | Working | Room-scoped, DuckDB metadata, duplicate detection, retry logic |
 | SSO (AWS + Google) | Working | Device authorization flow |
@@ -23,6 +23,11 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. It suppor
 | Audit logging | Working | DuckDB, tracks applied changes |
 | Ngrok tunneling | Working | Auto-start/stop in lifespan |
 | Mock agent | Working | Deterministic only, not LLM-backed |
+| TODO tracking | Working | Room-scoped, DuckDB persistence, full CRUD (`/todos/{room_id}`) |
+| Embeddings service | Working | Bedrock Cohere 1024-dim; `GET /embeddings/config`, `POST /embeddings` |
+| FAISS code RAG | Working | AST+regex chunking, workspace-scoped FAISS index, `/rag/index`, `/rag/reindex`, `/rag/search` |
+| Explain with Context pipeline | Working | 8-stage: selection → LSP → dependency resolution → ranking → context plan → file reads → XML assembly → LLM |
+| Config enforcement | Working | `change_limits`, `session.max_participants`, `logging.level` all read from settings.yaml |
 
 ---
 
@@ -57,25 +62,24 @@ Goal: Make the system reliable enough for daily team use. Focus on data durabili
 
 **Files to modify**: `chat/manager.py`, `chat/router.py`, `main.py` (lifespan)
 
-### 1.3 Configuration Enforcement
+### ~~1.3 Configuration Enforcement~~ ✅ DONE
 
 **Problem**: Several config values are defined in `conductor.settings.yaml` and parsed by `config.py` but never read at runtime.
 
 | Config Key | Defined In | Enforced? |
 |-----------|------------|-----------|
-| `change_limits.max_files` | settings.yaml | No — hardcoded to 2 in `auto_apply.py:41` |
-| `change_limits.max_lines_changed` | settings.yaml | No — hardcoded to 50 in `auto_apply.py:42` |
-| `session.timeout_minutes` | settings.yaml | No — no timeout logic exists |
-| `session.max_participants` | settings.yaml | No — no validation on join |
-| `logging.level` | settings.yaml | No — hardcoded `INFO`/`DEBUG` in multiple files |
+| `change_limits.max_files` | settings.yaml | ✅ `evaluate_auto_apply()` reads `config.change_limits.max_files_per_request` |
+| `change_limits.max_lines_changed` | settings.yaml | ✅ `evaluate_auto_apply()` reads `config.change_limits.auto_apply.max_lines` |
+| `session.timeout_minutes` | settings.yaml | Deferred to 1.2 Room Lifecycle Management |
+| `session.max_participants` | settings.yaml | ✅ Enforced in WebSocket connect handler (`chat/router.py`) |
+| `logging.level` | settings.yaml | ✅ Applied to root logger in `main.py` lifespan |
 
-**Plan**:
-- `auto_apply.py`: Replace hardcoded `MAX_FILES`, `MAX_LINES_CHANGED` with `get_config().change_limits.*`
-- `chat/router.py`: Add participant count check in WebSocket connect
-- `main.py`: Read `config.logging.level` and call `logging.basicConfig(level=...)` accordingly
-- Remove hardcoded `logging.basicConfig(level=logging.DEBUG)` from `chat/router.py:35`
+**Completed**:
+- `auto_apply.py`: `evaluate_auto_apply()` calls `get_config()` when no config provided; limits read from `config.change_limits.*`; removed `_default_policy` singleton; cleaned up TODO comments
+- `chat/router.py`: Added participant count check before `manager.connect()` — rejects with WebSocket close code 1008 when room is at capacity; imported `get_config`
+- `main.py`: Reads `config.logging.level` and applies it to root logger in lifespan startup
 
-**Files to modify**: `policy/auto_apply.py`, `chat/router.py`, `main.py`
+**Files modified**: `policy/auto_apply.py`, `chat/router.py`
 
 ### 1.4 Structured Error Responses
 
@@ -105,61 +109,6 @@ Goal: Replace the mock agent with real LLM-backed code generation. This is the c
 - Selection via config: `agent.type: "llm" | "mock"`
 
 **Files**: New `agent/llm_agent.py`, modify `agent/router.py`, `config.py`
-
-### 2.2 FAISS-Based Code RAG (Codebase Retrieval)
-
-**Problem**: The agent receives only a single file path and instruction. No awareness of project structure, dependencies, or conventions. The extension has partial vector infrastructure (`vectorIndex.ts`, `embeddingQueue.ts`, `conductorDb.ts`) but it runs client-side in SQLite — wrong place for a shared team tool.
-
-**What exists today**:
-- Backend `embeddings/` module: Bedrock Cohere embedding provider, service, router — reusable as the embedding engine
-- Extension `symbolExtractor.ts`, `workspaceScanner.ts`: workspace traversal and symbol extraction — keep these, they feed the indexing pipeline
-- Extension `vectorIndex.ts`, `embeddingQueue.ts`, `conductorDb.ts`: client-side SQLite vector storage — **deprecate**, replaced by backend FAISS
-
-**Plan**:
-
-#### 2.2.1 Backend `rag/` Module with FAISS Vector Store
-- New module `backend/app/rag/` with `vector_store.py`, `chunker.py`, `indexer.py`, `router.py`, `schemas.py`
-- `FaissVectorStore` class: `IndexFlatIP` (inner product on normalized vectors = cosine similarity) + parallel metadata dict keyed by FAISS ID
-- Metadata per chunk: `{file_path, start_line, end_line, symbol_name, symbol_type, language, last_modified}`
-- Persistence: `faiss.write_index()` / `faiss.read_index()` to `data/rag/{workspace_id}/` alongside a JSON metadata sidecar
-- Thread-safe reads via `threading.Lock` on write operations; reads are lock-free (FAISS `IndexFlat` is read-safe)
-
-#### 2.2.2 Symbol-Aware Code Chunking
-- `chunker.py`: splits source files into semantic chunks (functions, classes, methods, top-level blocks)
-- Reuses language-specific patterns from extension's `symbolExtractor.ts` (ported to Python or called via the extension relay)
-- Chunk size target: ~200 lines max, with overlap at natural boundaries (function/class start)
-- Each chunk gets: raw source text, symbol metadata, import context (first 30 lines of file prepended as context)
-- Embedding via existing `embeddings/service.py` (Bedrock Cohere `embed-english-v3.0`, 1024-dim)
-
-#### 2.2.3 Incremental Indexing Pipeline
-- `POST /rag/index` — accepts a batch of file changes `{workspace_id, files: [{path, content, action: "upsert"|"delete"}]}`
-- Extension file watcher (`FileSystemWatcher`) sends changed files to this endpoint on save
-- Full re-index: `POST /rag/reindex` — extension sends entire workspace file list; backend diffs against existing index
-- Indexer tracks `file_path → [chunk_ids]` mapping for efficient delete-then-reinsert on file change
-- Rate limiting: extension batches changes (debounce 2s) before sending
-
-#### 2.2.4 Codebase Retrieval Endpoint
-- `POST /rag/search` — the core retrieval endpoint (Augment Code's `codebase-retrieval` equivalent)
-- Input: `{workspace_id, query: str, top_k: int = 10, filters: {languages?: [], file_patterns?: []}}`
-- Process: embed query → FAISS `search(k=top_k)` → filter by metadata → return ranked chunks with scores
-- Output: `{results: [{file_path, start_line, end_line, symbol_name, content, score}]}`
-- Used by: context enricher (2.2.6), agent (2.1), and direct user queries from chat
-
-#### 2.2.5 Extension Refactor — Deprecate Local Vector Storage
-- New `extension/src/services/ragClient.ts`: thin HTTP client for `POST /rag/search`, `POST /rag/index`, `POST /rag/reindex`
-- Add `FileSystemWatcher` integration: on file save → batch → `POST /rag/index`
-- On workspace open: trigger `POST /rag/reindex` for initial indexing
-- **Deprecate**: `vectorIndex.ts`, `embeddingQueue.ts`, `conductorDb.ts` (SQLite `symbol_vectors` table)
-- **Keep**: `symbolExtractor.ts` (feeds chunk metadata), `workspaceScanner.ts` (feeds initial file list)
-- `contextGatherer.ts`: replace local vector lookup with `ragClient.search()` call
-
-#### 2.2.6 Context Enricher RAG Integration
-- `backend/app/context/enricher.py`: before calling the LLM, run `FaissVectorStore.search()` with the code snippet as query
-- Inject top-k relevant chunks into the explanation prompt as "Related code from the workspace"
-- Same integration for the agent pipeline (2.1): RAG results become part of the LLM context window
-- Token budget management: reserve 60% for user content + RAG results, 40% for LLM response
-
-**Files**: New `backend/app/rag/` module, modify `backend/app/context/enricher.py`, `backend/app/main.py` (mount router), new `extension/src/services/ragClient.ts`, modify `extension/src/services/contextGatherer.ts`, modify `extension/src/extension.ts` (file watcher setup)
 
 ### 2.3 Multi-File Change Generation
 
@@ -323,11 +272,11 @@ Phase 1                Phase 2              Phase 3        Phase 4-5
 Production Ready       LLM Agent + RAG      Collab UX      Enterprise
 
 1.1 Message persist    2.1 LLM agent        3.1 Search     4.1 Rate limits
-1.2 Room lifecycle     2.2 Code RAG (FAISS) 3.2 Threads    4.2 Input validation
+1.2 Room lifecycle     [2.2 DONE: RAG]      3.2 Threads    4.2 Input validation
 1.3 Config enforce     2.3 Multi-file       3.3 Presence   4.3 Audit expansion
 1.4 Error responses    2.4 Git retrieval    3.4 Typing     5.1 Redis pub/sub
                                                            5.2 PostgreSQL
                                                            5.3 S3 storage
 ```
 
-**Recommended order**: 1.3 (quick win, config enforcement) → 1.1 (persistence is critical) → 1.2 (prevents memory leaks) → 2.2 (Code RAG — foundation for everything else in Phase 2) → 2.4 (Git retrieval — reuses RAG infra) → 2.1 (LLM agent, now with RAG context) → 2.3 (multi-file, agent is ready) → Phase 3+.
+**Recommended order**: ~~1.3 (quick win, config enforcement)~~ ✅ → 1.1 (persistence is critical) → 1.2 (prevents memory leaks) → 2.4 (Git retrieval — reuses existing RAG infra) → 2.1 (LLM agent, now with RAG context) → 2.3 (multi-file, agent is ready) → Phase 3+.

@@ -26,10 +26,15 @@ Usage:
 """
 import hashlib
 import json
+import logging
 from datetime import datetime
 from typing import List, Optional
 
+logger = logging.getLogger(__name__)
+
 import duckdb
+
+from app.config import get_config
 
 from .schemas import ApplyMode, AuditLogCreate, AuditLogEntry
 
@@ -73,7 +78,19 @@ class AuditLogService:
             The singleton AuditLogService instance.
         """
         if cls._instance is None:
-            cls._instance = cls(db_path)
+            resolved_path = db_path
+            if resolved_path is None:
+                try:
+                    configured_path = get_config().logging.audit_path
+                    if configured_path:
+                        resolved_path = configured_path
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to read logging.audit_path from config, using default audit DB path: %s",
+                        exc,
+                    )
+
+            cls._instance = cls(resolved_path)
         return cls._instance
 
     @classmethod
@@ -204,6 +221,12 @@ class AuditLogService:
             for row in result
         ]
     
+    def delete_room_logs(self, room_id: str) -> None:
+        """Delete all audit entries for a room (called on non-SSO host disconnect)."""
+        conn = self._get_connection()
+        conn.execute("DELETE FROM audit_logs WHERE room_id = ?", [room_id])
+        logger.info(f"[Audit] Deleted audit logs for room {room_id}")
+
     def close(self) -> None:
         """Close the database connection."""
         if self._connection is not None:
@@ -223,4 +246,3 @@ def compute_changeset_hash(changeset: dict) -> str:
     # Sort keys for deterministic hashing
     changeset_str = json.dumps(changeset, sort_keys=True)
     return hashlib.sha256(changeset_str.encode()).hexdigest()[:16]
-

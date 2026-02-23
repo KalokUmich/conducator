@@ -37,7 +37,8 @@ import type * as vscodeT from 'vscode';
 import { resolveLspContext }                                   from './lspResolver';
 import { rank, RankInput, RankOptions }                       from './relevanceRanker';
 import { buildContextPlan, ReadFileOp }                       from './contextPlanGenerator';
-import { assembleXmlPrompt, FileSnippet }                     from './xmlPromptAssembler';
+import { assembleXmlPrompt, FileSnippet, ProjectMetadataInput } from './xmlPromptAssembler';
+import { collectProjectMetadata, ProjectMetadata }             from './projectMetadataCollector';
 import { extractSymbols }                                     from './symbolExtractor';
 import { VectorIndex, SearchResult }                          from './vectorIndex';
 import { EmbeddingClient }                                    from './embeddingClient';
@@ -71,6 +72,8 @@ export interface PipelineInput {
     /** User question; defaults to "Explain this code". */
     question?:         string;
     backendUrl:        string;
+    /** Workspace / room ID passed to the backend for RAG search augmentation. */
+    workspaceId?:      string;
     conductorDb:       ConductorDb | null;
     workspaceFolders:  vscodeT.WorkspaceFolder[];
 
@@ -315,6 +318,27 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     );
 
     // -------------------------------------------------------------------------
+    // Stage 5.5 — Project metadata (cached, <1ms after first call)
+    // -------------------------------------------------------------------------
+    let projectMetadata: ProjectMetadata | null = null;
+    {
+        const t55 = performance.now();
+        try {
+            projectMetadata = await collectProjectMetadata(input.workspaceFolders);
+            if (projectMetadata) {
+                console.log(
+                    `${LOG} Stage 5.5 (project metadata): name=${projectMetadata.name} ` +
+                    `langs=${projectMetadata.languages.length} frameworks=${projectMetadata.frameworks.length}`,
+                );
+            }
+        } catch (err) {
+            console.log(`${LOG} Stage 5.5 (project metadata) failed (non-fatal):`, err);
+        }
+        timings['project_metadata'] = performance.now() - t55;
+        console.log(`${LOG} Stage 5.5 (project metadata): ${timings['project_metadata'].toFixed(1)}ms`);
+    }
+
+    // -------------------------------------------------------------------------
     // Stage 6 — Build XML prompt
     // -------------------------------------------------------------------------
     const t6 = performance.now();
@@ -325,6 +349,7 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
         question,
         fullFileContent,
         typeDefinitionSnippets,
+        projectMetadata,
     );
     const { xml: xmlPrompt, wasTrimmed } = assembleXmlPrompt(xmlInput);
     timings['xml_assembly'] = performance.now() - t6;
@@ -1019,6 +1044,7 @@ function _buildXmlInput(
     question:               string,
     fullFileContent:        string | undefined,
     typeDefinitionSnippets: Array<{ path: string; content: string }>,
+    projectMetadata:        ProjectMetadata | null,
 ): Parameters<typeof assembleXmlPrompt>[0] {
     // Current file — always the selected code text.
     const currentFile: FileSnippet = {
@@ -1082,7 +1108,17 @@ function _buildXmlInput(
         }
     }
 
-    return { currentFile, definition, relatedFiles, question };
+    // Convert ProjectMetadata → ProjectMetadataInput (drop null).
+    const metaInput: ProjectMetadataInput | undefined = projectMetadata
+        ? {
+            name:       projectMetadata.name,
+            languages:  projectMetadata.languages,
+            frameworks: projectMetadata.frameworks,
+            structure:  projectMetadata.structure,
+        }
+        : undefined;
+
+    return { currentFile, definition, relatedFiles, question, projectMetadata: metaInput };
 }
 
 /**
@@ -1104,6 +1140,7 @@ async function _callLlm(
             line_start:       input.startLine,
             line_end:         input.endLine,
             language:         input.language,
+            workspace_id:     input.workspaceId ?? null,
         }),
     });
 

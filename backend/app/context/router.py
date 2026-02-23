@@ -1,5 +1,6 @@
 """Context enrichment router — POST /context/explain."""
 import logging
+import re
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -10,6 +11,8 @@ from fastapi.responses import JSONResponse
 _EXPLAIN_SYSTEM = (
     "You are a senior software engineer reviewing code for your team. "
     "You will receive code context inside XML tags (<context>, <file>, <question>). "
+    "The <context> may include a <project> element with the project name, languages, "
+    "frameworks, and directory structure — use this to give project-specific answers. "
     "Answer the question directly and concisely. Always cover these points where relevant:\n"
     "• Purpose — what the code does and why it exists\n"
     "• Inputs / parameters — what data it receives and what constraints apply\n"
@@ -120,7 +123,8 @@ async def explain_rich(request: ExplainRichRequest) -> ExplainResponse:
 
     The extension's 8-stage pipeline (LSP, semantic search, ranked files,
     XML assembly) has already built the complete prompt.  This endpoint
-    simply resolves a healthy AI provider and forwards the prompt.
+    resolves a healthy AI provider, optionally augments the prompt with
+    RAG context, and forwards it.
 
     Args:
         request: ExplainRichRequest with the assembled XML prompt.
@@ -128,12 +132,16 @@ async def explain_rich(request: ExplainRichRequest) -> ExplainResponse:
     Returns:
         ExplainResponse with the AI explanation.
     """
+    # --- Diagnostic: parse the XML prompt structure ---
+    context_breakdown = _analyse_prompt_structure(request.assembled_prompt)
     logger.info(
-        "[context/explain-rich] Received request: file=%s lines=%d-%d lang=%s prompt_len=%d",
+        "[context/explain-rich] Received: file=%s lines=%d-%d lang=%s "
+        "prompt_len=%d workspace_id=%s | %s",
         request.file_path, request.line_start, request.line_end,
         request.language, len(request.assembled_prompt),
+        request.workspace_id or "NONE",
+        context_breakdown,
     )
-    # Log first 500 chars of the assembled prompt for debugging
     logger.debug(
         "[context/explain-rich] Prompt preview (first 500 chars):\n%s",
         request.assembled_prompt[:500],
@@ -158,9 +166,38 @@ async def explain_rich(request: ExplainRichRequest) -> ExplainResponse:
     model_id = getattr(provider, "model_id", "unknown")
     logger.info("[context/explain-rich] Using provider: %s model: %s", type(provider).__name__, model_id)
 
+    # --- RAG augmentation (best-effort) ---
+    prompt = request.assembled_prompt
+    rag_indexer = get_indexer()
+    workspace_id = request.workspace_id
+    if rag_indexer and workspace_id:
+        rag_section = _fetch_rag_section(
+            rag_indexer, workspace_id, request.snippet, request.file_path,
+        )
+        if rag_section:
+            # Insert before the closing </context> or append at the end
+            if "</context>" in prompt:
+                prompt = prompt.replace(
+                    "</context>",
+                    f"\n{rag_section}\n</context>",
+                    1,
+                )
+            else:
+                prompt = prompt + "\n" + rag_section
+            logger.info(
+                "[context/explain-rich] RAG context injected: +%d chars, new prompt_len=%d",
+                len(rag_section), len(prompt),
+            )
+        else:
+            logger.info("[context/explain-rich] RAG: no relevant results found")
+    elif not rag_indexer:
+        logger.info("[context/explain-rich] RAG: indexer not available")
+    elif not workspace_id:
+        logger.info("[context/explain-rich] RAG: no workspace_id provided — skipped")
+
     try:
         explanation = provider.call_model(
-            request.assembled_prompt,
+            prompt,
             max_tokens=4096,
             system=_EXPLAIN_SYSTEM,
         )
@@ -187,3 +224,106 @@ async def explain_rich(request: ExplainRichRequest) -> ExplainResponse:
             {"error": f"Explanation failed: {exc}"},
             status_code=500,
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _analyse_prompt_structure(prompt: str) -> str:
+    """Parse an XML prompt and return a human-readable breakdown.
+
+    Example output: "current-file=1(423ch) definition=1(1200ch) related=3(4500ch) question=yes"
+    """
+    parts: list[str] = []
+
+    # Count <file role="..."> tags and their sizes
+    file_tags = re.findall(
+        r'<file\s+[^>]*role=["\'](\w+)["\'][^>]*>(.*?)</file>',
+        prompt, re.DOTALL,
+    )
+    role_counts: dict[str, int] = {}
+    role_chars: dict[str, int] = {}
+    for role, content in file_tags:
+        role_counts[role] = role_counts.get(role, 0) + 1
+        role_chars[role] = role_chars.get(role, 0) + len(content)
+
+    for role in ("current", "definition", "related"):
+        count = role_counts.get(role, 0)
+        chars = role_chars.get(role, 0)
+        if count > 0:
+            parts.append(f"{role}={count}({chars}ch)")
+        else:
+            parts.append(f"{role}=0")
+
+    # Check for project section
+    has_project = "<project " in prompt
+    if has_project:
+        parts.append("project=yes")
+
+    # Check for question section
+    has_question = "<question>" in prompt
+    parts.append(f"question={'yes' if has_question else 'no'}")
+
+    # Check for RAG section (from previous enrichment)
+    has_rag = "<related_workspace_code>" in prompt
+    if has_rag:
+        parts.append("rag=pre-injected")
+
+    return " | ".join(parts)
+
+
+def _fetch_rag_section(
+    rag_indexer,
+    workspace_id: str,
+    snippet: str,
+    file_path: str,
+) -> str | None:
+    """Query RAG for related code and return an XML section to inject.
+
+    Returns None if no useful results are found or if an error occurs.
+    """
+    try:
+        results = rag_indexer.search(
+            workspace_id=workspace_id,
+            query=snippet,
+            top_k=5,
+        )
+        if not results:
+            return None
+
+        # Filter out chunks from the same file
+        filtered = [r for r in results if r.file_path != file_path]
+        if not filtered:
+            return None
+
+        parts: list[str] = []
+        for item in filtered[:5]:
+            symbol_attr = ""
+            if item.symbol_name:
+                symbol_attr = f' symbol="{item.symbol_name}" type="{item.symbol_type}"'
+            parts.append(
+                f'<rag-result file="{item.file_path}" '
+                f'lines="{item.start_line}-{item.end_line}" '
+                f'score="{item.score:.3f}"'
+                f'{symbol_attr} '
+                f'language="{item.language}">'
+                f"\n(semantic match — lines {item.start_line}–{item.end_line})"
+                f"\n</rag-result>"
+            )
+
+        logger.info(
+            "[context/explain-rich] RAG found %d relevant chunks (top score=%.3f): %s",
+            len(filtered[:5]),
+            filtered[0].score,
+            ", ".join(f"{r.file_path}:{r.start_line}" for r in filtered[:5]),
+        )
+
+        return (
+            "<related_workspace_code>\n"
+            + "\n".join(parts)
+            + "\n</related_workspace_code>"
+        )
+    except Exception as exc:
+        logger.warning("[context/explain-rich] RAG search failed (non-fatal): %s", exc)
+        return None

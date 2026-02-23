@@ -39,8 +39,8 @@
 /** Hard character budget for the entire assembled XML string. */
 export const MAX_TOTAL_CHARS = 80_000;
 
-/** Overhead characters reserved for XML tags and question wrapper. */
-const TAG_OVERHEAD = 512;
+/** Overhead characters reserved for XML tags, question wrapper, and project section. */
+const TAG_OVERHEAD = 1024;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -57,6 +57,14 @@ export interface FileSnippet {
     role: SnippetRole;
 }
 
+/** Project-level metadata rendered as a `<project>` element in the XML. */
+export interface ProjectMetadataInput {
+    name: string;
+    languages: string[];
+    frameworks: string[];
+    structure: string;
+}
+
 export interface AssemblerInput {
     /** Snippet from the file containing the cursor (role = "current"). */
     currentFile: FileSnippet;
@@ -66,6 +74,8 @@ export interface AssemblerInput {
     relatedFiles: FileSnippet[];
     /** The user's question or instruction. */
     question: string;
+    /** Optional project-level metadata rendered before file snippets. */
+    projectMetadata?: ProjectMetadataInput;
 }
 
 export interface AssembleResult {
@@ -112,8 +122,12 @@ export function assembleXmlPrompt(
     // Keep a mutable copy of content lengths; we never mutate the originals.
     const contents = snippets.map(s => s.content);
 
+    const projectSection = input.projectMetadata
+        ? _projectElement(input.projectMetadata)
+        : undefined;
+
     for (let attempt = 0; attempt < snippets.length + 1; attempt++) {
-        const xml = _assemble(snippets, contents, input.question);
+        const xml = _assemble(snippets, contents, input.question, projectSection);
         if (xml.length <= maxChars) {
             return { xml, wasTrimmed, charCount: xml.length };
         }
@@ -130,7 +144,7 @@ export function assembleXmlPrompt(
     }
 
     // Last-resort: return whatever fits in the budget (edge case for huge questions).
-    const xml = _assemble(snippets, contents, input.question).slice(0, maxChars);
+    const xml = _assemble(snippets, contents, input.question, projectSection).slice(0, maxChars);
     return { xml, wasTrimmed: true, charCount: xml.length };
 }
 
@@ -164,17 +178,38 @@ function _fileElement(snippet: FileSnippet, content: string): string {
     return `  <file path="${path}" role="${role}">${_cdata(content)}</file>`;
 }
 
+/** Render a `<project>` element from metadata. */
+function _projectElement(meta: ProjectMetadataInput): string {
+    const nameAttr = _attr(meta.name);
+    const langsAttr = _attr(meta.languages.join(', '));
+    const parts: string[] = [];
+    parts.push(`  <project name="${nameAttr}" languages="${langsAttr}">`);
+    if (meta.frameworks.length > 0) {
+        parts.push(`    <frameworks>${meta.frameworks.join(', ')}</frameworks>`);
+    }
+    if (meta.structure) {
+        parts.push(`    <structure>${_cdata('\n' + meta.structure + '\n    ')}</structure>`);
+    }
+    parts.push('  </project>');
+    return parts.join('\n');
+}
+
 /** Assemble the full XML string from current content values. */
 function _assemble(
     snippets: FileSnippet[],
     contents: string[],
     question: string,
+    projectSection?: string,
 ): string {
     const fileElems = snippets
         .map((s, i) => _fileElement(s, contents[i]))
         .join('\n');
 
-    return `<context>\n${fileElems}\n</context>\n<question>${_cdata(question)}</question>`;
+    const contextChildren = projectSection
+        ? `${projectSection}\n${fileElems}`
+        : fileElems;
+
+    return `<context>\n${contextChildren}\n</context>\n<question>${_cdata(question)}</question>`;
 }
 
 /**

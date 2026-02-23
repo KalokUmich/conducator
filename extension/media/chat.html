@@ -4774,8 +4774,9 @@
                             ws.send(JSON.stringify({
                                 type: 'join',
                                 displayName: session.displayName || 'User',
-                                identitySource: getIdentitySource()
-                                // Note: userId and role are now handled by backend
+                                identitySource: getIdentitySource(),
+                                ssoEmail: (ssoIdentity && ssoIdentity.email) ? ssoIdentity.email : undefined,
+                                ssoProvider: ssoProvider || undefined,
                             }));
                         }
 
@@ -4859,6 +4860,25 @@
                             renderAiExplanationMessage(data);
                             updateLastMessageTimestamp(data.ts);
                         }
+                    } else if (data.type === 'role_restored') {
+                        session.sessionRole = data.role;
+                        session.leadId = data.leadId || session.leadId;
+                        updateLeadPermissions();
+                        renderSystemMessage('✅ Host role restored via SSO identity');
+                    } else if (data.type === 'history_cleared') {
+                        // Clear all message DOM nodes and reset tracking state.
+                        messagesContainer.innerHTML = '';
+                        if (connectionStatus) {
+                            connectionStatus.style.display = '';
+                            messagesContainer.appendChild(connectionStatus);
+                        }
+                        chatMessages.length = 0;
+                        lastMessageUserId = null;
+                        lastMessageTime = 0;
+                        lastMessageDate = null;
+                        seenMessageIds.clear();
+                        lastMessageTimestamp = 0;
+                        renderSystemMessage('⚠️ The host has left. Chat history has been cleared.');
                     } else if (data.type === 'error') {
                         // SECURITY: Handle backend error messages (e.g., permission denied)
                         console.error('[WebView] Backend error:', data.error);
@@ -6645,48 +6665,100 @@
         }
 
         /**
-         * Render explanation text with light markdown support.
-         * Handles bullets, numbered lists, paragraphs, inline code, and bold.
-         * Escapes HTML first for XSS safety.
+         * Render explanation text with markdown support.
+         * Handles fenced code blocks (```lang), headings (#/##/###),
+         * bullets, numbered lists, paragraphs, inline code, and bold.
+         * HTML-escapes per context for XSS safety.
          * @param {string} text - Raw explanation text from LLM
          * @returns {string} Formatted HTML
          */
         function renderExplanationMarkdown(text) {
             if (!text) return '';
-            const escaped = escapeHtml(text);
-            const lines = escaped.split('\n');
+            const lines = text.split('\n');
             let html = '';
             let inUl = false;
             let inOl = false;
+            let inCodeBlock = false;
+            let codeBlockLang = '';
+            let codeBlockLines = [];
+
+            function closeLists() {
+                if (inUl) { html += '</ul>'; inUl = false; }
+                if (inOl) { html += '</ol>'; inOl = false; }
+            }
+
+            function emitCodeBlock() {
+                const codeContent = codeBlockLines.map(l => escapeHtml(l)).join('\n');
+                const langLabel = codeBlockLang
+                    ? `<span class="text-[0.6rem] text-emerald-400/80 font-mono uppercase tracking-wide">${escapeHtml(codeBlockLang)}</span>`
+                    : '';
+                html += `<div class="my-2 rounded overflow-hidden border border-gray-700/50 text-left">` +
+                        `<div class="flex items-center px-2 py-1 bg-gray-800/70 border-b border-gray-700/50 min-h-[1.5rem]">${langLabel}</div>` +
+                        `<pre class="px-3 py-2 text-xs font-mono text-gray-200 overflow-x-auto bg-black/30 whitespace-pre leading-relaxed">${codeContent}</pre>` +
+                        `</div>`;
+                inCodeBlock = false;
+                codeBlockLang = '';
+                codeBlockLines = [];
+            }
 
             lines.forEach(function(line) {
+                // Fenced code block fence line (``` or ```lang)
+                if (/^```(\w*)\s*$/.test(line.trim())) {
+                    if (inCodeBlock) {
+                        emitCodeBlock();
+                    } else {
+                        closeLists();
+                        inCodeBlock = true;
+                        codeBlockLang = (line.trim().match(/^```(\w+)/) || [])[1] || '';
+                        codeBlockLines = [];
+                    }
+                    return;
+                }
+
+                // Inside a code block — accumulate raw lines, no markdown processing
+                if (inCodeBlock) {
+                    codeBlockLines.push(line);
+                    return;
+                }
+
                 const trimmed = line.trim();
 
+                // Headings
+                if (/^###\s+/.test(trimmed)) {
+                    closeLists();
+                    html += `<p class="text-xs font-bold text-white mt-2 mb-0.5">${inlineFormat(escapeHtml(trimmed.replace(/^###\s+/, '')))}</p>`;
+                } else if (/^##\s+/.test(trimmed)) {
+                    closeLists();
+                    html += `<p class="text-[0.8rem] font-bold text-white mt-2.5 mb-1">${inlineFormat(escapeHtml(trimmed.replace(/^##\s+/, '')))}</p>`;
+                } else if (/^#\s+/.test(trimmed)) {
+                    closeLists();
+                    html += `<p class="text-sm font-bold text-white mt-3 mb-1">${inlineFormat(escapeHtml(trimmed.replace(/^#\s+/, '')))}</p>`;
+                }
                 // Bullet list (- item or * item)
-                if (/^[-*]\s+/.test(trimmed)) {
+                else if (/^[-*]\s+/.test(trimmed)) {
                     if (inOl) { html += '</ol>'; inOl = false; }
                     if (!inUl) { html += '<ul class="list-disc list-inside space-y-1 text-gray-200 my-1.5 ml-1">'; inUl = true; }
-                    html += '<li class="text-xs leading-relaxed">' + inlineFormat(trimmed.replace(/^[-*]\s+/, '')) + '</li>';
+                    html += '<li class="text-xs leading-relaxed">' + inlineFormat(escapeHtml(trimmed.replace(/^[-*]\s+/, ''))) + '</li>';
                 }
                 // Numbered list (1. item)
                 else if (/^\d+\.\s+/.test(trimmed)) {
                     if (inUl) { html += '</ul>'; inUl = false; }
                     if (!inOl) { html += '<ol class="list-decimal list-inside space-y-1 text-gray-200 my-1.5 ml-1">'; inOl = true; }
-                    html += '<li class="text-xs leading-relaxed">' + inlineFormat(trimmed.replace(/^\d+\.\s+/, '')) + '</li>';
+                    html += '<li class="text-xs leading-relaxed">' + inlineFormat(escapeHtml(trimmed.replace(/^\d+\.\s+/, ''))) + '</li>';
                 }
                 // Blank line — paragraph break
                 else if (trimmed === '') {
-                    if (inUl) { html += '</ul>'; inUl = false; }
-                    if (inOl) { html += '</ol>'; inOl = false; }
+                    closeLists();
                 }
                 // Regular text — paragraph
                 else {
-                    if (inUl) { html += '</ul>'; inUl = false; }
-                    if (inOl) { html += '</ol>'; inOl = false; }
-                    html += '<p class="text-xs text-gray-200 leading-relaxed my-1">' + inlineFormat(trimmed) + '</p>';
+                    closeLists();
+                    html += '<p class="text-xs text-gray-200 leading-relaxed my-1">' + inlineFormat(escapeHtml(trimmed)) + '</p>';
                 }
             });
 
+            // Close any unclosed code block (missing closing fence)
+            if (inCodeBlock && codeBlockLines.length > 0) emitCodeBlock();
             if (inUl) html += '</ul>';
             if (inOl) html += '</ol>';
             return html;

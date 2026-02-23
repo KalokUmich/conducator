@@ -256,7 +256,12 @@ class RagIndexer:
     # ------------------------------------------------------------------
 
     def _embed_chunks(self, chunks: list[CodeChunk]) -> list[list[float]]:
-        """Embed chunks in batches using the global EmbeddingService."""
+        """Embed chunks in batches using the global EmbeddingService.
+
+        Returns a list of vectors parallel to *chunks*.  On partial batch
+        failure the entire indexing run is aborted (returns ``[]``) so the
+        caller never stores a misaligned vector/metadata list.
+        """
         svc = get_embedding_service()
         if svc is None:
             logger.warning("[RagIndexer] No embedding service available")

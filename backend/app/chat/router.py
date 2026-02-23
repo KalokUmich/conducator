@@ -47,6 +47,7 @@ from .manager import (
     MAX_PAGE_SIZE,
 )
 from .stack_trace_parser import parse_stack_trace
+from app.config import get_config
 from app.files.service import FileStorageService
 
 router = APIRouter()
@@ -293,6 +294,16 @@ async def websocket_chat_endpoint(
     """
     logger.info(f"[WS] New connection to room: {room_id}, since={since}")
 
+    # Enforce max_participants from config (0 = no limit)
+    max_participants = get_config().session.max_participants
+    if max_participants > 0 and manager.get_room_size(room_id) >= max_participants:
+        logger.warning(
+            f"[WS] Room {room_id} is full ({max_participants} participants). "
+            "Rejecting new connection."
+        )
+        await websocket.close(code=1008)  # 1008 = Policy Violation
+        return
+
     # SECURITY: Backend assigns userId and role on connection
     assigned_user_id, assigned_role, history = await manager.connect(websocket, room_id)
     logger.info(
@@ -340,14 +351,34 @@ async def websocket_chat_endpoint(
                 logger.info(
                     f"[WS] JOIN from backend-assigned userId={assigned_user_id}, role={assigned_role}"
                 )
+                sso_email = data.get("ssoEmail")
+                sso_provider = data.get("ssoProvider")
+
                 user = manager.register_user(
                     websocket=websocket,
                     room_id=room_id,
                     user_id=assigned_user_id,  # SECURITY: Use backend-assigned ID
                     display_name=data.get("displayName", ""),
                     role=assigned_role,  # SECURITY: Use backend-assigned role
-                    identity_source=data.get("identitySource", "anonymous")
+                    identity_source=data.get("identitySource", "anonymous"),
+                    sso_email=sso_email,
+                    sso_provider=sso_provider,
                 )
+
+                # SSO reconnect: elevate role if credentials match stored host identity.
+                role_restored = manager.try_restore_host_by_sso(
+                    room_id, assigned_user_id, sso_email, sso_provider
+                )
+                if role_restored:
+                    assigned_role = "host"
+                    logger.info(
+                        f"[WS] Host role restored via SSO for user {assigned_user_id} in room {room_id}"
+                    )
+                    await websocket.send_json({
+                        "type": "role_restored",
+                        "role": "host",
+                        "leadId": manager.get_lead_id(room_id),
+                    })
 
                 # Broadcast updated user list to all clients
                 users_data = [u.model_dump() for u in manager.get_room_users(room_id)]
@@ -616,7 +647,15 @@ async def websocket_chat_endpoint(
             )
 
     except WebSocketDisconnect:
-        # Clean up and notify others
+        # Capture identity BEFORE disconnect() removes the websocket mapping.
+        pre_info = manager.websocket_to_user.get(websocket)
+        pre_user_id = pre_info[1] if pre_info else None
+        is_host_disconnect = (
+            pre_user_id is not None
+            and manager.is_host(room_id, pre_user_id)
+        )
+        host_had_sso = room_id in manager.room_sso_hosts
+
         disconnected_user, lead_reverted = manager.disconnect(websocket, room_id)
 
         if disconnected_user:
@@ -635,4 +674,21 @@ async def websocket_chat_endpoint(
                     "type": "lead_changed",
                     "leadId": new_lead_id
                 }, room_id)
+
+        # Non-SSO host disconnect: purge history and audit logs.
+        if is_host_disconnect and not host_had_sso:
+            logger.info(
+                f"[WS] Non-SSO host {pre_user_id} left room {room_id} "
+                "— clearing history and audit logs"
+            )
+            manager.clear_message_history(room_id)
+            try:
+                from app.audit.service import AuditLogService
+                AuditLogService.get_instance().delete_room_logs(room_id)
+            except Exception as exc:
+                logger.error(f"[WS] Could not delete audit logs for room {room_id}: {exc}")
+            await manager.broadcast({
+                "type": "history_cleared",
+                "reason": "host_session_ended",
+            }, room_id)
 

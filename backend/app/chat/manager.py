@@ -240,6 +240,11 @@ class ConnectionManager:
         # Lead tracking: room_id -> lead_user_id (initially the host)
         self.room_leads: Dict[str, str] = {}
 
+        # SSO identity of the original host, for reconnect recognition.
+        # Populated only when the first host joins with identitySource="sso".
+        # room_id -> {"email": str, "provider": str}
+        self.room_sso_hosts: Dict[str, dict] = {}
+
         # Room settings: room_id -> settings dict (e.g., {"code_style": "..."})
         self.room_settings: Dict[str, dict] = {}
 
@@ -299,7 +304,10 @@ class ConnectionManager:
         user_id: str,
         display_name: str,
         role: UserRole,
-        identity_source: str = "anonymous"
+        identity_source: str = "anonymous",
+        *,
+        sso_email: Optional[str] = None,
+        sso_provider: Optional[str] = None,
     ) -> RoomUser:
         """Register a user in the room after connection.
 
@@ -356,6 +364,20 @@ class ConnectionManager:
             self.room_users[room_id] = {}
         self.room_users[room_id][user_id] = user
         self.websocket_to_user[websocket] = (room_id, user_id)
+
+        # Store SSO identity for future reconnect recognition (host only, first time only).
+        if (role == UserRole.HOST
+                and sso_email
+                and sso_provider
+                and room_id not in self.room_sso_hosts):
+            self.room_sso_hosts[room_id] = {
+                "email": sso_email.lower().strip(),
+                "provider": sso_provider,
+            }
+            logger.info(
+                f"[Manager] Stored SSO host identity for room {room_id}: "
+                f"{sso_email} via {sso_provider}"
+            )
 
         return user
 
@@ -554,6 +576,16 @@ class ConnectionManager:
         """Get the message history for a room."""
         return self.message_history.get(room_id, [])
 
+    def clear_message_history(self, room_id: str) -> None:
+        """Clear only message-related state; preserves live connections and user list.
+
+        Called when a non-SSO host disconnects.
+        """
+        self.message_history.pop(room_id, None)
+        self.seen_message_ids.pop(room_id, None)
+        self.message_read_by.pop(room_id, None)
+        logger.info(f"[Manager] Message history cleared for room {room_id}")
+
     def clear_room(self, room_id: str) -> None:
         """Clear all data for a room (used when host ends session).
 
@@ -572,6 +604,7 @@ class ConnectionManager:
         self.message_read_by.pop(room_id, None)
         self.room_hosts.pop(room_id, None)  # SECURITY: Clear host tracking
         self.room_leads.pop(room_id, None)  # Clear lead tracking
+        self.room_sso_hosts.pop(room_id, None)
         self.room_settings.pop(room_id, None)
 
         # Clean up websocket-to-user mappings for this room
@@ -695,6 +728,34 @@ class ConnectionManager:
             True if user can end session, False otherwise.
         """
         return self.is_host(room_id, user_id)
+
+    def try_restore_host_by_sso(
+        self,
+        room_id: str,
+        user_id: str,
+        sso_email: Optional[str],
+        sso_provider: Optional[str],
+    ) -> bool:
+        """Elevate user_id to host+lead if SSO identity matches stored host.
+
+        Returns True if role was restored, False otherwise.
+        """
+        if not sso_email or not sso_provider:
+            return False
+        stored = self.room_sso_hosts.get(room_id)
+        if not stored:
+            return False
+        if (stored["email"] == sso_email.lower().strip()
+                and stored["provider"] == sso_provider):
+            self.room_hosts[room_id] = user_id
+            self.room_leads[room_id] = user_id
+            if room_id in self.room_users and user_id in self.room_users[room_id]:
+                self.room_users[room_id][user_id].role = UserRole.HOST
+            logger.info(
+                f"[Manager] SSO host role restored to user {user_id} in room {room_id}"
+            )
+            return True
+        return False
 
     # =========================================================================
     # Room Settings

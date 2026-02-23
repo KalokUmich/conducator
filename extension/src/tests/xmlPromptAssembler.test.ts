@@ -13,6 +13,7 @@ import {
     assembleXmlPrompt,
     AssemblerInput,
     FileSnippet,
+    ProjectMetadataInput,
     MAX_TOTAL_CHARS,
 } from '../services/xmlPromptAssembler';
 
@@ -327,5 +328,88 @@ describe('assembleXmlPrompt — edge cases', () => {
         }));
         assert.ok(xml.includes('こんにちは'));
         assert.ok(xml.includes('名前'));
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Project metadata section
+// ---------------------------------------------------------------------------
+
+function sampleProject(overrides: Partial<ProjectMetadataInput> = {}): ProjectMetadataInput {
+    return {
+        name:       'conductor',
+        languages:  ['python', 'typescript'],
+        frameworks: ['FastAPI', 'React'],
+        structure:  'backend/\n  app/\nextension/\n  src/',
+        ...overrides,
+    };
+}
+
+describe('assembleXmlPrompt — project metadata', () => {
+    it('omits <project> when projectMetadata is undefined', () => {
+        const { xml } = assembleXmlPrompt(baseInput());
+        assert.ok(!xml.includes('<project'), 'should not contain <project>');
+    });
+
+    it('renders <project> with name and languages attributes', () => {
+        const { xml } = assembleXmlPrompt(baseInput({
+            projectMetadata: sampleProject(),
+        }));
+        assert.ok(xml.includes('name="conductor"'), 'should have name attr');
+        assert.ok(xml.includes('languages="python, typescript"'), 'should have languages attr');
+    });
+
+    it('<project> appears before any <file> elements', () => {
+        const { xml } = assembleXmlPrompt(baseInput({
+            projectMetadata: sampleProject(),
+        }));
+        const projectPos = xml.indexOf('<project');
+        const filePos    = xml.indexOf('<file');
+        assert.ok(projectPos >= 0, 'should contain <project>');
+        assert.ok(filePos >= 0, 'should contain <file>');
+        assert.ok(projectPos < filePos, '<project> should precede <file>');
+    });
+
+    it('renders <frameworks> when list is non-empty', () => {
+        const { xml } = assembleXmlPrompt(baseInput({
+            projectMetadata: sampleProject({ frameworks: ['FastAPI', 'Pydantic'] }),
+        }));
+        assert.ok(xml.includes('<frameworks>FastAPI, Pydantic</frameworks>'));
+    });
+
+    it('omits <frameworks> when list is empty', () => {
+        const { xml } = assembleXmlPrompt(baseInput({
+            projectMetadata: sampleProject({ frameworks: [] }),
+        }));
+        assert.ok(!xml.includes('<frameworks>'), 'should not contain <frameworks>');
+    });
+
+    it('renders <structure> with CDATA wrapping', () => {
+        const { xml } = assembleXmlPrompt(baseInput({
+            projectMetadata: sampleProject(),
+        }));
+        assert.ok(xml.includes('<structure><![CDATA['), 'structure should be CDATA wrapped');
+        assert.ok(xml.includes('backend/'), 'structure should contain directory names');
+    });
+
+    it('project section is inside <context>', () => {
+        const { xml } = assembleXmlPrompt(baseInput({
+            projectMetadata: sampleProject(),
+        }));
+        const contextStart = xml.indexOf('<context>');
+        const contextEnd   = xml.indexOf('</context>');
+        const projectPos   = xml.indexOf('<project');
+        assert.ok(projectPos > contextStart, '<project> should be after <context>');
+        assert.ok(projectPos < contextEnd, '<project> should be before </context>');
+    });
+
+    it('project section counts toward total character budget', () => {
+        const meta = sampleProject({ structure: 'x/\n'.repeat(500) });
+        const withProject    = assembleXmlPrompt(baseInput({ projectMetadata: meta }));
+        const withoutProject = assembleXmlPrompt(baseInput());
+        assert.ok(
+            withProject.charCount > withoutProject.charCount,
+            'project metadata should increase char count',
+        );
     });
 });

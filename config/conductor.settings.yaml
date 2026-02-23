@@ -154,7 +154,7 @@ logging:
   audit_enabled: true
   
   # Path to audit log database file
-  audit_path: "audit_logs.duckdb"
+  audit_path: "backend/audit_logs.duckdb"
 
 # =============================================================================
 # AWS SSO Configuration

@@ -20,10 +20,14 @@ This guide walks junior engineers through the Conductor backend codebase as a st
 10. [Policy Evaluation (policy/)](#10-policy-evaluation-policy)
 11. [Audit Logging (audit/)](#11-audit-logging-audit)
 12. [File Sharing (files/)](#12-file-sharing-files)
-13. [Key Data Flows](#13-key-data-flows)
-14. [Patterns and Conventions](#14-patterns-and-conventions)
-15. [How to Add a New Module](#15-how-to-add-a-new-module)
-16. [Testing Guide](#16-testing-guide)
+13. [TODO Tracking (todos/)](#13-todo-tracking-todos)
+14. [Embeddings Service (embeddings/)](#14-embeddings-service-embeddings)
+15. [Code RAG (rag/)](#15-code-rag-rag)
+16. [Context and Explain Pipeline (context/)](#16-context-and-explain-pipeline-context)
+17. [Key Data Flows](#17-key-data-flows)
+18. [Patterns and Conventions](#18-patterns-and-conventions)
+19. [How to Add a New Module](#19-how-to-add-a-new-module)
+20. [Testing Guide](#20-testing-guide)
 
 ---
 
@@ -103,7 +107,7 @@ FastAPI auto-generates interactive API docs:
 ### Running Tests
 
 ```bash
-# All backend tests (368 tests as of this writing)
+# All backend tests (478 tests as of this writing)
 make test-backend
 
 # With verbose output
@@ -1541,7 +1545,229 @@ def get_file_type(mime_type: str) -> FileType:
 
 ---
 
-## 13. Key Data Flows
+## 13. TODO Tracking (todos/)
+
+### Overview
+
+The `todos/` module provides room-scoped task management with DuckDB persistence. Tasks survive server restarts and are isolated per room.
+
+### Data Model
+
+Each TODO has:
+- `id`: UUID
+- `room_id`: room it belongs to
+- `title`: short description
+- `description`: optional detail
+- `type`: task category
+- `priority`: `low`, `medium`, `high`
+- `status`: `open`, `in_progress`, `done`
+- `file_path` / `line_number`: optional source location
+- `created_by` / `assignee`: user identifiers
+- `source`: how the task was created — `ai_summary`, `manual`, `stack_trace`, `test_failure`, `workspace_scan`
+
+### TODOService (service.py)
+
+`TODOService` is a **singleton** wrapping a DuckDB connection:
+
+```python
+service = TODOService.get_instance()
+
+# Create
+todo = service.create(room_id="abc", title="Fix auth bug", priority="high", source="manual")
+
+# List all for a room (ordered by creation time)
+todos = service.list_by_room("abc")
+
+# Update fields (all optional)
+updated = service.update(todo_id, status="in_progress", assignee="alice")
+
+# Delete
+deleted = service.delete(todo_id)  # returns True/False
+```
+
+### REST Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/todos/{room_id}` | List all TODOs for a room |
+| `POST` | `/todos/{room_id}` | Create a TODO (201 Created) |
+| `PUT` | `/todos/{room_id}/{todo_id}` | Update fields (404 if not found) |
+| `DELETE` | `/todos/{room_id}/{todo_id}` | Delete a TODO (204 No Content) |
+
+### Integration
+
+TODOs are created automatically by the AI summarization pipeline (`source: "ai_summary"`), the workspace TODO scanner (`source: "workspace_scan"`), and manually by users. The extension's Tasks tab displays and manages them.
+
+---
+
+## 14. Embeddings Service (embeddings/)
+
+### Overview
+
+The `embeddings/` module provides float vector embeddings for source code symbols. The backend acts as a proxy to AWS Bedrock so the extension never calls a cloud API directly — no credentials needed in the extension.
+
+### Provider (bedrock.py)
+
+`BedrockEmbeddingProvider` calls `cohere.embed-v4` (1024-dim) via boto3. Key behaviour:
+- Batch size: 1–96 texts per call (Cohere API limit; the router enforces 1–32)
+- Input type: `search_document` for indexing, `search_query` for search queries
+- Returns `List[List[float]]` (normalized to unit vectors for cosine similarity)
+
+### EmbeddingService (service.py)
+
+```python
+from app.embeddings.service import get_embedding_service, set_embedding_service
+
+service = get_embedding_service()  # None if not initialized
+vectors = service.embed(["def greet(name): return f'Hello {name}'"])
+# → [[0.12, -0.04, ..., 0.31]]  (1024 floats)
+```
+
+**Credential expiry**: If AWS credentials expire at runtime, the service sets itself to `None` via `set_embedding_service(None)`. The extension will receive 503 and stops retrying until the backend restarts with fresh credentials.
+
+### REST Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/embeddings/config` | Model ID, dim, provider (consumed by extension on startup) |
+| `POST` | `/embeddings` | Embed 1–32 texts → `{vectors, model, dim}` |
+
+**Example**:
+```json
+POST /embeddings
+{"texts": ["function greet(name: string): string", "class Animal"]}
+
+200 OK
+{"vectors": [[0.12, -0.04, ...], [0.08, 0.31, ...]], "model": "cohere.embed-v4", "dim": 1024}
+```
+
+---
+
+## 15. Code RAG (rag/)
+
+### Overview
+
+The `rag/` module provides FAISS-backed semantic code search. Source files are split into semantic chunks, embedded via the `embeddings/` service, and stored in per-workspace FAISS indices. The extension sends code queries and receives ranked code chunks.
+
+### Symbol-Aware Chunker (chunker.py)
+
+`chunk_file(content, file_path, language, max_lines=200)` splits source files into chunks:
+
+1. **Import header** (first 30 lines) is extracted and prepended to every chunk for embedding context
+2. **Symbols** are extracted per language using a **two-tier approach**:
+   - **AST first**: Python stdlib `ast` (handles decorators, async, nested classes correctly), tree-sitter for JS/TS/Java/Go (handles generics, annotations, arrow functions, interfaces, enums)
+   - **Regex fallback**: if AST parsing fails or tree-sitter is not installed, falls back to the original regex extractors
+3. Uncovered lines (inter-symbol comments, constants) become `"block"` chunks
+4. Oversized symbols (> `max_lines`) are split at blank-line boundaries
+
+Each `CodeChunk` carries: `content`, `file_path`, `start_line`, `end_line`, `symbol_name`, `symbol_type` (function/class/block), `language`, `import_header`.
+
+### FaissVectorStore (vector_store.py)
+
+```python
+store = FaissVectorStore(dim=1024)
+store.add(chunk_id=42, vector=np.array([...]))
+results = store.search(query_vector, k=10)
+# → [(chunk_id, score), ...]
+
+store.save("data/rag/workspace-abc/")
+store.load("data/rag/workspace-abc/")
+```
+
+Backed by `IndexFlatIP` (inner product on L2-normalized vectors = cosine similarity). Thread-safe writes via `threading.Lock`; reads are lock-free. Sidecar `metadata.json` stores per-chunk metadata (file path, line range, symbol name, language).
+
+### RagIndexer (indexer.py)
+
+`RagIndexer` is the singleton that ties the vector store, chunker, and embedding service together:
+
+```python
+# Incremental update (upsert/delete)
+added, removed = indexer.index_files(workspace_id, [
+    {"path": "app/utils.py", "content": "...", "action": "upsert"},
+    {"path": "app/old.py",   "action": "delete"},
+])
+
+# Full reindex
+added, removed = indexer.reindex(workspace_id, files)
+
+# Semantic search
+results = indexer.search(workspace_id, query="async error handler", top_k=10)
+# results: List[SearchResult] with file_path, start_line, end_line, symbol_name, content, score
+```
+
+Internally tracks `file_path → [chunk_ids]` so file updates delete old chunks before inserting new ones.
+
+### REST Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/rag/index` | Upsert/delete files in workspace index |
+| `POST` | `/rag/reindex` | Clear and rebuild index from file list |
+| `POST` | `/rag/search` | Semantic query → ranked `SearchResult[]` |
+
+All endpoints return 503 if the indexer is not configured (embeddings unavailable).
+
+**Search example**:
+```json
+POST /rag/search
+{"workspace_id": "ws-abc", "query": "JWT token validation", "top_k": 5}
+
+200 OK
+{
+  "results": [
+    {"file_path": "app/auth/service.py", "start_line": 42, "end_line": 68,
+     "symbol_name": "validate_token", "symbol_type": "function",
+     "content": "def validate_token(token: str) ...", "score": 0.91, "language": "python"}
+  ],
+  "query": "JWT token validation", "workspace_id": "ws-abc"
+}
+```
+
+---
+
+## 16. Context and Explain Pipeline (context/)
+
+### Overview
+
+The `context/` module exposes two AI code explanation endpoints. The **legacy path** (`/explain`) does backend-side context enrichment; the **preferred path** (`/explain-rich`) accepts a fully assembled XML prompt from the extension's 8-stage pipeline.
+
+### POST /context/explain (legacy)
+
+1. Extension sends `ExplainRequest` with snippet, file path, language, and optional context gathered by `ContextGatherer` (full file, surrounding lines, imports, LSP data)
+2. `ContextEnricher.explain()` fills missing fields and builds an explanation prompt
+3. Active AI provider called with the constructed prompt
+4. Returns `ExplainResponse{explanation, model, language, file_path, line_start, line_end}`
+
+### POST /context/explain-rich (preferred)
+
+1. Extension sends `ExplainRichRequest` with `assembled_prompt` (pre-built XML), snippet, file path, line range, language, and optional `workspace_id`
+2. Backend resolves the active AI provider
+3. **RAG augmentation** (best-effort): if `workspace_id` provided and RAG indexer is available, searches for related chunks from other files and injects a `<related_workspace_code>` block into the XML prompt
+4. Provider called with `max_tokens=4096` and a system prompt instructing structured, concise explanation
+5. Returns `ExplainResponse`
+
+The system prompt instructs the model to cover: purpose, inputs/outputs, business context, key dependencies, and gotchas — in 5–10 sentences using bold/backtick formatting.
+
+### ContextEnricher (enricher.py)
+
+```python
+enricher = ContextEnricher(provider=provider, rag_indexer=get_indexer())
+response = enricher.explain(request)
+```
+
+Builds an explanation prompt from the available context fields. If `rag_indexer` is set, injects top-k related chunks before calling the model.
+
+### CodebaseSkills (skills.py)
+
+Utility functions used by the enricher:
+- `extract_imports(source, language)` — language-specific import extraction
+- `extract_context_window(lines, start, end, window=15)` — ±15 lines around selection
+- `find_containing_function(lines, start)` — walks up to find enclosing function signature
+- `build_explanation_prompt(request)` — assembles the final prompt string
+
+---
+
+## 17. Key Data Flows
 
 This section traces end-to-end data flows through the system.
 
@@ -1612,7 +1838,7 @@ This section traces end-to-end data flows through the system.
 
 ---
 
-## 14. Patterns and Conventions
+## 18. Patterns and Conventions
 
 This section documents common patterns used throughout the backend codebase.
 
@@ -1795,7 +2021,7 @@ async def test_connect_assigns_host_role_to_first_user():
 
 ---
 
-## 15. How to Add a New Module
+## 19. How to Add a New Module
 
 This section provides a step-by-step guide for adding a new feature module.
 
@@ -1969,7 +2195,7 @@ async def create_item(request: MyFeatureRequest):
 
 ---
 
-## 16. Testing Guide
+## 20. Testing Guide
 
 This section explains how to write and run tests for the backend.
 

@@ -4,12 +4,17 @@ Splits source files into semantically meaningful chunks suitable for
 embedding.  Each chunk includes the file's import header so the embedding
 model has dependency context.
 
-Language parsers are regex-based, mirroring the patterns used in the
-extension's ``symbolExtractor.ts``.
+Symbol extraction uses AST parsing where available (Python stdlib ``ast``,
+tree-sitter for JS/TS/Java/Go) with transparent fallback to regex when
+parsing fails or libraries are not installed.
 """
+import ast
+import logging
 import re
 from dataclasses import dataclass
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -158,26 +163,311 @@ def _extract_import_header(lines: list[str], language: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Symbol extraction (regex-based)
+# Tree-sitter lazy loading
+# ---------------------------------------------------------------------------
+
+_TS_AVAILABLE: bool | None = None  # None = not yet checked
+_TS_PARSERS: dict = {}
+
+
+def _get_ts_parser(language_key: str):
+    """Return a cached tree-sitter ``Parser`` for *language_key*, or ``None``.
+
+    Supported keys: ``javascript``, ``typescript``, ``tsx``, ``java``, ``go``.
+    On first ``ImportError`` the global ``_TS_AVAILABLE`` flag is set to
+    ``False`` so subsequent calls short-circuit immediately.
+    """
+    global _TS_AVAILABLE
+
+    if _TS_AVAILABLE is False:
+        return None
+
+    if language_key in _TS_PARSERS:
+        return _TS_PARSERS[language_key]
+
+    try:
+        from tree_sitter import Language, Parser  # noqa: F811
+
+        lang_obj: Language | None = None
+        if language_key == "javascript":
+            import tree_sitter_javascript as ts_js
+            lang_obj = Language(ts_js.language())
+        elif language_key == "typescript":
+            import tree_sitter_typescript as ts_ts
+            lang_obj = Language(ts_ts.language_typescript())
+        elif language_key == "tsx":
+            import tree_sitter_typescript as ts_ts
+            lang_obj = Language(ts_ts.language_tsx())
+        elif language_key == "java":
+            import tree_sitter_java as ts_java
+            lang_obj = Language(ts_java.language())
+        elif language_key == "go":
+            import tree_sitter_go as ts_go
+            lang_obj = Language(ts_go.language())
+        else:
+            return None
+
+        parser = Parser(lang_obj)
+        _TS_PARSERS[language_key] = parser
+        _TS_AVAILABLE = True
+        return parser
+
+    except (ImportError, Exception) as exc:
+        logger.debug("tree-sitter not available for %s: %s", language_key, exc)
+        _TS_AVAILABLE = False
+        return None
+
+
+# ---------------------------------------------------------------------------
+# AST-based symbol extraction
+# ---------------------------------------------------------------------------
+
+def _extract_python_symbols_ast(lines: list[str]) -> list[dict]:
+    """Extract top-level Python symbols using the stdlib ``ast`` module.
+
+    Returns ``[]`` on ``SyntaxError`` so the caller can fall back to regex.
+    """
+    source = "\n".join(lines)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    symbols: list[dict] = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            start = node.lineno - 1  # ast uses 1-based
+            if node.decorator_list:
+                start = node.decorator_list[0].lineno - 1
+            end = node.end_lineno  # end_lineno is 1-based inclusive; we want exclusive index
+            symbols.append({
+                "name": node.name,
+                "type": "function",
+                "start": start,
+                "end": end,
+            })
+        elif isinstance(node, ast.ClassDef):
+            start = node.lineno - 1
+            if node.decorator_list:
+                start = node.decorator_list[0].lineno - 1
+            end = node.end_lineno
+            symbols.append({
+                "name": node.name,
+                "type": "class",
+                "start": start,
+                "end": end,
+            })
+
+    return symbols
+
+
+def _extract_ts_js_symbols_ast(lines: list[str], is_tsx: bool = False) -> list[dict]:
+    """Extract JS/TS symbols using tree-sitter."""
+    lang_key = "tsx" if is_tsx else "typescript"  # TS grammar is a superset of JS
+    parser = _get_ts_parser(lang_key)
+    if parser is None:
+        return []
+
+    source = "\n".join(lines).encode("utf-8")
+    tree = parser.parse(source)
+    root = tree.root_node
+
+    symbols: list[dict] = []
+
+    for node in root.children:
+        actual = node
+        # Unwrap export_statement to get inner declaration
+        if node.type == "export_statement":
+            for child in node.children:
+                if child.type in (
+                    "function_declaration",
+                    "generator_function_declaration",
+                    "class_declaration",
+                    "abstract_class_declaration",
+                    "interface_declaration",
+                    "type_alias_declaration",
+                    "enum_declaration",
+                    "lexical_declaration",
+                ):
+                    actual = child
+                    break
+            else:
+                continue
+
+        sym = _ts_node_to_symbol(actual, node)
+        if sym:
+            symbols.append(sym)
+
+    return symbols
+
+
+def _ts_node_to_symbol(actual, outer) -> dict | None:
+    """Convert a tree-sitter node to a symbol dict, or return ``None``."""
+    start = outer.start_point[0]
+    end = outer.end_point[0] + 1  # exclusive
+
+    if actual.type in ("function_declaration", "generator_function_declaration"):
+        name_node = actual.child_by_field_name("name")
+        if name_node:
+            return {"name": name_node.text.decode(), "type": "function", "start": start, "end": end}
+
+    elif actual.type in ("class_declaration", "abstract_class_declaration"):
+        name_node = actual.child_by_field_name("name")
+        if name_node:
+            return {"name": name_node.text.decode(), "type": "class", "start": start, "end": end}
+
+    elif actual.type == "interface_declaration":
+        name_node = actual.child_by_field_name("name")
+        if name_node:
+            return {"name": name_node.text.decode(), "type": "class", "start": start, "end": end}
+
+    elif actual.type == "type_alias_declaration":
+        name_node = actual.child_by_field_name("name")
+        if name_node:
+            return {"name": name_node.text.decode(), "type": "class", "start": start, "end": end}
+
+    elif actual.type == "enum_declaration":
+        name_node = actual.child_by_field_name("name")
+        if name_node:
+            return {"name": name_node.text.decode(), "type": "class", "start": start, "end": end}
+
+    elif actual.type == "lexical_declaration":
+        # const foo = async (...) => { ... }
+        for child in actual.children:
+            if child.type == "variable_declarator":
+                name_node = child.child_by_field_name("name")
+                value_node = child.child_by_field_name("value")
+                if name_node and value_node and value_node.type in ("arrow_function", "function"):
+                    return {"name": name_node.text.decode(), "type": "function", "start": start, "end": end}
+
+    return None
+
+
+def _extract_java_symbols_ast(lines: list[str]) -> list[dict]:
+    """Extract Java symbols using tree-sitter."""
+    parser = _get_ts_parser("java")
+    if parser is None:
+        return []
+
+    source = "\n".join(lines).encode("utf-8")
+    tree = parser.parse(source)
+    root = tree.root_node
+
+    symbols: list[dict] = []
+    for node in root.children:
+        if node.type in (
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "annotation_type_declaration",
+            "record_declaration",
+        ):
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append({
+                    "name": name_node.text.decode(),
+                    "type": "class",
+                    "start": node.start_point[0],
+                    "end": node.end_point[0] + 1,
+                })
+
+    return symbols
+
+
+def _extract_go_symbols_ast(lines: list[str]) -> list[dict]:
+    """Extract Go symbols using tree-sitter."""
+    parser = _get_ts_parser("go")
+    if parser is None:
+        return []
+
+    source = "\n".join(lines).encode("utf-8")
+    tree = parser.parse(source)
+    root = tree.root_node
+
+    symbols: list[dict] = []
+    for node in root.children:
+        if node.type == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append({
+                    "name": name_node.text.decode(),
+                    "type": "function",
+                    "start": node.start_point[0],
+                    "end": node.end_point[0] + 1,
+                })
+
+        elif node.type == "method_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                symbols.append({
+                    "name": name_node.text.decode(),
+                    "type": "function",
+                    "start": node.start_point[0],
+                    "end": node.end_point[0] + 1,
+                })
+
+        elif node.type == "type_declaration":
+            # type_declaration contains type_spec children
+            for child in node.children:
+                if child.type == "type_spec":
+                    name_node = child.child_by_field_name("name")
+                    type_node = child.child_by_field_name("type")
+                    if name_node:
+                        sym_type = "class"  # struct/interface → "class" for consistency
+                        symbols.append({
+                            "name": name_node.text.decode(),
+                            "type": sym_type,
+                            "start": node.start_point[0],
+                            "end": node.end_point[0] + 1,
+                        })
+
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Symbol extraction — two-tier dispatcher (AST → regex fallback)
 # ---------------------------------------------------------------------------
 
 def _extract_symbols(lines: list[str], language: str) -> list[dict]:
     """Extract top-level symbols from the file.
 
+    Tries AST-based extraction first; falls back to regex on failure or
+    empty result.
+
     Returns a list of dicts with keys: name, type, start, end (line indices).
     """
-    extractors = {
+    ast_extractors = {
+        "python":     _extract_python_symbols_ast,
+        "typescript": lambda l: _extract_ts_js_symbols_ast(l, is_tsx=False),
+        "javascript": lambda l: _extract_ts_js_symbols_ast(l, is_tsx=False),
+        "java":       _extract_java_symbols_ast,
+        "go":         _extract_go_symbols_ast,
+    }
+
+    regex_extractors = {
         "python":     _extract_python_symbols,
         "typescript": _extract_ts_js_symbols,
         "javascript": _extract_ts_js_symbols,
         "java":       _extract_java_symbols,
         "go":         _extract_go_symbols,
     }
-    extractor = extractors.get(language)
-    if extractor is None:
-        return []
 
-    return extractor(lines)
+    # Try AST first
+    ast_fn = ast_extractors.get(language)
+    if ast_fn is not None:
+        try:
+            result = ast_fn(lines)
+            if result:
+                return result
+        except Exception as exc:
+            logger.debug("AST extraction failed for %s, falling back to regex: %s", language, exc)
+
+    # Fallback to regex
+    regex_fn = regex_extractors.get(language)
+    if regex_fn is not None:
+        return regex_fn(lines)
+
+    return []
 
 
 def _extract_python_symbols(lines: list[str]) -> list[dict]:

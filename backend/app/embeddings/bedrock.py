@@ -37,6 +37,11 @@ DEFAULT_MODEL_ID = "cohere.embed-english-v3"
 DEFAULT_DIM      = 1024
 DEFAULT_REGION   = "us-east-1"
 
+# Bedrock's input validation rejects Cohere texts that exceed this limit
+# *before* the model processes them, so the Cohere-level ``"truncate": "END"``
+# parameter never gets a chance to work.  We must pre-truncate client-side.
+_COHERE_BEDROCK_MAX_CHARS = 2048
+
 
 class BedrockEmbeddingProvider(EmbeddingProvider):
     """Embedding provider backed by AWS Bedrock (Cohere Embed models).
@@ -128,9 +133,23 @@ class BedrockEmbeddingProvider(EmbeddingProvider):
         """
         client = self._get_client()
 
+        # Pre-truncate texts that exceed Bedrock's per-text character limit.
+        # Bedrock validates input length *before* forwarding to Cohere, so
+        # the Cohere-level ``"truncate": "END"`` cannot save us.
+        truncated_texts: list[str] = []
+        for text in texts:
+            if len(text) > _COHERE_BEDROCK_MAX_CHARS:
+                logger.warning(
+                    "[embeddings/bedrock] Truncating text from %d to %d chars",
+                    len(text), _COHERE_BEDROCK_MAX_CHARS,
+                )
+                truncated_texts.append(text[:_COHERE_BEDROCK_MAX_CHARS])
+            else:
+                truncated_texts.append(text)
+
         request_body = json.dumps(
             {
-                "texts":      texts,
+                "texts":      truncated_texts,
                 "input_type": input_type,
                 "truncate":   "END",
             }
