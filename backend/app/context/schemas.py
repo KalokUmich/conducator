@@ -60,6 +60,10 @@ class ExplainRichRequest(BaseModel):
     line_start: int = Field(..., ge=1)
     line_end: int = Field(..., ge=1)
     language: str = Field(default="")
+    workspace_id: Optional[str] = Field(
+        default=None,
+        description="Workspace ID for RAG search augmentation"
+    )
 
 
 class ExplainResponse(BaseModel):

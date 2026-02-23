@@ -760,3 +760,126 @@ class TestLeadTransfer:
             assert manager.can_configure(room_id, creds1["userId"]) is True  # host always
             assert manager.can_configure(room_id, creds2["userId"]) is True  # lead
 
+
+# =============================================================================
+# SSO Host Reconnect + Non-SSO Disconnect Cleanup Tests
+# =============================================================================
+
+
+def test_sso_host_reconnect_restores_role():
+    """SSO host that disconnects and reconnects gets host role restored."""
+    room_id = "test-sso-reconnect"
+
+    # First connection: host joins with SSO identity.
+    with client.websocket_connect(f"/ws/chat/{room_id}") as ws1:
+        creds1 = receive_credentials(ws1)
+        assert creds1["role"] == "host"
+        receive_history(ws1)
+
+        ws1.send_json({
+            "type": "join",
+            "displayName": "alice@example.com",
+            "identitySource": "sso",
+            "ssoEmail": "alice@example.com",
+            "ssoProvider": "aws",
+        })
+        ws1.receive_json()  # user_joined
+
+    # Verify SSO host identity was stored.
+    assert room_id in manager.room_sso_hosts
+    assert manager.room_sso_hosts[room_id]["email"] == "alice@example.com"
+
+    # Second connection: same SSO credentials → role should be restored.
+    with client.websocket_connect(f"/ws/chat/{room_id}") as ws2:
+        creds2 = receive_credentials(ws2)
+        # Backend assigns guest by default (room_hosts was cleared on disconnect).
+        receive_history(ws2)
+
+        ws2.send_json({
+            "type": "join",
+            "displayName": "alice@example.com",
+            "identitySource": "sso",
+            "ssoEmail": "alice@example.com",
+            "ssoProvider": "aws",
+        })
+
+        # role_restored is sent directly to the reconnecting client before user_joined.
+        role_msg = ws2.receive_json()
+        assert role_msg["type"] == "role_restored"
+        assert role_msg["role"] == "host"
+
+        # Then the user_joined broadcast arrives.
+        joined = ws2.receive_json()
+        assert joined["type"] == "user_joined"
+
+        # Manager state should reflect restored host.
+        assert manager.is_host(room_id, creds2["userId"])
+
+
+def test_non_sso_host_disconnect_clears_history():
+    """When a non-SSO host disconnects, message history is cleared."""
+    room_id = "test-non-sso-clear"
+
+    with client.websocket_connect(f"/ws/chat/{room_id}") as ws1, \
+         client.websocket_connect(f"/ws/chat/{room_id}") as ws2:
+        creds1 = receive_credentials(ws1)
+        creds2 = receive_credentials(ws2)
+        receive_history(ws1)
+        receive_history(ws2)
+
+        # Host joins without SSO.
+        ws1.send_json({"type": "join", "displayName": "Host", "identitySource": "named"})
+        ws1.receive_json()
+        ws2.receive_json()
+
+        # Host posts a message.
+        ws1.send_json({"content": "Hello everyone"})
+        ws1.receive_json()
+        ws2.receive_json()
+
+        assert manager.get_message_count(room_id) == 1
+
+    # After host's context manager exits, the disconnect handler fires.
+    # The room might already be cleaned up by clear_room triggered elsewhere.
+    # What matters is that history was cleared at the time of disconnect.
+    # We verify indirectly: if the room still exists, history must be empty.
+    if room_id in manager.message_history:
+        assert manager.get_message_count(room_id) == 0
+    # Room no longer has SSO host record.
+    assert room_id not in manager.room_sso_hosts
+
+
+def test_sso_host_disconnect_preserves_history():
+    """When an SSO-authenticated host disconnects, message history is NOT cleared."""
+    room_id = "test-sso-preserve"
+
+    with client.websocket_connect(f"/ws/chat/{room_id}") as ws1, \
+         client.websocket_connect(f"/ws/chat/{room_id}") as ws2:
+        creds1 = receive_credentials(ws1)
+        creds2 = receive_credentials(ws2)
+        receive_history(ws1)
+        receive_history(ws2)
+
+        # Host joins with SSO.
+        ws1.send_json({
+            "type": "join",
+            "displayName": "alice@example.com",
+            "identitySource": "sso",
+            "ssoEmail": "alice@example.com",
+            "ssoProvider": "google",
+        })
+        ws1.receive_json()
+        ws2.receive_json()
+
+        # Host posts a message.
+        ws1.send_json({"content": "SSO host message"})
+        ws1.receive_json()
+        ws2.receive_json()
+
+        assert manager.get_message_count(room_id) == 1
+        # SSO identity was stored.
+        assert room_id in manager.room_sso_hosts
+
+    # After host disconnects, history must still be intact for the remaining guest.
+    assert manager.get_message_count(room_id) == 1
+

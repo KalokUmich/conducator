@@ -484,6 +484,35 @@ def _load_yaml_file(path: Path | None) -> dict:
         return {}
 
 
+def _resolve_relative_audit_path(settings_data: dict, settings_path: Path | None) -> None:
+    """Resolve logging.audit_path to an absolute path when configured relatively.
+
+    Resolution rule:
+        1. If settings file is in "<project>/config/conductor.settings.yaml",
+           resolve relative paths against "<project>".
+        2. Otherwise, resolve relative paths against the settings file directory.
+    """
+    logging_cfg = settings_data.get("logging")
+    if not isinstance(logging_cfg, dict):
+        return
+
+    audit_path = logging_cfg.get("audit_path")
+    if not isinstance(audit_path, str) or not audit_path.strip():
+        return
+
+    path_obj = Path(audit_path)
+    if path_obj.is_absolute() or settings_path is None:
+        return
+
+    settings_path = settings_path.resolve()
+    if settings_path.name == "conductor.settings.yaml" and settings_path.parent.name == "config":
+        base_dir = settings_path.parent.parent
+    else:
+        base_dir = settings_path.parent
+
+    logging_cfg["audit_path"] = str((base_dir / path_obj).resolve())
+
+
 def load_config(
     secrets_path: Path | str | None = None,
     settings_path: Path | str | None = None,
@@ -513,6 +542,7 @@ def load_config(
     # Load both files
     secrets_data = _load_yaml_file(secrets_path)
     settings_data = _load_yaml_file(settings_path)
+    _resolve_relative_audit_path(settings_data, settings_path)
 
     # Log what files were found
     if secrets_path and secrets_path.exists():
@@ -584,4 +614,3 @@ def get_config() -> ConductorConfig:
     if _config is None:
         _config = load_config()
     return _config
-

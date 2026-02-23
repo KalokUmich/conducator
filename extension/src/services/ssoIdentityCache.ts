@@ -6,8 +6,8 @@
  * and by the WebView to decide whether a cached identity is still valid.
  */
 
-/** How long an SSO identity is valid (24 hours). */
-export const SSO_EXPIRY_MS = 24 * 60 * 60 * 1000;
+/** How long an SSO identity is valid (48 hours). */
+export const SSO_EXPIRY_MS = 48 * 60 * 60 * 1000;
 
 /** SSO provider type. */
 export type SSOProvider = 'aws' | 'google';
@@ -34,7 +34,7 @@ export function wrapIdentity(
  * Extract a valid (non-expired) identity from a stored value.
  *
  * Handles three cases:
- *  - New format `{ identity, storedAt }` — returns identity if within 24h, null otherwise.
+ *  - New format `{ identity, storedAt }` — returns identity if within 48h, null otherwise.
  *  - Old format (raw identity without storedAt) — treated as expired, returns null.
  *  - Falsy / missing — returns null.
  *

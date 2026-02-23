@@ -9,9 +9,9 @@ The auto-apply feature is designed for:
     - Lead users only (member role cannot use auto-apply)
 
 Policy Rules:
-    1. max_files <= 2: Prevents large-scale automated changes
-    2. max_lines_changed <= 50: Limits blast radius of each change
-    3. forbidden_paths: Blocks changes to critical infrastructure
+    1. max_files: read from config.change_limits.max_files_per_request
+    2. max_lines_changed: read from config.change_limits.auto_apply.max_lines
+    3. forbidden_paths: hardcoded safety constraint (infra/, db/, security/)
 
 Security Rationale:
     Auto-apply trades convenience for safety. By limiting scope and
@@ -34,16 +34,16 @@ if TYPE_CHECKING:
 
 
 # =============================================================================
-# Policy Constants (TODO: Move to configuration file)
+# Policy Constants
 # =============================================================================
 
-# Maximum number of files that can be auto-applied
+# Fallback defaults used only when config is unavailable (e.g. unit tests
+# that construct AutoApplyPolicy directly without passing limits).
 MAX_FILES = 2
-
-# Maximum total lines changed across all files
 MAX_LINES_CHANGED = 50
 
-# Path prefixes that are never auto-applied (critical infrastructure)
+# Path prefixes that are never auto-applied (critical infrastructure).
+# These are hardcoded safety constraints and are NOT configurable.
 FORBIDDEN_PATHS: Tuple[str, ...] = ("infra/", "db/", "security/")
 
 
@@ -65,12 +65,15 @@ class PolicyResult:
 
 class AutoApplyPolicy:
     """Policy evaluator for Auto Apply feature.
-    
-    This class evaluates whether a ChangeSet can be auto-applied
-    based on hard-coded rules:
-    - max_files <= 2
-    - max_lines_changed <= 50
-    - forbidden paths: infra/, db/, security/
+
+    Limits are read from conductor.settings.yaml at request time via
+    ``evaluate_auto_apply(change_set)``.  The constructor parameters serve
+    as fallback defaults for unit tests that construct the policy directly.
+
+    Rules evaluated:
+    - max_files: from config.change_limits.max_files_per_request (default: 2)
+    - max_lines_changed: from config.change_limits.auto_apply.max_lines (default: 50)
+    - forbidden paths: hardcoded infra/, db/, security/
     """
 
     def __init__(
@@ -169,32 +172,32 @@ class AutoApplyPolicy:
         return forbidden
 
 
-# Singleton instance for convenience
-_default_policy = AutoApplyPolicy()
-
-
 def evaluate_auto_apply(
     change_set: ChangeSet,
     config: ConductorConfig | None = None,
 ) -> PolicyResult:
     """Evaluate a ChangeSet against the auto-apply policy.
 
-    When *config* is provided the limits are read from
-    ``config.change_limits``; otherwise the module-level defaults are used.
+    Limits are always read from configuration.  When *config* is not
+    provided the global config singleton (``get_config()``) is used so that
+    ``change_limits`` values from ``conductor.settings.yaml`` are honoured
+    even for callers that do not pass a config object explicitly.
 
     Args:
         change_set: The ChangeSet to evaluate
-        config: Optional ConductorConfig for reading limits from settings
+        config: Optional ConductorConfig; defaults to the global singleton.
 
     Returns:
         PolicyResult indicating whether auto-apply is allowed
     """
-    if config is not None:
-        limits = config.change_limits
-        policy = AutoApplyPolicy(
-            max_files=limits.max_files_per_request,
-            max_lines_changed=limits.auto_apply.max_lines,
-        )
-        return policy.evaluate(change_set)
-    return _default_policy.evaluate(change_set)
+    if config is None:
+        from app.config import get_config
+        config = get_config()
+
+    limits = config.change_limits
+    policy = AutoApplyPolicy(
+        max_files=limits.max_files_per_request,
+        max_lines_changed=limits.auto_apply.max_lines,
+    )
+    return policy.evaluate(change_set)
 

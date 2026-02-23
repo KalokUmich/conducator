@@ -30,6 +30,7 @@ import { getPermissionsService } from './services/permissions';
 import { getSessionService } from './services/session';
 import { wrapIdentity, getValidIdentity, getStoredProvider, isStale, SSOProvider } from './services/ssoIdentityCache';
 import { detectWorkspaceLanguages, clearLanguageCache } from './services/languageDetector';
+import { clearProjectMetadataCache } from './services/projectMetadataCollector';
 import { parseStackTrace, resolveFramePaths } from './services/stackTraceParser';
 import { scanWorkspaceTodos, updateWorkspaceTodoInFile, UpdateTodoPayload } from './services/todoScanner';
 import {
@@ -143,7 +144,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // Clear language detection cache when workspace folders change
     context.subscriptions.push(
-        vscode.workspace.onDidChangeWorkspaceFolders(() => clearLanguageCache())
+        vscode.workspace.onDidChangeWorkspaceFolders(() => { clearLanguageCache(); clearProjectMetadataCache(); })
     );
 
     // Detect ngrok URL if ngrok is running (async, non-blocking)
@@ -2940,6 +2941,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 endLine:           message.endLine,
                 question:          message.question,
                 backendUrl,
+                workspaceId:       message.roomId,
                 conductorDb,
                 workspaceFolders:  [...(vscode.workspace.workspaceFolders ?? [])],
                 workspaceConfig:   workspaceConfig  ?? undefined,
@@ -3324,6 +3326,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     `Describe this ${language} code: what it does, its inputs and outputs, ` +
                     `the business scenario it serves, and any key dependencies or side-effects.`,
                 backendUrl,
+                workspaceId:       message.roomId,
                 conductorDb,
                 workspaceFolders:  [...folders],
                 workspaceConfig:   workspaceConfig  ?? undefined,
