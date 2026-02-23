@@ -15,6 +15,8 @@ import {
     FileSnippet,
     ProjectMetadataInput,
     MAX_TOTAL_CHARS,
+    MAX_TOTAL_TOKENS,
+    countTokens,
 } from '../services/xmlPromptAssembler';
 
 // ---------------------------------------------------------------------------
@@ -208,16 +210,20 @@ describe('assembleXmlPrompt — CDATA preservation', () => {
 // ---------------------------------------------------------------------------
 
 describe('assembleXmlPrompt — budget trimming', () => {
+    // Use a very large token budget so these tests only exercise the char budget.
+    const BIG_TOKEN = 999_999;
+
     it('wasTrimmed is false when output fits within budget', () => {
-        const { wasTrimmed } = assembleXmlPrompt(baseInput(), MAX_TOTAL_CHARS);
+        const { wasTrimmed } = assembleXmlPrompt(baseInput(), MAX_TOTAL_CHARS, BIG_TOKEN);
         assert.equal(wasTrimmed, false);
     });
 
-    it('wasTrimmed is true when budget is exceeded', () => {
+    it('wasTrimmed is true when char budget is exceeded', () => {
         const big = 'x'.repeat(200);
         const { wasTrimmed } = assembleXmlPrompt(
             baseInput({ currentFile: snippet('src/app.ts', big, 'current') }),
-            50,   // tiny budget
+            50,        // tiny char budget
+            BIG_TOKEN, // large token budget
         );
         assert.equal(wasTrimmed, true);
     });
@@ -232,6 +238,7 @@ describe('assembleXmlPrompt — budget trimming', () => {
                 relatedFiles: [snippet('src/r.ts',  large, 'related')],
             }),
             MAX,
+            BIG_TOKEN,
         );
         assert.ok(charCount <= MAX, `charCount=${charCount} exceeds MAX=${MAX}`);
         assert.ok(xml.length <= MAX, `xml.length=${xml.length} exceeds MAX=${MAX}`);
@@ -244,7 +251,7 @@ describe('assembleXmlPrompt — budget trimming', () => {
             definition:   snippet('src/d.ts',   large,   'definition'),
             relatedFiles: [snippet('src/r.ts',  large,   'related')],
         });
-        const { xml } = assembleXmlPrompt(input, 800);
+        const { xml } = assembleXmlPrompt(input, 800, BIG_TOKEN);
         // Definition should still be present (but related might be trimmed)
         assert.ok(xml.includes('role="definition"'), 'definition should survive trimming first');
     });
@@ -258,7 +265,7 @@ describe('assembleXmlPrompt — budget trimming', () => {
             relatedFiles: [snippet('src/r.ts',  tiny,  'related')],
         });
         // Very small budget to force trimming
-        const { xml } = assembleXmlPrompt(input, 400);
+        const { xml } = assembleXmlPrompt(input, 400, BIG_TOKEN);
         // All files should still appear (even if trimmed)
         assert.ok(xml.includes('role="current"'));
     });
@@ -269,6 +276,7 @@ describe('assembleXmlPrompt — budget trimming', () => {
                 currentFile: snippet('src/app.ts', 'x'.repeat(500), 'current'),
             }),
             100,
+            BIG_TOKEN,
         );
         if (wasTrimmed && xml.includes('<![CDATA[')) {
             // If CDATA content was trimmed, it should contain the marker
@@ -283,8 +291,43 @@ describe('assembleXmlPrompt — budget trimming', () => {
         // Assemble with and without explicit maxChars — should give identical result.
         const input = baseInput();
         const r1 = assembleXmlPrompt(input);
-        const r2 = assembleXmlPrompt(input, MAX_TOTAL_CHARS);
+        const r2 = assembleXmlPrompt(input, MAX_TOTAL_CHARS, MAX_TOTAL_TOKENS);
         assert.equal(r1.xml, r2.xml);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Token budget
+// ---------------------------------------------------------------------------
+
+describe('assembleXmlPrompt — token budget', () => {
+    it('result includes tokenCount field', () => {
+        const result = assembleXmlPrompt(baseInput());
+        assert.ok(typeof result.tokenCount === 'number');
+        assert.ok(result.tokenCount > 0, 'tokenCount should be positive');
+    });
+
+    it('token budget triggers trimming when char budget is generous', () => {
+        // Large content that fits in 80k chars but exceeds a small token limit.
+        const big = 'function example() { return 42; }\n'.repeat(300);
+        const input = baseInput({
+            currentFile:  snippet('src/app.ts', big, 'current'),
+            relatedFiles: [snippet('src/r.ts', big, 'related')],
+        });
+        // Generous char budget, small token budget
+        const result = assembleXmlPrompt(input, 999_999, 200);
+        assert.ok(result.wasTrimmed, 'should be trimmed when token budget exceeded');
+        assert.ok(result.tokenCount <= 200 + 50, 'token count should be near the budget');
+    });
+
+    it('countTokens returns a positive number for non-empty text', () => {
+        const tokens = countTokens('Hello world, this is a test.');
+        assert.ok(tokens > 0);
+    });
+
+    it('countTokens returns 0 for empty string', () => {
+        const tokens = countTokens('');
+        assert.equal(tokens, 0);
     });
 });
 

@@ -280,3 +280,27 @@ Production Ready       LLM Agent + RAG      Collab UX      Enterprise
 ```
 
 **Recommended order**: ~~1.3 (quick win, config enforcement)~~ ✅ → 1.1 (persistence is critical) → 1.2 (prevents memory leaks) → 2.4 (Git retrieval — reuses existing RAG infra) → 2.1 (LLM agent, now with RAG context) → 2.3 (multi-file, agent is ready) → Phase 3+.
+
+---
+
+## Evaluation Set
+
+Goal: Build a curated set of 20–30 code explanation test cases to track quality regressions and improvements across changes to the context enricher, RAG pipeline, and structured output.
+
+### Recommended Metrics
+
+| Metric | How to measure |
+|--------|---------------|
+| **Structured JSON parse rate** | % of responses that parse into valid `StructuredExplanation` fields (target: >90%) |
+| **Explanation quality** | Human-scored 1–5 rubric on purpose accuracy, completeness, and clarity |
+| **Citation hit rate** | % of RAG results whose `content` is referenced or paraphrased in the explanation |
+| **Latency** | End-to-end time from pipeline start to response, broken down by stage |
+| **Cost** | Token usage (input + output) per explanation |
+
+### Test Case Selection
+
+- Cover all supported languages (Python, TypeScript, Java, Go)
+- Include at least 3 cases per category: single function, class method, cross-file dependency, configuration/infra code
+- Mix simple (< 10 lines) and complex (> 50 lines) selections
+- Include edge cases: decorator-heavy code, deeply nested generics, code with no imports, generated/minified code
+- Store test cases in `tests/evaluation/` with one JSON file per case: `{snippet, file_path, language, expected_topics, expected_dependencies}`

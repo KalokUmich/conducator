@@ -100,6 +100,8 @@ export interface PipelineOutput {
     xmlPrompt:   string;
     /** Wall-clock milliseconds per stage, keyed by stage name. */
     timings:     Record<string, number>;
+    /** Structured explanation fields parsed by the backend (if available). */
+    structured?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,13 +353,13 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
         typeDefinitionSnippets,
         projectMetadata,
     );
-    const { xml: xmlPrompt, wasTrimmed } = assembleXmlPrompt(xmlInput);
+    const { xml: xmlPrompt, wasTrimmed, tokenCount } = assembleXmlPrompt(xmlInput);
     timings['xml_assembly'] = performance.now() - t6;
     if (wasTrimmed) {
-        console.log(`${LOG} [6/8] XML prompt was trimmed to fit 80 k char budget`);
+        console.log(`${LOG} [6/8] XML prompt was trimmed to fit budget`);
     }
     console.log(
-        `${LOG} Stage 6 (XML assembly): ${timings['xml_assembly'].toFixed(1)}ms — ${xmlPrompt.length} chars`,
+        `${LOG} Stage 6 (XML assembly): ${timings['xml_assembly'].toFixed(1)}ms — ${xmlPrompt.length} chars, ~${tokenCount} tokens`,
     );
 
     // -------------------------------------------------------------------------
@@ -366,10 +368,12 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     const t7 = performance.now();
     let explanation = '';
     let model = 'ai';
+    let structured: Record<string, string> | undefined;
     try {
         const result = await _callLlm(xmlPrompt, input);
         explanation = result.explanation;
         model       = result.model;
+        structured  = result.structured;
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`${LOG} [7/8] LLM call failed:`, msg);
@@ -386,7 +390,7 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     const total = Object.values(timings).reduce((a, b) => a + b, 0);
     console.log(`${LOG} Pipeline complete — total=${total.toFixed(1)}ms`);
 
-    return { explanation, model, xmlPrompt, timings };
+    return { explanation, model, xmlPrompt, timings, structured };
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,7 +1132,7 @@ function _buildXmlInput(
 async function _callLlm(
     xmlPrompt: string,
     input:     PipelineInput,
-): Promise<{ explanation: string; model: string }> {
+): Promise<{ explanation: string; model: string; structured?: Record<string, string> }> {
     console.log(`${LOG} [LLM] POST ${input.backendUrl}/context/explain-rich — prompt=${xmlPrompt.length} chars`);
     const response = await fetch(`${input.backendUrl}/context/explain-rich`, {
         method:  'POST',
@@ -1149,5 +1153,17 @@ async function _callLlm(
         throw new Error(`/context/explain-rich returned HTTP ${response.status}: ${body}`);
     }
 
-    return (await response.json()) as { explanation: string; model: string };
+    const data = (await response.json()) as {
+        explanation: string;
+        model: string;
+        structured?: { purpose: string; inputs: string; outputs: string; business_context: string; dependencies: string; gotchas: string } | null;
+    };
+
+    // Flatten the structured object into a simple Record<string, string> for the frontend.
+    let structured: Record<string, string> | undefined;
+    if (data.structured) {
+        structured = { ...data.structured };
+    }
+
+    return { explanation: data.explanation, model: data.model, structured };
 }

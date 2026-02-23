@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 from app.chat.manager import manager
+from app.audit.service import AuditLogService
 
 
 client = TestClient(app)
@@ -28,6 +29,20 @@ def receive_history(ws):
     history = ws.receive_json()
     assert history["type"] == "history"
     return history
+
+
+@pytest.fixture(autouse=True)
+def reset_audit_service():
+    """Use an in-memory AuditLogService for each test.
+
+    Prevents the disconnect handler's delete_room_logs() call from opening
+    the file-based audit_logs.duckdb, which can block if the backend server
+    is running concurrently (DuckDB file lock contention).
+    """
+    AuditLogService.reset_instance()
+    AuditLogService.get_instance(db_path=":memory:")
+    yield
+    AuditLogService.reset_instance()
 
 
 @pytest.fixture(autouse=True)
