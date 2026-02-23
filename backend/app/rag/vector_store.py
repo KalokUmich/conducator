@@ -34,6 +34,7 @@ class ChunkMetadata:
     symbol_name: str = ""
     symbol_type: str = ""  # function | class | method | block
     language: str = ""
+    content: str = ""  # Truncated source code of the chunk
     last_modified: float = 0.0
 
     def to_dict(self) -> dict:

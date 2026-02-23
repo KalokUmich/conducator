@@ -38,6 +38,18 @@ class TestChunkMetadata:
         restored = ChunkMetadata.from_dict(d)
         assert restored == m
 
+    def test_to_dict_roundtrip_with_content(self):
+        m = ChunkMetadata(
+            file_path="a.py", start_line=1, end_line=10,
+            symbol_name="foo", symbol_type="function", language="python",
+            content="def foo():\n    return 42",
+        )
+        d = m.to_dict()
+        assert d["content"] == "def foo():\n    return 42"
+        restored = ChunkMetadata.from_dict(d)
+        assert restored == m
+        assert restored.content == "def foo():\n    return 42"
+
     def test_from_dict_ignores_extra_keys(self):
         d = {"file_path": "a.py", "start_line": 1, "end_line": 5, "extra": "ignored"}
         m = ChunkMetadata.from_dict(d)

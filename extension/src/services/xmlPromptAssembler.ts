@@ -17,9 +17,9 @@
  *
  * Constraints
  * -----------
- * - **Max 80 000 characters total** — snippets are trimmed in reverse-priority
- *   order (related files first, then definition, finally current file) until
- *   the assembled XML fits within the budget.
+ * - **Max 20 000 tokens (primary) / 80 000 characters (secondary)** — snippets
+ *   are trimmed in reverse-priority order (related files first, then definition,
+ *   finally current file) until the assembled XML fits within budget.
  * - **Stable deterministic ordering** — current file is always first, then
  *   definition, then related files in the order supplied by the caller.
  * - **CDATA wrapping** — all code content is wrapped in `<![CDATA[…]]>` so
@@ -27,7 +27,6 @@
  *   A `]]>` sequence inside content is escaped as `]]]]><![CDATA[>`.
  * - **File path attributes** — every `<file>` element carries a `path` attribute
  *   and a `role` attribute (`current` | `definition` | `related`).
- * - **No external dependencies** — pure string manipulation, no DOM.
  *
  * @module services/xmlPromptAssembler
  */
@@ -39,8 +38,47 @@
 /** Hard character budget for the entire assembled XML string. */
 export const MAX_TOTAL_CHARS = 80_000;
 
+/** Token budget — primary constraint (cl100k_base encoding). */
+export const MAX_TOTAL_TOKENS = 20_000;
+
 /** Overhead characters reserved for XML tags, question wrapper, and project section. */
 const TAG_OVERHEAD = 1024;
+
+// ---------------------------------------------------------------------------
+// Token counting (js-tiktoken with safe fallback)
+// ---------------------------------------------------------------------------
+
+import type { Tiktoken } from 'js-tiktoken';
+
+let _encoder: Tiktoken | null = null;
+let _encoderFailed = false;
+
+function _getEncoder(): Tiktoken | null {
+    if (_encoder) return _encoder;
+    if (_encoderFailed) return null;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getEncoding } = require('js-tiktoken') as typeof import('js-tiktoken');
+        _encoder = getEncoding('cl100k_base');
+        return _encoder;
+    } catch {
+        _encoderFailed = true;
+        return null;
+    }
+}
+
+/**
+ * Count tokens using cl100k_base encoding, with a character-based fallback
+ * if the WASM encoder fails to load.
+ */
+export function countTokens(text: string): number {
+    const enc = _getEncoder();
+    if (enc) {
+        return enc.encode(text).length;
+    }
+    // Fallback: ~3.5 chars per token for English/code
+    return Math.ceil(text.length / 3.5);
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -81,10 +119,12 @@ export interface AssemblerInput {
 export interface AssembleResult {
     /** The assembled XML string ready for the LLM. */
     xml: string;
-    /** Whether any snippets were trimmed to fit within MAX_TOTAL_CHARS. */
+    /** Whether any snippets were trimmed to fit within budget. */
     wasTrimmed: boolean;
     /** Number of characters in the final XML. */
     charCount: number;
+    /** Estimated token count of the final XML. */
+    tokenCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,17 +139,19 @@ export interface AssembleResult {
  *   2. `definition`    (if provided)
  *   3. `relatedFiles`  (in supplied order)
  *
- * If the assembled string would exceed `MAX_TOTAL_CHARS`, content is trimmed
- * starting from the lowest-priority items (related files in reverse order,
- * then definition, finally current file).  Trimming truncates the content
- * string and appends a `\n… [truncated]` marker inside the CDATA.
+ * Budget enforcement uses token count as the primary constraint and character
+ * count as a secondary guard. Content is trimmed starting from the
+ * lowest-priority items (related files in reverse order, then definition,
+ * finally current file).
  *
- * @param input    All context snippets and the user question.
- * @param maxChars Character budget (default: MAX_TOTAL_CHARS).
+ * @param input     All context snippets and the user question.
+ * @param maxChars  Character budget (default: MAX_TOTAL_CHARS).
+ * @param maxTokens Token budget (default: MAX_TOTAL_TOKENS).
  */
 export function assembleXmlPrompt(
     input: AssemblerInput,
     maxChars: number = MAX_TOTAL_CHARS,
+    maxTokens: number = MAX_TOTAL_TOKENS,
 ): AssembleResult {
     // ---- Build the ordered list of snippets (stable, deterministic) ----------
     const snippets: FileSnippet[] = [];
@@ -128,8 +170,10 @@ export function assembleXmlPrompt(
 
     for (let attempt = 0; attempt < snippets.length + 1; attempt++) {
         const xml = _assemble(snippets, contents, input.question, projectSection);
-        if (xml.length <= maxChars) {
-            return { xml, wasTrimmed, charCount: xml.length };
+        const tokens = countTokens(xml);
+
+        if (xml.length <= maxChars && tokens <= maxTokens) {
+            return { xml, wasTrimmed, charCount: xml.length, tokenCount: tokens };
         }
         wasTrimmed = true;
 
@@ -138,14 +182,24 @@ export function assembleXmlPrompt(
         const trimIdx = _nextTrimTarget(contents, snippets);
         if (trimIdx === -1) break; // nothing left to trim
 
-        const excess   = xml.length - maxChars + TAG_OVERHEAD;
-        const trimmed  = _trimContent(contents[trimIdx], excess);
+        // Estimate excess in characters. When the token budget is the binding
+        // constraint, convert the token excess to characters using the current
+        // ratio so we trim approximately the right amount.
+        let excessChars: number;
+        if (tokens > maxTokens) {
+            const charsPerToken = xml.length / Math.max(1, tokens);
+            excessChars = Math.ceil((tokens - maxTokens) * charsPerToken) + TAG_OVERHEAD;
+        } else {
+            excessChars = xml.length - maxChars + TAG_OVERHEAD;
+        }
+        const trimmed = _trimContent(contents[trimIdx], excessChars);
         contents[trimIdx] = trimmed;
     }
 
     // Last-resort: return whatever fits in the budget (edge case for huge questions).
     const xml = _assemble(snippets, contents, input.question, projectSection).slice(0, maxChars);
-    return { xml, wasTrimmed: true, charCount: xml.length };
+    const tokenCount = countTokens(xml);
+    return { xml, wasTrimmed: true, charCount: xml.length, tokenCount };
 }
 
 // ---------------------------------------------------------------------------

@@ -86,6 +86,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
+    "js-tiktoken": "^1.0.12",
     "typescript": "^5.3.3",
     "vsls": "^1.0.4753"
   }

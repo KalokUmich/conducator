@@ -38,9 +38,9 @@ summary:
   # Enable AI-powered summarization feature
   enabled: true
   
-  # Default model to use for summarization
+  # Default model to use for summarization and code explanation
   # Must match an id from ai_models below
-  default_model: "claude-sonnet-4-anthropic"
+  default_model: "claude-sonnet-4-6-bedrock"
 
 # =============================================================================
 # AI Provider Settings
@@ -63,6 +63,18 @@ ai_provider_settings:
 # - Use the inference profile ID format: us.anthropic.claude-sonnet-4-20250514-v1:0
 # - Or use models that support single-region: anthropic.claude-3-haiku-20240307-v1:0
 ai_models:
+  - id: "claude-sonnet-4-6-bedrock"
+    provider: "aws_bedrock"
+    model_name: "eu.anthropic.claude-sonnet-4-6"
+    display_name: "Claude Sonnet 4.6 (Bedrock EU)"
+    enabled: true
+
+  - id: "claude-sonnet-4-5-bedrock"
+    provider: "aws_bedrock"
+    model_name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    display_name: "Claude Sonnet 4.5 (Bedrock EU)"
+    enabled: true
+
   - id: "claude-sonnet-4-anthropic"
     provider: "anthropic"
     model_name: "claude-sonnet-4-20250514"
@@ -73,18 +85,6 @@ ai_models:
     provider: "aws_bedrock"
     model_name: "anthropic.claude-3-haiku-20240307-v1:0"
     display_name: "Claude 3 Haiku (Bedrock)"
-    enabled: true
-
-  - id: "claude-sonnet-4-5-bedrock"
-    provider: "aws_bedrock"
-    model_name: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    display_name: "Claude Sonnet 4.5 (Bedrock EU)"
-    enabled: true
-
-  - id: "claude-sonnet-4-6-bedrock"
-    provider: "aws_bedrock"
-    model_name: "eu.anthropic.claude-sonnet-4-6"
-    display_name: "Claude Sonnet 4.6 (Bedrock EU)"
     enabled: true
 
   - id: "qwen3-coder-next-bedrock"
@@ -166,7 +166,7 @@ sso:
   enabled: true
 
   # Your AWS SSO portal start URL (from IAM Identity Center settings)
-  start_url: "https://xxxx.awsapps.com/start"
+  start_url: "https://d-9c67136d70.awsapps.com/start"
 
   # AWS region where your IAM Identity Center is configured
   region: "eu-west-2"

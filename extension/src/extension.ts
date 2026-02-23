@@ -402,6 +402,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     cancelCurrentIndex();
                     activeEmbeddingQueue?.cancel();
                     activeEmbeddingQueue = null;
+                    ragClient?.cancel();
+                    ragClient = null;
+                    if (this._ragBatchTimer) { clearTimeout(this._ragBatchTimer); this._ragBatchTimer = null; }
+                    this._ragPendingChanges.clear();
                     this._stopFileWatcher();
                     // Close Live Share session if active
                     this._closeLiveShare();
@@ -712,6 +716,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         .map(tab => (tab.input instanceof vscode.TabInputText) ? tab.input.uri.fsPath : null)
                         .filter((p): p is string => p !== null);
 
+                    // Start backend RAG reindex in parallel (non-blocking, best-effort).
+                    // This runs independently of the V1 local indexer below.
+                    ragClient = new RagClient(getBackendUrl());
+                    this._sendWorkspaceToRag(wsRoot, roomId).catch(err => {
+                        if (err instanceof Error && err.name === 'AbortError') return;
+                        console.warn('[Conductor][StartSession] RAG reindex failed:', err);
+                    });
+
                     // Run two-phase indexing.  Phase 1 always runs (fast mtime diff).
                     // Phase 2 processes only stale files; embedding only when config available.
                     const indexResult = await indexWorkspace(wsRoot, db, {
@@ -740,12 +752,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols, ` +
                         `${indexResult.embeddingsEnqueued} embeddings enqueued`,
                     );
-
-                    // Send workspace files to backend RAG for reindexing (best-effort).
-                    ragClient = new RagClient(getBackendUrl());
-                    this._sendWorkspaceToRag(wsRoot, roomId).catch(err => {
-                        console.warn('[Conductor][StartSession] RAG reindex failed:', err);
-                    });
 
                     // Start watching for file changes (hot incremental updates).
                     this._startFileWatcher(wsRoot);
@@ -2963,6 +2969,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 relativePath: message.relativePath,
                 startLine:    message.startLine,
                 endLine:      message.endLine,
+                structured:   result.structured,
             });
             const postParams = new URLSearchParams({
                 message_type: 'ai_explanation',
@@ -3146,13 +3153,61 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             }
         }
 
-        if (files.length === 0) return;
+        if (files.length === 0) {
+            console.log('[Conductor][RAG] No files found to reindex');
+            return;
+        }
 
-        console.log(`[Conductor][RAG] Sending ${files.length} files for reindex`);
-        const result = await ragClient.reindex(workspaceId, files);
+        const totalBytes = files.reduce((sum, f) => sum + (f.content?.length ?? 0), 0);
         console.log(
-            `[Conductor][RAG] Reindex complete: ${result.chunks_added} chunks added, ` +
-            `${result.chunks_removed} removed, ${result.files_processed} files processed`,
+            `[Conductor][RAG] Collected ${files.length} files ` +
+            `(${(totalBytes / 1024).toFixed(0)} KB total, workspace=${workspaceId})`,
+        );
+
+        // Split into batches to avoid exceeding ngrok / proxy payload limits.
+        const MAX_BATCH_BYTES = 1_500_000; // ~1.5 MB per request
+        const batches: RagFileChange[][] = [];
+        let currentBatch: RagFileChange[] = [];
+        let currentSize = 0;
+        for (const f of files) {
+            const fSize = (f.content?.length ?? 0) + (f.path.length) + 30; // rough JSON overhead
+            if (currentBatch.length > 0 && currentSize + fSize > MAX_BATCH_BYTES) {
+                batches.push(currentBatch);
+                currentBatch = [];
+                currentSize = 0;
+            }
+            currentBatch.push(f);
+            currentSize += fSize;
+        }
+        if (currentBatch.length > 0) batches.push(currentBatch);
+
+        console.log(`[Conductor][RAG] Sending in ${batches.length} batches`);
+
+        let totalAdded = 0;
+        let totalRemoved = 0;
+        for (let i = 0; i < batches.length; i++) {
+            // Check if cancelled (ragClient nulled on session end).
+            if (!ragClient) {
+                console.log(`[Conductor][RAG] Cancelled at batch ${i + 1}/${batches.length}`);
+                return;
+            }
+            const batch = batches[i];
+            const batchBytes = batch.reduce((s, f) => s + (f.content?.length ?? 0), 0);
+            console.log(
+                `[Conductor][RAG] Batch ${i + 1}/${batches.length}: ` +
+                `${batch.length} files (${(batchBytes / 1024).toFixed(0)} KB)`,
+            );
+            // First batch uses reindex (clears old data), rest use incremental index.
+            const result = i === 0
+                ? await ragClient.reindex(workspaceId, batch)
+                : await ragClient.index(workspaceId, batch);
+            totalAdded += result.chunks_added;
+            totalRemoved += result.chunks_removed;
+        }
+
+        console.log(
+            `[Conductor][RAG] Reindex complete: ${totalAdded} chunks added, ` +
+            `${totalRemoved} removed, ${files.length} files processed`,
         );
     }
 
@@ -3342,6 +3397,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 endLine:      message.endLine,
                 language,
                 model:        result.model,
+                structured:   result.structured,
             });
             const postParams = new URLSearchParams({
                 message_type: 'ai_explanation',
@@ -3430,6 +3486,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols, ` +
                 `${indexResult.embeddingsEnqueued} embeddings enqueued`,
             );
+
+            // 6. Also rebuild the backend-side RAG FAISS index (best-effort).
+            const roomId = getSessionService().getRoomId();
+            if (ragClient && roomId) {
+                this._sendWorkspaceToRag(wsRoot, roomId).catch(err => {
+                    console.warn('[Conductor][RebuildIndex] RAG reindex failed:', err);
+                });
+            }
 
             this._view?.webview.postMessage({
                 command: 'indexRebuildComplete',

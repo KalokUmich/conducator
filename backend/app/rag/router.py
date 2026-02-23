@@ -49,8 +49,13 @@ def set_indexer(indexer: Optional[RagIndexer]) -> None:
 @router.post("/index", response_model=IndexResponse)
 async def index_files(request: IndexRequest) -> IndexResponse | JSONResponse:
     """Incrementally index (upsert or delete) files for a workspace."""
+    logger.info(
+        "[rag/index] Received: workspace=%s files=%d",
+        request.workspace_id, len(request.files),
+    )
     indexer = get_indexer()
     if indexer is None:
+        logger.warning("[rag/index] Indexer not configured — returning 503")
         return JSONResponse(
             {"error": "RAG indexer not configured"},
             status_code=503,
@@ -59,6 +64,10 @@ async def index_files(request: IndexRequest) -> IndexResponse | JSONResponse:
     try:
         files = [f.model_dump() for f in request.files]
         added, removed = indexer.index_files(request.workspace_id, files)
+        logger.info(
+            "[rag/index] Success: workspace=%s added=%d removed=%d",
+            request.workspace_id, added, removed,
+        )
         return IndexResponse(
             chunks_added=added,
             chunks_removed=removed,
@@ -75,8 +84,15 @@ async def index_files(request: IndexRequest) -> IndexResponse | JSONResponse:
 @router.post("/reindex", response_model=IndexResponse)
 async def reindex_workspace(request: ReindexRequest) -> IndexResponse | JSONResponse:
     """Clear and rebuild the index for a workspace."""
+    logger.info(
+        "[rag/reindex] Received: workspace=%s files=%d total_content=%d chars",
+        request.workspace_id,
+        len(request.files),
+        sum(len(f.content or "") for f in request.files),
+    )
     indexer = get_indexer()
     if indexer is None:
+        logger.warning("[rag/reindex] Indexer not configured — returning 503")
         return JSONResponse(
             {"error": "RAG indexer not configured"},
             status_code=503,
@@ -85,6 +101,10 @@ async def reindex_workspace(request: ReindexRequest) -> IndexResponse | JSONResp
     try:
         files = [f.model_dump() for f in request.files]
         added, removed = indexer.reindex(request.workspace_id, files)
+        logger.info(
+            "[rag/reindex] Success: workspace=%s added=%d removed=%d",
+            request.workspace_id, added, removed,
+        )
         return IndexResponse(
             chunks_added=added,
             chunks_removed=removed,

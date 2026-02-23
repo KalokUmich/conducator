@@ -16,6 +16,7 @@ from .vector_store import ChunkMetadata, FaissVectorStore
 logger = logging.getLogger(__name__)
 
 EMBED_BATCH_SIZE = 96
+MAX_CHUNK_CONTENT_CHARS = 2000
 
 # Language detection from file extension
 _EXT_TO_LANG: dict[str, str] = {
@@ -52,8 +53,16 @@ class RagIndexer:
         """Return the store for *workspace_id*, creating or loading as needed."""
         if workspace_id not in self._stores:
             store_dir = self._data_dir / workspace_id
+            logger.info(
+                "[RagIndexer] Creating store: workspace=%s dir=%s dim=%d",
+                workspace_id, store_dir, self._dim,
+            )
             store = FaissVectorStore(dim=self._dim, data_dir=store_dir)
-            store.load()  # no-op if nothing persisted yet
+            loaded = store.load()  # no-op if nothing persisted yet
+            logger.info(
+                "[RagIndexer] Store loaded=%s size=%d",
+                loaded, store.size,
+            )
             self._stores[workspace_id] = store
             self._file_chunks.setdefault(workspace_id, {})
         return self._stores[workspace_id]
@@ -76,6 +85,10 @@ class RagIndexer:
         Returns:
             ``(chunks_added, chunks_removed)`` counts.
         """
+        logger.info(
+            "[RagIndexer] index_files called: workspace=%s file_count=%d",
+            workspace_id, len(files),
+        )
         store = self.get_store(workspace_id)
         file_map = self._file_chunks.setdefault(workspace_id, {})
         total_added = 0
@@ -116,6 +129,11 @@ class RagIndexer:
                     all_chunks.append(chunk)
                     chunk_file_map.append(path)
 
+            logger.info(
+                "[RagIndexer] Chunked %d files into %d chunks",
+                len(upsert_files), len(all_chunks),
+            )
+
             if all_chunks:
                 # Generate chunk IDs
                 # Track per-file chunk counters
@@ -127,6 +145,12 @@ class RagIndexer:
                     chunk_ids.append(_generate_chunk_id(fpath, idx))
 
                 # Embed in batches
+                logger.info(
+                    "[RagIndexer] Embedding %d chunks (%d batches of %d)...",
+                    len(all_chunks),
+                    (len(all_chunks) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE,
+                    EMBED_BATCH_SIZE,
+                )
                 vectors = self._embed_chunks(all_chunks)
 
                 if vectors and len(vectors) == len(all_chunks):
@@ -139,6 +163,7 @@ class RagIndexer:
                             symbol_name=c.symbol_name,
                             symbol_type=c.symbol_type,
                             language=c.language,
+                            content=c.content[:MAX_CHUNK_CONTENT_CHARS],
                         )
                         for c in all_chunks
                     ]
@@ -154,10 +179,20 @@ class RagIndexer:
                         "[RagIndexer] Indexed %d chunks for workspace %s",
                         len(chunk_ids), workspace_id,
                     )
+                else:
+                    logger.warning(
+                        "[RagIndexer] Embedding returned %d vectors for %d chunks — skipping store",
+                        len(vectors) if vectors else 0, len(all_chunks),
+                    )
 
         # Persist after indexing
+        logger.info(
+            "[RagIndexer] Persisting index: store_size=%d data_dir=%s",
+            store.size, store._data_dir,
+        )
         try:
             store.save()
+            logger.info("[RagIndexer] Index persisted successfully")
         except Exception as exc:
             logger.warning("[RagIndexer] Failed to persist index: %s", exc)
 
@@ -177,12 +212,21 @@ class RagIndexer:
         Returns:
             ``(chunks_added, chunks_removed)`` counts.
         """
+        logger.info(
+            "[RagIndexer] reindex called: workspace=%s file_count=%d",
+            workspace_id, len(files),
+        )
         store = self.get_store(workspace_id)
         old_count = store.size
+        logger.info("[RagIndexer] Clearing old store (had %d vectors)", old_count)
         store.clear()
         self._file_chunks[workspace_id] = {}
 
         added, _ = self.index_files(workspace_id, files)
+        logger.info(
+            "[RagIndexer] reindex done: workspace=%s added=%d removed=%d",
+            workspace_id, added, old_count,
+        )
         return added, old_count
 
     # ------------------------------------------------------------------
@@ -244,7 +288,7 @@ class RagIndexer:
                 end_line=meta.end_line,
                 symbol_name=meta.symbol_name,
                 symbol_type=meta.symbol_type,
-                content="",  # Content not stored in FAISS; caller can read file
+                content=meta.content,
                 score=score,
                 language=meta.language,
             ))
@@ -272,13 +316,19 @@ class RagIndexer:
 
         for i in range(0, len(texts), EMBED_BATCH_SIZE):
             batch = texts[i:i + EMBED_BATCH_SIZE]
+            batch_num = i // EMBED_BATCH_SIZE + 1
+            total_batches = (len(texts) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
             try:
+                logger.info(
+                    "[RagIndexer] Embedding batch %d/%d (%d texts)",
+                    batch_num, total_batches, len(batch),
+                )
                 vectors = svc.embed(batch, input_type="search_document")
                 all_vectors.extend(vectors)
             except Exception as exc:
                 logger.error(
-                    "[RagIndexer] Embedding batch %d-%d failed: %s",
-                    i, i + len(batch), exc,
+                    "[RagIndexer] Embedding batch %d/%d failed: %s",
+                    batch_num, total_batches, exc,
                 )
                 return []  # Abort on failure
 

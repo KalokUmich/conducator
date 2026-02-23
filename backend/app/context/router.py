@@ -1,13 +1,20 @@
-"""Context enrichment router — POST /context/explain."""
+"""Context enrichment router — POST /context/explain-rich."""
+import json
 import logging
 import re
+from typing import Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from app.ai_provider.resolver import get_resolver
+from app.rag.router import get_indexer
+
+from .schemas import ExplainRichRequest, ExplainResponse, StructuredExplanation
+
 # System instruction used for the /explain-rich endpoint.
-# Keeps the user-prompt (XML context) clean and puts all behavioural
-# guidance here so the model knows its role and expected output format.
+# Quality-first: rich explanation with structured JSON as the preferred format.
+# The parser handles both JSON and plain markdown, so the model can choose.
 _EXPLAIN_SYSTEM = (
     "You are a senior software engineer reviewing code for your team. "
     "You will receive code context inside XML tags (<context>, <file>, <question>). "
@@ -21,100 +28,18 @@ _EXPLAIN_SYSTEM = (
     "• Key dependencies — external services, injected objects, or patterns relied upon\n"
     "• Gotchas — error paths, edge cases, or non-obvious behaviour worth knowing\n\n"
     "Be specific, not generic. Avoid restating the code verbatim. "
-    "Write in plain English using short paragraphs or a tight bullet list. "
     "You may use **bold** for emphasis, `backticks` for inline code references, "
-    "and - bullet lists. Do NOT use markdown headers (#). "
-    "Aim for 5–10 sentences total."
+    "and - bullet lists. Aim for 5–10 sentences total.\n\n"
+    "PREFERRED FORMAT: Return a JSON object with these keys so the UI can render "
+    "labeled sections. Use empty string for fields that do not apply:\n"
+    '{"purpose": "...", "inputs": "...", "outputs": "...", '
+    '"business_context": "...", "dependencies": "...", "gotchas": "..."}\n'
+    "If you cannot produce valid JSON, a plain markdown response is acceptable."
 )
-
-from app.ai_provider.resolver import get_resolver
-from app.rag.router import get_indexer
-
-from .enricher import ContextEnricher
-from .schemas import ExplainRequest, ExplainRichRequest, ExplainResponse
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/context", tags=["context"])
-
-
-@router.post("/explain", response_model=ExplainResponse)
-async def explain_code(request: ExplainRequest) -> ExplainResponse:
-    """Explain a code snippet using AI with workspace context enrichment.
-
-    The extension sends the selected code plus optional context gathered by
-    ``ContextGatherer`` (file content, surrounding lines, imports, LSP data).
-    The backend fills in any missing fields and calls the active AI provider.
-
-    Args:
-        request: ExplainRequest with snippet, file path, and optional context.
-
-    Returns:
-        ExplainResponse with the AI explanation.
-
-    Example::
-
-        POST /context/explain
-        {
-            "room_id": "abc-123",
-            "snippet": "def process(data):\\n    return data.split(',')",
-            "file_path": "app/processor.py",
-            "line_start": 10,
-            "line_end": 11,
-            "language": "python",
-            "surrounding_code": "9: # Process raw input\\n10: def process...",
-            "imports": ["import re", "from typing import List"],
-            "containing_function": "def process(data):"
-        }
-    """
-    logger.info(
-        "[context/explain] Received request: file=%s lines=%d-%d lang=%s "
-        "file_content=%s imports=%d related_files=%d",
-        request.file_path, request.line_start, request.line_end, request.language,
-        f"{len(request.file_content)} chars" if request.file_content else "NONE",
-        len(request.imports),
-        len(request.related_files),
-    )
-    logger.debug(
-        "[context/explain] Snippet:\n%s",
-        request.snippet,
-    )
-
-    resolver = get_resolver()
-    if resolver is None:
-        logger.warning("[context/explain] AI resolver is None — no providers configured")
-        return JSONResponse(
-            {"error": "AI provider not available"},
-            status_code=503,
-        )
-
-    # Prefer the cached active provider; only re-resolve as a fallback.
-    provider = resolver.get_active_provider() or resolver.resolve()
-    if provider is None:
-        logger.warning("[context/explain] No healthy AI provider")
-        return JSONResponse(
-            {"error": "No healthy AI provider found"},
-            status_code=503,
-        )
-
-    logger.info("[context/explain] Using provider: %s model: %s", type(provider).__name__, getattr(provider, "model_id", "unknown"))
-
-    try:
-        enricher = ContextEnricher(provider=provider, rag_indexer=get_indexer())
-        response = enricher.explain(request)
-        logger.info(
-            "[context/explain] Success: %s lines %d-%d via %s, explanation=%d chars",
-            request.file_path, request.line_start, request.line_end,
-            getattr(provider, "model_id", "unknown"),
-            len(response.explanation),
-        )
-        return response
-    except Exception as exc:
-        logger.exception("[context/explain] Explanation failed: %s", exc)
-        return JSONResponse(
-            {"error": f"Explanation failed: {exc}"},
-            status_code=500,
-        )
 
 
 @router.post("/explain-rich", response_model=ExplainResponse)
@@ -196,27 +121,31 @@ async def explain_rich(request: ExplainRichRequest) -> ExplainResponse:
         logger.info("[context/explain-rich] RAG: no workspace_id provided — skipped")
 
     try:
-        explanation = provider.call_model(
+        raw = provider.call_model(
             prompt,
             max_tokens=4096,
             system=_EXPLAIN_SYSTEM,
         )
         logger.info(
-            "[context/explain-rich] Success: file=%s lines=%d-%d model=%s explanation_len=%d",
+            "[context/explain-rich] Success: file=%s lines=%d-%d model=%s raw_len=%d",
             request.file_path, request.line_start, request.line_end,
-            model_id, len(explanation),
+            model_id, len(raw),
         )
         logger.debug(
             "[context/explain-rich] Full LLM response:\n%s",
-            explanation,
+            raw,
         )
+
+        explanation, structured = _parse_structured_response(raw)
+
         return ExplainResponse(
-            explanation=explanation.strip(),
+            explanation=explanation,
             model=model_id,
             language=request.language,
             file_path=request.file_path,
             line_start=request.line_start,
             line_end=request.line_end,
+            structured=structured,
         )
     except Exception as exc:
         logger.exception("[context/explain-rich] Explanation failed: %s", exc)
@@ -229,6 +158,124 @@ async def explain_rich(request: ExplainRichRequest) -> ExplainResponse:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_FIELD_LABELS = {
+    "purpose": "Purpose",
+    "inputs": "Inputs",
+    "outputs": "Outputs",
+    "business_context": "Business Context",
+    "dependencies": "Dependencies",
+    "gotchas": "Gotchas",
+}
+
+
+def _parse_structured_response(raw: str) -> tuple[str, Optional[StructuredExplanation]]:
+    """Parse the LLM's raw response into structured fields and markdown fallback.
+
+    Handles three common LLM output shapes:
+      1. Clean JSON: ``{"purpose": "...", ...}``
+      2. Fenced JSON: ````json\\n{...}\\n````
+      3. JSON embedded in prose: ``Here is the analysis:\\n{...}\\nAdditional notes...``
+
+    Returns:
+        ``(explanation_markdown, structured)`` — on parse failure the original
+        text is returned as-is with ``structured=None``.
+    """
+    data = _extract_json_object(raw)
+    if data is None:
+        logger.info("[context/explain-rich] Response is not JSON — returning as raw markdown")
+        return (raw.strip(), None)
+
+    try:
+        structured = StructuredExplanation(**{
+            k: str(data.get(k, "")) for k in StructuredExplanation.model_fields
+        })
+    except Exception:
+        logger.warning("[context/explain-rich] JSON parsed but fields invalid — returning raw")
+        return (raw.strip(), None)
+
+    # Build a markdown fallback from the structured fields
+    parts: list[str] = []
+    for field, label in _FIELD_LABELS.items():
+        value = getattr(structured, field, "")
+        if value:
+            parts.append(f"**{label}** — {value}")
+    explanation = "\n\n".join(parts) if parts else raw.strip()
+
+    return (explanation, structured)
+
+
+def _extract_json_object(raw: str) -> dict | None:
+    """Extract the first valid JSON object from *raw*, tolerating surrounding text.
+
+    Strategy (tried in order):
+      1. ``json.loads`` on the full stripped text (fast path for clean JSON).
+      2. Strip markdown code fences (```json ... ```) and retry.
+      3. Scan for the first ``{`` and find its matching ``}`` using a
+         brace-depth counter, then parse the substring.  This handles the
+         common case where the LLM adds prose before or after the JSON.
+    """
+    text = raw.strip()
+
+    # --- Strategy 1: full text ---
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # --- Strategy 2: strip markdown fences ---
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl >= 0:
+            inner = text[first_nl + 1:]
+            if inner.rstrip().endswith("```"):
+                inner = inner.rstrip()[:-3].rstrip()
+            try:
+                obj = json.loads(inner)
+                if isinstance(obj, dict):
+                    return obj
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    # --- Strategy 3: find first { … } block via brace counting ---
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    obj = json.loads(candidate)
+                    if isinstance(obj, dict):
+                        return obj
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                break
+
+    return None
+
 
 def _analyse_prompt_structure(prompt: str) -> str:
     """Parse an XML prompt and return a human-readable breakdown.
@@ -297,19 +344,31 @@ def _fetch_rag_section(
         if not filtered:
             return None
 
+        MAX_RAG_SNIPPET_CHARS = 1500
         parts: list[str] = []
         for item in filtered[:5]:
             symbol_attr = ""
             if item.symbol_name:
                 symbol_attr = f' symbol="{item.symbol_name}" type="{item.symbol_type}"'
+
+            # Include actual code content when available
+            if item.content:
+                snippet_content = item.content[:MAX_RAG_SNIPPET_CHARS]
+                if len(item.content) > MAX_RAG_SNIPPET_CHARS:
+                    snippet_content += "\n... [truncated]"
+                safe_content = snippet_content.replace("]]>", "]]]]><![CDATA[>")
+                inner = f"\n<![CDATA[{safe_content}]]>\n"
+            else:
+                inner = f"\n(semantic match — lines {item.start_line}–{item.end_line})\n"
+
             parts.append(
                 f'<rag-result file="{item.file_path}" '
                 f'lines="{item.start_line}-{item.end_line}" '
                 f'score="{item.score:.3f}"'
                 f'{symbol_attr} '
                 f'language="{item.language}">'
-                f"\n(semantic match — lines {item.start_line}–{item.end_line})"
-                f"\n</rag-result>"
+                f"{inner}"
+                f"</rag-result>"
             )
 
         logger.info(
