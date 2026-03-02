@@ -7,7 +7,7 @@
 <a name="english"></a>
 ## English
 
-Conductor is a VS Code collaboration extension plus a FastAPI backend for team chat, Live Share session flow, file sharing, and AI-assisted decision/code workflows.
+Conductor is a VS Code collaboration extension plus a FastAPI backend for team chat, Git workspace management, file sharing, and AI-assisted decision/code workflows.
 
 ### Current Capabilities
 
@@ -15,10 +15,18 @@ Conductor is a VS Code collaboration extension plus a FastAPI backend for team c
   - `Idle`
   - `BackendDisconnected` (join-only mode)
   - `ReadyToHost`
+  - `CreatingWorkspace` (provisioning a Git worktree on the backend)
   - `Hosting`
   - `Joining`
   - `Joined`
-- Live Share host/join flow with conflict checks before starting a new host session; End Chat auto-closes the active Live Share session
+- Git Workspace management replacing Live Share:
+  - Per-room bare repo + worktree isolation (each room gets its own Git branch `session/{room_id}`)
+  - Mode A: token authentication via GIT_ASKPASS (user provides a Personal Access Token)
+  - Mode B: delegate authentication (VS Code extension performs Git operations on behalf of the backend)
+  - File-sync broadcast with debouncing; commit and push from backend
+  - **FileSystemProvider** (`conductor://` URI scheme): remote worktree files appear in VS Code explorer as if local; full read/write/delete/rename support backed by the backend REST API
+  - **WorkspacePanel**: 5-step native VS Code input wizard for workspace creation (no WebView)
+  - **WorkspaceClient**: typed HTTP client for all `/workspace/` endpoints
 - Real-time WebSocket chat with:
   - reconnect recovery (`since`)
   - typing indicators
@@ -35,248 +43,141 @@ Conductor is a VS Code collaboration extension plus a FastAPI backend for team c
   - audit logging (`POST /audit/log-apply`)
 - AI provider workflow:
   - provider health/status (`GET /ai/status`)
-  - four-stage summary pipeline (`POST /ai/summarize`): classification, targeted summary, code relevance scoring, item extraction
-  - code prompt generation (`POST /ai/code-prompt`)
-  - selective code prompt generation (`POST /ai/code-prompt/selective`)
-  - AI message posting to room (`POST /chat/{room_id}/ai-message`)
+  - four-step provider selection + confirmation UI
+  - streaming inference (`POST /ai/infer`)
+- Workspace code search:
+  - `GET /workspace/{room_id}/search?q=...` — full-text search across all files in a session worktree
+  - results include file path, line number, and matched line content
+  - VS Code extension `WorkspaceClient.searchCode()` method
+  - keyboard shortcut `Ctrl+Shift+F` / `Cmd+Shift+F` opens inline search panel in WebView
 
-### Implemented vs Not Fully Wired
+### Architecture
 
-Implemented end-to-end:
-- Session FSM + host/join UX (End Chat auto-closes Live Share)
-- Chat/file/snippet workflow (file upload with duplicate detection and retry logic)
-- AI summarize + code-prompt generation in extension UI
-
-Still limited:
-- `POST /generate-changes` is deterministic MockAgent output (not LLM edits)
-- Backend supports `POST /ai/code-prompt/selective`, extension currently calls legacy `POST /ai/code-prompt`
-- AI message posting sends a fixed `model_name` label (TODO in extension code)
-
-### Architecture (High Level)
-
-```text
-VS Code Extension (TypeScript)
-  ├─ WebView (chat.html)
-  ├─ SessionService / PermissionsService
-  ├─ ConductorStateMachine + Controller
-  └─ DiffPreviewService
-             │
-             │ REST + WebSocket
-             ▼
-Backend (FastAPI)
-  ├─ /ws/chat/{room_id} + /chat/*
-  ├─ /ai/* (status, summarize, code prompt)
-  ├─ /auth/* (AWS SSO + Google OAuth login)
-  ├─ /generate-changes
-  ├─ /policy/*
-  ├─ /audit/*
-  └─ /files/*
 ```
-
-### Role Models (Important)
-
-1. Local extension role (`aiCollab.role`): `lead` / `member`
-- Controls extension UI feature access.
-
-2. Backend session role (WebSocket assigned): `host` / `guest`
-- Backend is authoritative for sensitive actions (for example, ending a session).
-
-### Project Structure
-
-```text
-.
-├─ backend/
-│  ├─ app/
-│  │  ├─ chat/
-│  │  ├─ ai_provider/
-│  │  ├─ agent/
-│  │  ├─ auth/
-│  │  ├─ policy/
-│  │  ├─ audit/
-│  │  └─ files/
-│  └─ tests/
-├─ extension/
-│  ├─ src/
-│  └─ media/
-├─ docs/
-│  ├─ ARCHITECTURE.md
-│  └─ GUIDE.md
-├─ config/
-│  ├─ conductor.secrets.yaml.example
-│  └─ conductor.settings.yaml.example
-├─ shared/
-│  └─ changeset.schema.json
-└─ TESTING.md
+extension/          VS Code extension (TypeScript)
+  src/
+    panels/         WebView panels (CollabPanel, WorkspacePanel)
+    services/       FSM, WebSocket, FileSystemProvider, WorkspaceClient
+    commands/       VS Code command handlers
+backend/            FastAPI server (Python)
+  routers/          HTTP route handlers
+  services/         Business logic (workspace, auth, AI)
+  models/           Pydantic schemas
 ```
 
 ### Quick Start
 
-1. Install dependencies:
-
 ```bash
-make setup
-```
+# Backend
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload
 
-2. Start backend:
-
-```bash
-make run-backend
-```
-
-- Swagger: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-3. Start extension development:
-
-```bash
+# Extension
 cd extension
+npm install
 npm run compile
+# Press F5 in VS Code to launch Extension Development Host
 ```
 
-Then debug in VS Code:
-- Preferred: open repo root and press `F5`, choose `Run VS Code Extension (extension/)`.
-- Alternative: open `extension/` folder directly and press `F5`.
+### Testing
 
-4. Package extension:
+See [TESTING.md](TESTING.md) for the full test guide.
 
 ```bash
-make package
+# Backend
+cd backend && pytest
+
+# Extension
+cd extension && npm test
 ```
-
-Or manually:
-
-```bash
-cd extension
-npx @vscode/vsce package
-```
-
-Generates `ai-collab-0.0.1.vsix`.
-
-### Docs
-
-- Backend guide: `backend/README.md`
-- Extension guide: `extension/README.md`
-- Architecture details: `docs/ARCHITECTURE.md`
-- Testing guide: `TESTING.md`
 
 ---
 
 <a name="中文"></a>
 ## 中文
 
-Conductor 是一个 VS Code 协作扩展 + FastAPI 后端，提供团队聊天、Live Share 会话流程、文件共享，以及 AI 决策/代码协作流程。
+Conductor 是一个 VS Code 协作扩展加 FastAPI 后端，支持团队聊天、Git 工作区管理、文件共享和 AI 辅助决策/代码工作流。
 
-### 当前能力
+### 当前功能
 
-- 基于状态机的会话生命周期：
-  - `Idle`
+- VS Code WebView 协作面板，FSM 驱动的会话生命周期：
+  - `Idle`（空闲）
   - `BackendDisconnected`（仅加入模式）
-  - `ReadyToHost`
-  - `Hosting`
-  - `Joining`
-  - `Joined`
-- Live Share 主持/加入流程，启动新会话前会做冲突检查；结束会话时自动关闭 Live Share
-- WebSocket 实时聊天：
-  - 断线恢复（`since`）
-  - 输入状态
+  - `ReadyToHost`（准备托管）
+  - `CreatingWorkspace`（在后端配置 Git worktree）
+  - `Hosting`（托管中）
+  - `Joining`（加入中）
+  - `Joined`（已加入）
+- Git 工作区管理（替代 Live Share）：
+  - 每个房间独立的裸仓库 + worktree 隔离（每个房间获得独立 Git 分支 `session/{room_id}`）
+  - 模式 A：通过 GIT_ASKPASS 进行令牌认证（用户提供个人访问令牌）
+  - 模式 B：委托认证（VS Code 扩展代表后端执行 Git 操作）
+  - 文件同步广播（带防抖）；从后端提交和推送
+  - **FileSystemProvider**（`conductor://` URI 方案）：远程 worktree 文件在 VS Code 资源管理器中显示为本地文件；完整的读/写/删除/重命名支持，由后端 REST API 支持
+  - **WorkspacePanel**：5 步原生 VS Code 输入向导（无 WebView）
+  - **WorkspaceClient**：所有 `/workspace/` 端点的类型化 HTTP 客户端
+- 实时 WebSocket 聊天：
+  - 重连恢复（`since`）
+  - 输入指示器
   - 已读回执
   - 消息去重
-  - 历史分页
-- 文件上传/下载（20MB 上限，上传由 extension host 代理，重复文件检测，失败重试）
-- 代码片段分享与编辑器定位跳转
-- 变更审查流程：
+  - 分页历史
+- 文件上传/下载（20MB 限制，扩展主机上传代理，重复检测，重试逻辑）
+- 代码片段共享 + 编辑器导航
+- 变更审查工作流：
   - `POST /generate-changes`（MockAgent）
-  - 策略评估（`POST /policy/evaluate-auto-apply`）
-  - 单条 Diff 预览
+  - 策略检查（`POST /policy/evaluate-auto-apply`）
+  - 每个变更的差异预览
   - 顺序应用/跳过
   - 审计日志（`POST /audit/log-apply`）
-- AI 流程：
-  - Provider 状态（`GET /ai/status`）
-  - 四阶段摘要（`POST /ai/summarize`）：分类、定向摘要、代码相关性评分、条目提取
-  - 代码提示词生成（`POST /ai/code-prompt`）
-  - 选择性代码提示词生成（`POST /ai/code-prompt/selective`）
-  - AI 消息入房间（`POST /chat/{room_id}/ai-message`）
+- AI 提供者工作流：
+  - 提供者健康/状态（`GET /ai/status`）
+  - 四步提供者选择 + 确认界面
+  - 流式推理（`POST /ai/infer`）
+- 工作区代码搜索：
+  - `GET /workspace/{room_id}/search?q=...` — 在会话 worktree 的所有文件中进行全文搜索
+  - 结果包括文件路径、行号和匹配行内容
+  - VS Code 扩展 `WorkspaceClient.searchCode()` 方法
+  - 键盘快捷键 `Ctrl+Shift+F` / `Cmd+Shift+F` 在 WebView 中打开内联搜索面板
 
-### 已实现与未完全接入
+### 架构
 
-已实现：
-- 会话状态机 + Host/Guest 交互（结束会话自动关闭 Live Share）
-- 聊天/文件/代码片段流程（文件上传含重复检测与失败重试）
-- 扩展端 AI 摘要与代码提示词流程
-
-仍有限制：
-- `POST /generate-changes` 仍是确定性 MockAgent，不是 LLM 实时改码
-- 后端已支持 `POST /ai/code-prompt/selective`，扩展目前仍调用旧的 `POST /ai/code-prompt`
-- AI 消息写回聊天时 `model_name` 仍为固定值（extension 代码中有 TODO）
-
-### 架构概览
-
-```text
-VS Code Extension (TypeScript)
-  ├─ WebView (chat.html)
-  ├─ SessionService / PermissionsService
-  ├─ ConductorStateMachine + Controller
-  └─ DiffPreviewService
-             │
-             │ REST + WebSocket
-             ▼
-Backend (FastAPI)
-  ├─ /ws/chat/{room_id} + /chat/*
-  ├─ /ai/*（status/summarize/code-prompt）
-  ├─ /auth/*（AWS SSO + Google OAuth 登录）
-  ├─ /generate-changes
-  ├─ /policy/*
-  ├─ /audit/*
-  └─ /files/*
 ```
-
-### 角色模型（重要）
-
-1. 扩展本地角色（`aiCollab.role`）：`lead` / `member`
-- 控制扩展 UI 功能入口。
-
-2. 后端会话角色（WebSocket 连接后分配）：`host` / `guest`
-- 敏感操作（如结束会话）以后端判定为准。
+extension/          VS Code 扩展（TypeScript）
+  src/
+    panels/         WebView 面板（CollabPanel、WorkspacePanel）
+    services/       FSM、WebSocket、FileSystemProvider、WorkspaceClient
+    commands/       VS Code 命令处理器
+backend/            FastAPI 服务器（Python）
+  routers/          HTTP 路由处理器
+  services/         业务逻辑（工作区、认证、AI）
+  models/           Pydantic 模式
+```
 
 ### 快速开始
 
-1. 安装依赖：
-
 ```bash
-make setup
-```
+# 后端
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload
 
-2. 启动后端：
-
-```bash
-make run-backend
-```
-
-- Swagger: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-3. 启动扩展开发：
-
-```bash
+# 扩展
 cd extension
+npm install
 npm run compile
+# 在 VS Code 中按 F5 启动扩展开发主机
 ```
 
-然后在 VS Code 调试：
-- 推荐：打开仓库根目录，按 `F5`，选择 `Run VS Code Extension (extension/)`
-- 备选：直接打开 `extension/` 后按 `F5`
+### 测试
 
-4. 打包扩展：
+查看 [TESTING.md](TESTING.md) 了解完整测试指南。
 
 ```bash
-make package
+# 后端
+cd backend && pytest
+
+# 扩展
+cd extension && npm test
 ```
-
-或手动执行：
-
-```bash
-cd extension
-npx @vscode/vsce package
-```
-
-会生成 `ai-collab-0.0.1.vsix`。

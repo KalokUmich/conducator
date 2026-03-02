@@ -1,616 +1,198 @@
-"""Configuration loader for Conductor backend.
+"""Conducator application configuration.
 
-This module provides YAML-based configuration loading with Pydantic validation.
-Configuration is split into two files:
-    - conductor.secrets.yaml: Contains API keys and secrets (gitignored)
-    - conductor.settings.yaml: Contains all other settings (can be committed)
+Loads settings from two YAML files:
+  * conductor.settings.yaml  — non-secret configuration
+  * conductor.secrets.yaml   — secrets (never committed)
 
-Configuration file search order (for each file type):
-    1. ./config/conductor.{secrets,settings}.yaml (current directory)
-    2. ./conductor.{secrets,settings}.yaml (current directory)
-    3. ../config/conductor.{secrets,settings}.yaml (parent directory)
-    4. ~/.conductor/conductor.{secrets,settings}.yaml (user home)
-
-Example:
-    >>> from app.config import get_config
-    >>> config = get_config()
-    >>> print(config.server.port)  # 8000
+New in this version:
+  * GitWorkspaceSettings — git worktree management
+  * CodeSearchSettings   — CocoIndex code search
+  * _inject_embedding_env_vars() helper
 """
+from __future__ import annotations
+
 import logging
+import os
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-# =============================================================================
-# Configuration Models (Pydantic)
-# =============================================================================
+SETTINGS_FILE = Path("conductor.settings.yaml")
+SECRETS_FILE  = Path("conductor.secrets.yaml")
 
 
-class ServerConfig(BaseModel):
-    """Backend server configuration.
-
-    Attributes:
-        host: Server hostname (default: localhost).
-        port: Server port (default: 8000).
-        public_url: Public URL for external access (e.g., ngrok URL).
-    """
-    host: str = "localhost"
-    port: int = 8000
-    public_url: str = ""
-
-
-class NgrokSettingsConfig(BaseModel):
-    """Ngrok tunnel settings (non-secrets).
-
-    Attributes:
-        region: Ngrok region (us, eu, ap, au, sa, jp, in).
-        enabled: Whether to enable ngrok tunnel on startup.
-    """
-    region: str = "us"
-    enabled: bool = False
-
-
-class NgrokSecretsConfig(BaseModel):
-    """Ngrok secrets configuration.
-
-    Attributes:
-        authtoken: Ngrok authentication token (secret).
-    """
-    authtoken: str = ""
-
-
-class AutoApplyConfig(BaseModel):
-    """Auto-apply settings for automatic code change application.
-
-    Attributes:
-        enabled: Enable auto-apply by default.
-        max_lines: Maximum lines for auto-apply (larger changes need review).
-    """
-    enabled: bool = False
-    max_lines: int = 50
-
-
-class ChangeLimitsConfig(BaseModel):
-    """Limits for code change generation.
-
-    Attributes:
-        max_files_per_request: Maximum files per request.
-        max_lines_per_file: Maximum lines changed per file.
-        max_total_lines: Maximum total lines per request.
-        auto_apply: Auto-apply configuration.
-    """
-    max_files_per_request: int = 10
-    max_lines_per_file: int = 500
-    max_total_lines: int = 2000
-    auto_apply: AutoApplyConfig = AutoApplyConfig()
-
-
-class SSOConfig(BaseModel):
-    """AWS SSO (IAM Identity Center) configuration.
-
-    Attributes:
-        enabled: Whether SSO login is enabled.
-        start_url: AWS SSO portal start URL (e.g. https://d-xxxxxxxxxx.awsapps.com/start).
-        region: AWS region for SSO OIDC service.
-    """
-    enabled: bool = False
-    start_url: str = ""
-    region: str = "us-east-1"
-
-
-class GoogleSSOConfig(BaseModel):
-    """Google OAuth SSO settings (non-secret).
-
-    Attributes:
-        enabled: Whether Google SSO login is enabled.
-    """
-    enabled: bool = False
-
-
-class GoogleSSOSecretsConfig(BaseModel):
-    """Google OAuth SSO secrets.
-
-    Attributes:
-        client_id: Google OAuth client ID.
-        client_secret: Google OAuth client secret.
-    """
-    client_id: str = ""
-    client_secret: str = ""
-
-
-class SessionConfig(BaseModel):
-    """Chat session configuration.
-
-    Attributes:
-        timeout_minutes: Session timeout (0 = no timeout).
-        max_participants: Maximum users per room.
-    """
-    timeout_minutes: int = 0
-    max_participants: int = 10
-
-
-class LoggingConfig(BaseModel):
-    """Logging and audit configuration.
-
-    Attributes:
-        level: Log level (debug, info, warning, error).
-        audit_enabled: Enable DuckDB audit logging.
-        audit_path: Path to audit log database file.
-    """
-    level: str = "info"
-    audit_enabled: bool = True
-    audit_path: str = "audit_logs.duckdb"
-
-
-# =============================================================================
-# AI Provider Secrets Configuration (should be in gitignored secrets file)
-# =============================================================================
-
-
-class AnthropicSecretsConfig(BaseModel):
-    """Anthropic API secrets configuration.
-
-    Attributes:
-        api_key: Anthropic API key (starts with sk-ant-...).
-    """
-    api_key: str = ""
-
-
-class AWSBedrockSecretsConfig(BaseModel):
-    """AWS Bedrock secrets configuration.
-
-    Attributes:
-        access_key_id: AWS access key ID.
-        secret_access_key: AWS secret access key.
-        session_token: Optional AWS session token for temporary credentials.
-        region: AWS region for Bedrock service.
-    """
-    access_key_id: str = ""
-    secret_access_key: str = ""
-    session_token: str = ""
-    region: str = "us-east-1"
-
-
-class OpenAISecretsConfig(BaseModel):
-    """OpenAI API secrets configuration.
-
-    Attributes:
-        api_key: OpenAI API key (starts with sk-...).
-        organization: Optional organization ID.
-    """
-    api_key: str = ""
-    organization: str = ""
-
-
-class AIProvidersSecretsConfig(BaseModel):
-    """AI providers secrets configuration.
-
-    This section contains API keys and should be in conductor.secrets.yaml.
-
-    Attributes:
-        anthropic: Anthropic API secrets.
-        aws_bedrock: AWS Bedrock secrets.
-        openai: OpenAI API secrets.
-    """
-    anthropic: AnthropicSecretsConfig = AnthropicSecretsConfig()
-    aws_bedrock: AWSBedrockSecretsConfig = AWSBedrockSecretsConfig()
-    openai: OpenAISecretsConfig = OpenAISecretsConfig()
-
-
-# =============================================================================
-# Secrets Config (conductor.secrets.yaml)
-# =============================================================================
-
-
-class SecretsConfig(BaseModel):
-    """All secrets configuration (conductor.secrets.yaml).
-
-    This file should be gitignored and contains all sensitive data.
-
-    Attributes:
-        ai_providers: AI provider API keys and credentials.
-        ngrok: Ngrok authentication token.
-        google_sso: Google OAuth SSO credentials.
-    """
-    ai_providers: AIProvidersSecretsConfig = AIProvidersSecretsConfig()
-    ngrok: NgrokSecretsConfig = NgrokSecretsConfig()
-    google_sso: GoogleSSOSecretsConfig = GoogleSSOSecretsConfig()
-
-
-# =============================================================================
-# AI Settings Configuration (Non-secrets - can be committed)
-# =============================================================================
-
-
-class AIProviderSettingsConfig(BaseModel):
-    """Settings for enabling/disabling AI providers.
-
-    These are settings (not secrets) that control which providers are enabled.
-    Even if enabled here, providers will only work if properly configured with secrets.
-
-    Attributes:
-        anthropic_enabled: Whether Anthropic provider is enabled.
-        aws_bedrock_enabled: Whether AWS Bedrock provider is enabled.
-        openai_enabled: Whether OpenAI provider is enabled.
-    """
-    anthropic_enabled: bool = True
-    aws_bedrock_enabled: bool = True
-    openai_enabled: bool = True
-
-
-class AIModelConfig(BaseModel):
-    """Configuration for a single AI model.
-
-    Attributes:
-        id: Unique identifier for the model (used in API).
-        provider: Provider type (anthropic, aws_bedrock, openai).
-        model_name: Actual model name/ID used by the provider.
-        display_name: Human-readable name for UI display.
-        enabled: Whether this model is enabled.
-    """
-    id: str
-    provider: str  # anthropic, aws_bedrock, openai
-    model_name: str
-    display_name: str
-    enabled: bool = True
-
-
-# Default models configuration
-# Note: For AWS Bedrock, use models that support single-region inference
-# Cross-region inference profiles (us.anthropic.*) require Converse API
-DEFAULT_AI_MODELS = [
-    AIModelConfig(
-        id="claude-sonnet-4-anthropic",
-        provider="anthropic",
-        model_name="claude-sonnet-4-20250514",
-        display_name="Claude Sonnet 4 (Anthropic)",
-    ),
-    AIModelConfig(
-        id="claude-3-haiku-bedrock",
-        provider="aws_bedrock",
-        model_name="anthropic.claude-3-haiku-20240307-v1:0",
-        display_name="Claude 3 Haiku (Bedrock)",
-    ),
-    AIModelConfig(
-        id="gpt-4o",
-        provider="openai",
-        model_name="gpt-4o",
-        display_name="GPT-4o",
-    ),
-    AIModelConfig(
-        id="gpt-4o-mini",
-        provider="openai",
-        model_name="gpt-4o-mini",
-        display_name="GPT-4o Mini",
-    ),
-]
-
-
-class EmbeddingConfig(BaseModel):
-    """Embedding pipeline configuration.
-
-    Controls which cloud provider and model are used to generate vector
-    embeddings for code symbols.  Changing ``model`` triggers lazy
-    re-embedding on next usage (the extension checks sha1 + model).
-
-    Attributes:
-        provider: Embedding provider (``bedrock`` | ``openai`` | ``cohere``).
-        model:    Provider-specific model ID used for embedding.
-        dim:      Expected vector dimensionality produced by the model.
-    """
-    provider: str = "bedrock"
-    model: str = "cohere.embed-english-v3"
-    dim: int = 1024
-
-
-class RagConfig(BaseModel):
-    """RAG (Retrieval-Augmented Generation) configuration.
-
-    Attributes:
-        enabled: Whether the RAG pipeline is enabled.
-        data_dir: Directory for persisted FAISS indices.
-        chunk_max_lines: Maximum lines per code chunk.
-        search_top_k: Default number of search results.
-        token_budget_ratio: Fraction of context budget allocated to RAG results.
-    """
-    enabled: bool = True
-    data_dir: str = "data/rag"
-    chunk_max_lines: int = 200
-    search_top_k: int = 10
-    token_budget_ratio: float = 0.6
-
-
-class PromptConfig(BaseModel):
-    """Code prompt generation configuration.
-
-    Attributes:
-        output_mode: Output format for generated code prompts.
-            "unified_diff" - unified diff patches (default).
-            "direct_repo_edits" - complete file contents.
-            "plan_then_diff" - implementation plan followed by diffs.
-    """
-    output_mode: str = "unified_diff"
-
-
-class SummaryConfig(BaseModel):
-    """Summary/AI configuration.
-
-    Attributes:
-        enabled: Whether AI-powered summarization is enabled.
-        default_model: Default model ID to use for summarization.
-    """
-    enabled: bool = False
-    default_model: str = "claude-sonnet-4-anthropic"
-
-
-# =============================================================================
-# Settings Config (conductor.settings.yaml)
-# =============================================================================
-
-
-class SettingsConfig(BaseModel):
-    """All settings configuration (conductor.settings.yaml).
-
-    This file can be committed to git and contains all non-sensitive settings.
-
-    Attributes:
-        server: Backend server settings.
-        ngrok: Ngrok settings (region, enabled - NOT authtoken).
-        change_limits: Code change limits.
-        session: Chat session settings.
-        logging: Logging and audit settings.
-        summary: Summary/AI settings.
-        ai_provider_settings: AI provider enable flags.
-        ai_models: AI model configurations.
-    """
-    server: ServerConfig = ServerConfig()
-    ngrok: NgrokSettingsConfig = NgrokSettingsConfig()
-    change_limits: ChangeLimitsConfig = ChangeLimitsConfig()
-    session: SessionConfig = SessionConfig()
-    logging: LoggingConfig = LoggingConfig()
-    sso: SSOConfig = SSOConfig()
-    google_sso: GoogleSSOConfig = GoogleSSOConfig()
-    summary: SummaryConfig = SummaryConfig()
-    prompt: PromptConfig = PromptConfig()
-    ai_provider_settings: AIProviderSettingsConfig = AIProviderSettingsConfig()
-    ai_models: list[AIModelConfig] = DEFAULT_AI_MODELS.copy()
-    embedding: EmbeddingConfig = EmbeddingConfig()
-    rag: RagConfig = RagConfig()
-
-
-# =============================================================================
-# Combined Config (merged from secrets + settings)
-# =============================================================================
-
-
-class ConductorConfig(BaseModel):
-    """Main configuration container for all Conductor settings.
-
-    This is the merged configuration from both secrets and settings files.
-
-    Attributes:
-        server: Backend server settings.
-        ngrok_settings: Ngrok settings (region, enabled).
-        ngrok_secrets: Ngrok secrets (authtoken).
-        change_limits: Code change limits.
-        session: Chat session settings.
-        logging: Logging and audit settings.
-        summary: Summary/AI settings.
-        ai_provider_settings: AI provider enable flags.
-        ai_providers: AI provider credentials (secrets).
-        ai_models: AI model configurations.
-        google_sso: Google SSO settings.
-        google_sso_secrets: Google SSO credentials (secrets).
-    """
-    server: ServerConfig = ServerConfig()
-    ngrok_settings: NgrokSettingsConfig = NgrokSettingsConfig()
-    ngrok_secrets: NgrokSecretsConfig = NgrokSecretsConfig()
-    change_limits: ChangeLimitsConfig = ChangeLimitsConfig()
-    session: SessionConfig = SessionConfig()
-    logging: LoggingConfig = LoggingConfig()
-    sso: SSOConfig = SSOConfig()
-    google_sso: GoogleSSOConfig = GoogleSSOConfig()
-    summary: SummaryConfig = SummaryConfig()
-    prompt: PromptConfig = PromptConfig()
-    ai_provider_settings: AIProviderSettingsConfig = AIProviderSettingsConfig()
-    ai_providers: AIProvidersSecretsConfig = AIProvidersSecretsConfig()
-    google_sso_secrets: GoogleSSOSecretsConfig = GoogleSSOSecretsConfig()
-    ai_models: list[AIModelConfig] = DEFAULT_AI_MODELS.copy()
-    embedding: EmbeddingConfig = EmbeddingConfig()
-    rag: RagConfig = RagConfig()
-
-
-# =============================================================================
-# Configuration Loading Functions
-# =============================================================================
-
-
-def _find_config_file(filename: str) -> Path | None:
-    """Find a configuration file in standard locations.
-
-    Args:
-        filename: Name of the file to find (e.g., 'conductor.secrets.yaml').
-
-    Returns:
-        Path to the file if found, None otherwise.
-    """
-    # Check locations in order of priority
-    locations = [
-        Path.cwd() / "config" / filename,
-        Path.cwd() / filename,
-        Path.cwd().parent / "config" / filename,
-        Path.home() / ".conductor" / filename,
-    ]
-
-    for path in locations:
-        if path.exists():
-            return path
-
-    return None
-
-
-def find_secrets_file() -> Path | None:
-    """Find the secrets configuration file."""
-    return _find_config_file("conductor.secrets.yaml")
-
-
-def find_settings_file() -> Path | None:
-    """Find the settings configuration file."""
-    return _find_config_file("conductor.settings.yaml")
-
-
-def _load_yaml_file(path: Path | None) -> dict:
-    """Load a YAML file and return its contents as a dict.
-
-    Args:
-        path: Path to the YAML file, or None.
-
-    Returns:
-        Dictionary with file contents, or empty dict if file not found.
-    """
-    if path is None or not path.exists():
+def _load_yaml(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        logger.warning("Config file not found: %s", path)
         return {}
-
-    try:
-        with open(path) as f:
-            return yaml.safe_load(f) or {}
-    except Exception as e:
-        logger.warning(f"Failed to load config file {path}: {e}")
-        return {}
+    with path.open(encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
 
 
-def _resolve_relative_audit_path(settings_data: dict, settings_path: Path | None) -> None:
-    """Resolve logging.audit_path to an absolute path when configured relatively.
+# ---------------------------------------------------------------------------
+# Secrets models
+# ---------------------------------------------------------------------------
 
-    Resolution rule:
-        1. If settings file is in "<project>/config/conductor.settings.yaml",
-           resolve relative paths against "<project>".
-        2. Otherwise, resolve relative paths against the settings file directory.
+
+class AwsSecrets(BaseModel):
+    access_key_id:     Optional[str] = None
+    secret_access_key: Optional[str] = None
+    region:            Optional[str] = "us-east-1"
+
+
+class OpenAISecrets(BaseModel):
+    api_key: Optional[str] = None
+
+
+class DatabaseSecrets(BaseModel):
+    url: Optional[str] = None
+
+
+class JWTSecrets(BaseModel):
+    secret_key: str = "change-me-in-production"
+    algorithm:  str = "HS256"
+
+
+class Secrets(BaseModel):
+    aws:      AwsSecrets      = Field(default_factory=AwsSecrets)
+    openai:   OpenAISecrets   = Field(default_factory=OpenAISecrets)
+    database: DatabaseSecrets = Field(default_factory=DatabaseSecrets)
+    jwt:      JWTSecrets      = Field(default_factory=JWTSecrets)
+
+
+# ---------------------------------------------------------------------------
+# Settings models
+# ---------------------------------------------------------------------------
+
+
+class ServerSettings(BaseModel):
+    host:         str  = "0.0.0.0"
+    port:         int  = 8000
+    debug:        bool = False
+    reload:       bool = False
+    log_level:    str  = "info"
+    allowed_origins: List[str] = Field(default_factory=lambda: ["*"])
+
+
+class DatabaseSettings(BaseModel):
+    pool_size:     int = 10
+    max_overflow:  int = 20
+    pool_timeout:  int = 30
+    echo_sql:      bool = False
+
+
+class AuthSettings(BaseModel):
+    token_expire_minutes:   int  = 60
+    refresh_expire_days:    int  = 7
+    require_email_verify:   bool = False
+
+
+class RoomSettings(BaseModel):
+    max_participants:       int = 50
+    max_rooms_per_user:     int = 10
+    session_timeout_minutes: int = 120
+    enable_persistence:     bool = True
+
+
+class LiveShareSettings(BaseModel):
+    """Kept for backwards compatibility; disabled by default in new deployments."""
+    enabled:              bool = False
+    vscode_extension_id:  str  = "ms-vsliveshare.vsliveshare"
+    host_timeout_seconds: int  = 300
+
+
+class GitWorkspaceSettings(BaseModel):
+    """Configuration for the Git Workspace module."""
+    enabled:                bool                    = True
+    workspaces_dir:         str                     = "./workspaces"
+    git_auth_mode:          Literal["token", "delegate"] = "token"
+    credential_ttl_seconds: int                     = 3600
+    max_worktrees_per_repo: int                     = 20
+    cleanup_on_room_close:  bool                    = True
+
+
+class CodeSearchSettings(BaseModel):
+    """Configuration for CocoIndex Code Search."""
+    enabled:             bool                           = True
+    index_dir:           str                            = "./cocoindex_data"
+    embedding_backend:   Literal["local", "bedrock", "openai"] = "local"
+    local_model_name:    str                            = "all-MiniLM-L6-v2"
+    bedrock_model_id:    str                            = "amazon.titan-embed-text-v2:0"
+    openai_model_name:   str                            = "text-embedding-3-small"
+    chunk_size:          int                            = 512
+    top_k_results:       int                            = 5
+
+
+class AppSettings(BaseModel):
+    server:         ServerSettings       = Field(default_factory=ServerSettings)
+    database:       DatabaseSettings     = Field(default_factory=DatabaseSettings)
+    auth:           AuthSettings         = Field(default_factory=AuthSettings)
+    rooms:          RoomSettings         = Field(default_factory=RoomSettings)
+    live_share:     LiveShareSettings    = Field(default_factory=LiveShareSettings)
+    git_workspace:  GitWorkspaceSettings = Field(default_factory=GitWorkspaceSettings)
+    code_search:    CodeSearchSettings   = Field(default_factory=CodeSearchSettings)
+    secrets:        Secrets              = Field(default_factory=Secrets)
+
+
+# ---------------------------------------------------------------------------
+# Environment variable injection for CocoIndex
+# ---------------------------------------------------------------------------
+
+
+def _inject_embedding_env_vars(settings: AppSettings) -> None:
     """
-    logging_cfg = settings_data.get("logging")
-    if not isinstance(logging_cfg, dict):
-        return
-
-    audit_path = logging_cfg.get("audit_path")
-    if not isinstance(audit_path, str) or not audit_path.strip():
-        return
-
-    path_obj = Path(audit_path)
-    if path_obj.is_absolute() or settings_path is None:
-        return
-
-    settings_path = settings_path.resolve()
-    if settings_path.name == "conductor.settings.yaml" and settings_path.parent.name == "config":
-        base_dir = settings_path.parent.parent
-    else:
-        base_dir = settings_path.parent
-
-    logging_cfg["audit_path"] = str((base_dir / path_obj).resolve())
-
-
-def load_config(
-    secrets_path: Path | str | None = None,
-    settings_path: Path | str | None = None,
-) -> ConductorConfig:
-    """Load configuration from secrets and settings YAML files.
-
-    Args:
-        secrets_path: Optional path to secrets file. If not provided,
-                      searches standard locations.
-        settings_path: Optional path to settings file. If not provided,
-                       searches standard locations.
-
-    Returns:
-        ConductorConfig instance with merged settings.
+    Inject credentials from conductor.secrets.yaml into environment variables
+    so that CocoIndex can pick them up without knowing about our secrets file.
     """
-    # Find files if not provided
-    if secrets_path is None:
-        secrets_path = find_secrets_file()
-    elif isinstance(secrets_path, str):
-        secrets_path = Path(secrets_path)
+    backend = settings.code_search.embedding_backend
+    secrets = settings.secrets
 
-    if settings_path is None:
-        settings_path = find_settings_file()
-    elif isinstance(settings_path, str):
-        settings_path = Path(settings_path)
+    if backend == "bedrock":
+        if secrets.aws.access_key_id:
+            os.environ["AWS_ACCESS_KEY_ID"]     = secrets.aws.access_key_id
+        if secrets.aws.secret_access_key:
+            os.environ["AWS_SECRET_ACCESS_KEY"] = secrets.aws.secret_access_key
+        if secrets.aws.region:
+            os.environ["AWS_DEFAULT_REGION"]    = secrets.aws.region
+        logger.info("Injected AWS credentials into env for Bedrock embedding backend.")
 
-    # Load both files
-    secrets_data = _load_yaml_file(secrets_path)
-    settings_data = _load_yaml_file(settings_path)
-    _resolve_relative_audit_path(settings_data, settings_path)
+    elif backend == "openai":
+        if secrets.openai.api_key:
+            os.environ["OPENAI_API_KEY"] = secrets.openai.api_key
+        logger.info("Injected OpenAI API key into env for OpenAI embedding backend.")
 
-    # Log what files were found
-    if secrets_path and secrets_path.exists():
-        logger.info(f"Loaded secrets from: {secrets_path}")
-    else:
-        logger.info("No secrets file found, using defaults")
-
-    if settings_path and settings_path.exists():
-        logger.info(f"Loaded settings from: {settings_path}")
-    else:
-        logger.info("No settings file found, using defaults")
-
-    # Build the merged config
-    # Settings file structure matches SettingsConfig
-    # Secrets file structure matches SecretsConfig
-    config_data = {}
-
-    # Map settings YAML keys to ConductorConfig field names
-    settings_key_map = {
-        "server": "server",
-        "ngrok": "ngrok_settings",
-        "change_limits": "change_limits",
-        "session": "session",
-        "logging": "logging",
-        "summary": "summary",
-        "ai_provider_settings": "ai_provider_settings",
-        "ai_models": "ai_models",
-        "sso": "sso",
-        "google_sso": "google_sso",
-        "prompt": "prompt",
-        "embedding": "embedding",
-        "rag": "rag",
-    }
-    for yaml_key, config_key in settings_key_map.items():
-        if yaml_key in settings_data:
-            config_data[config_key] = settings_data[yaml_key]
-
-    # Map secrets YAML keys to ConductorConfig field names
-    secrets_key_map = {
-        "ai_providers": "ai_providers",
-        "ngrok": "ngrok_secrets",
-        "google_sso": "google_sso_secrets",
-    }
-    for yaml_key, config_key in secrets_key_map.items():
-        if yaml_key in secrets_data:
-            config_data[config_key] = secrets_data[yaml_key]
-
-    return ConductorConfig(**config_data)
+    else:  # local
+        logger.debug("Local embedding backend — no env var injection needed.")
 
 
-def get_public_url(config: ConductorConfig) -> str:
-    """Get the public URL for the backend.
-
-    Returns ngrok URL if configured, otherwise localhost.
-    """
-    if config.server.public_url:
-        return config.server.public_url
-
-    return f"http://{config.server.host}:{config.server.port}"
+# ---------------------------------------------------------------------------
+# Public loader
+# ---------------------------------------------------------------------------
 
 
-# Global config instance (lazy loaded)
-_config: ConductorConfig | None = None
+def load_settings() -> AppSettings:
+    """Load and merge settings + secrets into a single *AppSettings* object."""
+    settings_data = _load_yaml(SETTINGS_FILE)
+    secrets_data  = _load_yaml(SECRETS_FILE)
 
+    # Merge: secrets live under the "secrets" key in AppSettings
+    settings_data["secrets"] = secrets_data
 
-def get_config() -> ConductorConfig:
-    """Get the global configuration instance."""
-    global _config
-    if _config is None:
-        _config = load_config()
-    return _config
+    app_settings = AppSettings(**settings_data)
+    logger.info(
+        "Settings loaded (server=%s:%s, git_workspace.enabled=%s, code_search.enabled=%s)",
+        app_settings.server.host,
+        app_settings.server.port,
+        app_settings.git_workspace.enabled,
+        app_settings.code_search.enabled,
+    )
+    return app_settings
