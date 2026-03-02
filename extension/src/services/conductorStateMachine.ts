@@ -2,8 +2,8 @@
  * Finite State Machine for the Conductor extension lifecycle.
  *
  * Manages transitions between extension states (Idle, BackendDisconnected,
- * ReadyToHost, Hosting, Joining, Joined) driven by discrete events.
- * Invalid transitions are rejected with an error.
+ * ReadyToHost, CreatingWorkspace, Hosting, Joining, Joined) driven by
+ * discrete events. Invalid transitions are rejected with an error.
  *
  * The module is intentionally free of VS Code API dependencies so that it
  * can be unit-tested without the extension host.
@@ -20,6 +20,7 @@ export enum ConductorState {
     Idle = 'Idle',
     BackendDisconnected = 'BackendDisconnected',
     ReadyToHost = 'ReadyToHost',
+    CreatingWorkspace = 'CreatingWorkspace',
     Hosting = 'Hosting',
     Joining = 'Joining',
     Joined = 'Joined',
@@ -35,6 +36,10 @@ export enum ConductorEvent {
     JOIN_SUCCEEDED = 'JOIN_SUCCEEDED',
     JOIN_FAILED = 'JOIN_FAILED',
     LEAVE_SESSION = 'LEAVE_SESSION',
+    CREATE_WORKSPACE = 'CREATE_WORKSPACE',
+    WORKSPACE_READY = 'WORKSPACE_READY',
+    WORKSPACE_FAILED = 'WORKSPACE_FAILED',
+    DESTROY_WORKSPACE = 'DESTROY_WORKSPACE',
 }
 
 // ---------------------------------------------------------------------------
@@ -48,18 +53,21 @@ export enum ConductorEvent {
 const TRANSITION_TABLE: Record<string, ConductorState> = {
     // From Idle
     [`${ConductorState.Idle}:${ConductorEvent.BACKEND_CONNECTED}`]: ConductorState.ReadyToHost,
-    [`${ConductorState.Idle}:${ConductorEvent.BACKEND_LOST}`]: ConductorState.BackendDisconnected,
 
     // From BackendDisconnected
-    // - Can transition to ReadyToHost if backend becomes available
-    // - Can JOIN_SESSION (join other people's sessions without local backend)
     [`${ConductorState.BackendDisconnected}:${ConductorEvent.BACKEND_CONNECTED}`]: ConductorState.ReadyToHost,
-    [`${ConductorState.BackendDisconnected}:${ConductorEvent.JOIN_SESSION}`]: ConductorState.Joining,
 
     // From ReadyToHost
+    [`${ConductorState.ReadyToHost}:${ConductorEvent.BACKEND_LOST}`]: ConductorState.BackendDisconnected,
     [`${ConductorState.ReadyToHost}:${ConductorEvent.START_HOSTING}`]: ConductorState.Hosting,
     [`${ConductorState.ReadyToHost}:${ConductorEvent.JOIN_SESSION}`]: ConductorState.Joining,
-    [`${ConductorState.ReadyToHost}:${ConductorEvent.BACKEND_LOST}`]: ConductorState.BackendDisconnected,
+    [`${ConductorState.ReadyToHost}:${ConductorEvent.CREATE_WORKSPACE}`]: ConductorState.CreatingWorkspace,
+
+    // From CreatingWorkspace
+    [`${ConductorState.CreatingWorkspace}:${ConductorEvent.WORKSPACE_READY}`]: ConductorState.ReadyToHost,
+    [`${ConductorState.CreatingWorkspace}:${ConductorEvent.WORKSPACE_FAILED}`]: ConductorState.ReadyToHost,
+    [`${ConductorState.CreatingWorkspace}:${ConductorEvent.DESTROY_WORKSPACE}`]: ConductorState.ReadyToHost,
+    [`${ConductorState.CreatingWorkspace}:${ConductorEvent.BACKEND_LOST}`]: ConductorState.BackendDisconnected,
 
     // From Hosting
     [`${ConductorState.Hosting}:${ConductorEvent.STOP_HOSTING}`]: ConductorState.ReadyToHost,
@@ -76,131 +84,71 @@ const TRANSITION_TABLE: Record<string, ConductorState> = {
 };
 
 // ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/** Error thrown when an invalid state transition is attempted. */
-export class InvalidTransitionError extends Error {
-    public readonly from: ConductorState;
-    public readonly event: ConductorEvent;
-
-    constructor(from: ConductorState, event: ConductorEvent) {
-        super(
-            `Invalid transition: cannot apply event '${event}' in state '${from}'`
-        );
-        this.name = 'InvalidTransitionError';
-        this.from = from;
-        this.event = event;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Listener type
-// ---------------------------------------------------------------------------
-
-/** Callback signature for state-change listeners. */
-export type StateChangeListener = (
-    prev: ConductorState,
-    next: ConductorState,
-    event: ConductorEvent,
-) => void;
-
-// ---------------------------------------------------------------------------
-// State machine class
+// State machine implementation
 // ---------------------------------------------------------------------------
 
 /**
- * In-memory finite state machine for the Conductor extension.
+ * Immutable snapshot returned by {@link ConductorStateMachine.getSnapshot}.
+ */
+export interface StateMachineSnapshot {
+    readonly state: ConductorState;
+    readonly history: ReadonlyArray<{ from: ConductorState; event: ConductorEvent; to: ConductorState }>;
+}
+
+/**
+ * Lightweight finite-state machine for the Conductor extension.
  *
- * - Holds the current state (starts at {@link ConductorState.Idle}).
- * - Exposes {@link transition} to apply an event; throws
- *   {@link InvalidTransitionError} for illegal moves.
- * - Supports listeners that are notified **after** every successful transition.
- * - State is serializable via {@link getState} (returns the enum string value).
+ * Usage:
+ * ```ts
+ * const fsm = new ConductorStateMachine();
+ * fsm.send(ConductorEvent.BACKEND_CONNECTED); // → ReadyToHost
+ * fsm.send(ConductorEvent.CREATE_WORKSPACE);  // → CreatingWorkspace
+ * ```
  */
 export class ConductorStateMachine {
-    private _state: ConductorState;
-    private readonly _listeners: Set<StateChangeListener> = new Set();
+    private _state: ConductorState = ConductorState.Idle;
+    private _history: Array<{ from: ConductorState; event: ConductorEvent; to: ConductorState }> = [];
 
-    constructor(initialState: ConductorState = ConductorState.Idle) {
-        this._state = initialState;
-    }
-
-    /** Current state (enum value, JSON-serializable). */
-    public getState(): ConductorState {
+    /** Current state of the machine. */
+    get state(): ConductorState {
         return this._state;
     }
 
     /**
-     * Apply an event to the current state.
+     * Send an event to the machine and advance to the next state.
      *
      * @param event - The event to process.
-     * @returns The new state after the transition.
-     * @throws {InvalidTransitionError} If the transition is not allowed.
+     * @throws {Error} When the (currentState, event) pair has no defined transition.
      */
-    public transition(event: ConductorEvent): ConductorState {
+    send(event: ConductorEvent): ConductorState {
         const key = `${this._state}:${event}`;
         const next = TRANSITION_TABLE[key];
-
         if (next === undefined) {
-            throw new InvalidTransitionError(this._state, event);
+            throw new Error(
+                `Invalid transition: state=${this._state}, event=${event}`
+            );
         }
-
-        const prev = this._state;
+        this._history.push({ from: this._state, event, to: next });
         this._state = next;
-
-        // Notify listeners after state change
-        for (const listener of this._listeners) {
-            listener(prev, next, event);
-        }
-
-        return this._state;
+        return next;
     }
 
     /**
-     * Register a listener that is called after every successful transition.
-     *
-     * @param listener - Callback receiving (previousState, newState, event).
-     * @returns A dispose function that removes the listener.
+     * Returns an immutable snapshot of the current state and transition history.
      */
-    public onStateChange(listener: StateChangeListener): () => void {
-        this._listeners.add(listener);
-        return () => {
-            this._listeners.delete(listener);
+    getSnapshot(): StateMachineSnapshot {
+        return {
+            state: this._state,
+            history: Object.freeze([...this._history]),
         };
     }
 
     /**
-     * Check whether a given event is valid in the current state
-     * without actually performing the transition.
+     * Resets the machine back to the {@link ConductorState.Idle} state and
+     * clears the transition history.
      */
-    public canTransition(event: ConductorEvent): boolean {
-        const key = `${this._state}:${event}`;
-        return TRANSITION_TABLE[key] !== undefined;
-    }
-
-    /**
-     * Serialize the current state to a plain string.
-     * Useful for persistence or debugging.
-     */
-    public serialize(): string {
-        return this._state;
-    }
-
-    /**
-     * Restore state from a previously serialized string.
-     *
-     * @param serialized - A string that must match a {@link ConductorState} value.
-     * @throws {Error} If the string is not a valid state.
-     */
-    public static deserialize(serialized: string): ConductorStateMachine {
-        const values = Object.values(ConductorState) as string[];
-        if (!values.includes(serialized)) {
-            throw new Error(
-                `Invalid serialized state: '${serialized}'. ` +
-                `Expected one of: ${values.join(', ')}`
-            );
-        }
-        return new ConductorStateMachine(serialized as ConductorState);
+    reset(): void {
+        this._state = ConductorState.Idle;
+        this._history = [];
     }
 }
