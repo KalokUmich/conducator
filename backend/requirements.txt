@@ -8,11 +8,12 @@ pyyaml
 pyngrok
 python-multipart
 boto3
-faiss-cpu
 numpy
-tree-sitter>=0.23,<0.26
-tree-sitter-javascript>=0.23
-tree-sitter-typescript>=0.23
-tree-sitter-java>=0.23
-tree-sitter-go>=0.23
 
+# --- Code Search (CocoIndex) ---
+# Core indexing and vector search engine
+cocoindex-code
+# Local embedding model (free, no API key needed)
+sentence-transformers
+# Vector storage backend used by CocoIndex
+sqlite-vec
