@@ -1,306 +1,176 @@
 # Conductor Project Roadmap
 
-Last updated: 2026-02-23
+Last updated: 2026-03-02
 
 ## Current State
 
-Conductor is a VS Code collaboration extension with a FastAPI backend. It supports real-time team chat over WebSocket, Live Share session management, file sharing, SSO authentication (AWS IAM Identity Center + Google OAuth), AI-powered discussion summarization, and code generation prompt (CGP) workflows.
-
-**Backend stack**: FastAPI, DuckDB (audit + file metadata), in-memory chat, pyngrok
-**Extension stack**: TypeScript, VS Code WebView, Live Share API
-**AI providers**: Anthropic direct, AWS Bedrock, OpenAI (priority-based fallback)
-
-### What Works Today
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Real-time chat (WebSocket) | Working | In-memory only, lost on restart |
-| AI summarization pipeline | Working | 4-stage: classify → summarize → score → extract items |
-| Code generation prompts | Working | With auto-detected language styles |
-| File upload/download | Working | Room-scoped, DuckDB metadata, duplicate detection, retry logic |
-| SSO (AWS + Google) | Working | Device authorization flow |
-| Auto-apply policy | Working | Basic: file count, line count, forbidden paths |
-| Audit logging | Working | DuckDB, tracks applied changes |
-| Ngrok tunneling | Working | Auto-start/stop in lifespan |
-| Mock agent | Working | Deterministic only, not LLM-backed |
-| TODO tracking | Working | Room-scoped, DuckDB persistence, full CRUD (`/todos/{room_id}`) |
-| Embeddings service | Working | Bedrock Cohere 1024-dim; `GET /embeddings/config`, `POST /embeddings` |
-| FAISS code RAG | Working | AST+regex chunking, workspace-scoped FAISS index, `/rag/index`, `/rag/reindex`, `/rag/search` |
-| Explain with Context pipeline | Working | 8-stage: selection → LSP → dependency resolution → ranking → context plan → file reads → XML assembly → LLM |
-| Config enforcement | Working | `change_limits`, `session.max_participants`, `logging.level` all read from settings.yaml |
-
----
-
-## Phase 1: Production Readiness
-
-Goal: Make the system reliable enough for daily team use. Focus on data durability, resource management, and enforcing existing configuration.
-
-### 1.1 Chat Message Persistence
-
-**Problem**: All chat messages are stored in-memory (`chat/manager.py:219`). Server restart = total data loss. No audit trail for compliance.
-
-**Plan**:
-- Add a `chat_messages` table in DuckDB alongside the existing audit and file metadata tables
-- Schema: `(id, room_id, user_id, display_name, role, content, message_type, ts)`
-- Index on `(room_id, ts)` for paginated retrieval
-- Write-through: persist on receive, serve from memory for active rooms
-- Add `GET /chat/{room_id}/history?before=<ts>&limit=50` endpoint for pagination
-- Load recent history into memory when a room becomes active
-
-**Files to modify**: `chat/manager.py`, `chat/router.py`, new `chat/service.py`
-
-### 1.2 Room Lifecycle Management
-
-**Problem**: Rooms persist in memory indefinitely. No TTL, no cleanup for abandoned sessions. The `timeout_minutes` and `max_participants` config values exist but are never enforced.
-
-**Plan**:
-- Track `created_at` and `last_activity_at` per room in `ConnectionManager`
-- Add a background task (FastAPI `BackgroundTasks` or asyncio periodic) that runs every 5 minutes:
-  - Rooms with no connections and `last_activity > timeout_minutes` get archived and cleared
-- Enforce `max_participants` in the WebSocket connect handler — reject with 403 if room is full
-- On shutdown (lifespan), persist active room state to DuckDB for recovery
-
-**Files to modify**: `chat/manager.py`, `chat/router.py`, `main.py` (lifespan)
-
-### ~~1.3 Configuration Enforcement~~ ✅ DONE
-
-**Problem**: Several config values are defined in `conductor.settings.yaml` and parsed by `config.py` but never read at runtime.
-
-| Config Key | Defined In | Enforced? |
-|-----------|------------|-----------|
-| `change_limits.max_files` | settings.yaml | ✅ `evaluate_auto_apply()` reads `config.change_limits.max_files_per_request` |
-| `change_limits.max_lines_changed` | settings.yaml | ✅ `evaluate_auto_apply()` reads `config.change_limits.auto_apply.max_lines` |
-| `session.timeout_minutes` | settings.yaml | Deferred to 1.2 Room Lifecycle Management |
-| `session.max_participants` | settings.yaml | ✅ Enforced in WebSocket connect handler (`chat/router.py`) |
-| `logging.level` | settings.yaml | ✅ Applied to root logger in `main.py` lifespan |
-
-**Completed**:
-- `auto_apply.py`: `evaluate_auto_apply()` calls `get_config()` when no config provided; limits read from `config.change_limits.*`; removed `_default_policy` singleton; cleaned up TODO comments
-- `chat/router.py`: Added participant count check before `manager.connect()` — rejects with WebSocket close code 1008 when room is at capacity; imported `get_config`
-- `main.py`: Reads `config.logging.level` and applies it to root logger in lifespan startup
-
-**Files modified**: `policy/auto_apply.py`, `chat/router.py`
-
-### 1.4 Structured Error Responses
-
-**Problem**: Error responses are inconsistent across endpoints — some return `{"detail": "..."}`, others return `{"error": "..."}`, and some return raw text.
-
-**Plan**:
-- Define a standard `ErrorResponse` model: `{"error": str, "detail": Optional[str]}`
-- Add a global exception handler in `main.py` for consistent formatting
-- Audit all endpoints for error response consistency
-
----
-
-## Phase 2: LLM Agent Integration
-
-Goal: Replace the mock agent with real LLM-backed code generation. This is the core value proposition of the product.
-
-### 2.1 LLM-Backed Agent
-
-**Problem**: `MockAgent` generates deterministic, hardcoded changes. It does not analyze existing code, respect project structure, or use AI.
-
-**Plan**:
-- Create `LLMAgent` class implementing the same `generate_changes()` interface
-- Input: file path, instruction, file content, project context (detected languages, style guidelines)
-- Use the existing `AIProviderResolver` to select provider
-- Output: `ChangeSet` conforming to `shared/changeset.schema.json`
-- Keep `MockAgent` as a fallback for testing and offline use
-- Selection via config: `agent.type: "llm" | "mock"`
-
-**Files**: New `agent/llm_agent.py`, modify `agent/router.py`, `config.py`
-
-### 2.3 Multi-File Change Generation
-
-**Problem**: Current `ChangeSet` schema supports multi-file changes but `MockAgent` always produces a fixed 3-file output.
-
-**Plan**:
-- LLM agent analyzes which files need modification based on the instruction
-- Generate `replace_range` changes for existing files (not just `create_file`)
-- Add a validation step: parse generated changes, verify file paths exist, check syntax
-- Present a diff preview to the user before applying
-
-### 2.4 Git Commit Retrieval (Semantic Git History Search)
-
-**Problem**: When the agent or context enricher needs to understand *why* code looks the way it does, git history is invaluable. Currently there is no way to search commit history semantically — only `git log --grep` for exact string matches.
-
-**Inspired by**: Augment Code's `git-commit-retrieval` tool.
-
-**Plan**:
-
-#### 2.4.1 Commit Indexing Pipeline
-- New files in `backend/app/rag/`: `git_indexer.py`, `git_store.py`
-- On workspace index (or `POST /rag/git-reindex`), walk `git log` (configurable depth, default last 500 commits)
-- Per commit, build an embedding from: `"{commit_message}\n\nFiles changed:\n{file_list}\n\nDiff summary:\n{stat_summary}"`
-- Store in a separate FAISS index (`data/rag/{workspace_id}/git_index`) with metadata: `{commit_hash, author, date, message, files_changed}`
-- Incremental: track last indexed commit hash; on re-index, only process new commits since that hash
-
-#### 2.4.2 Git Commit Search Endpoint
-- `POST /rag/git-search` — semantic search over git history
-- Input: `{workspace_id, query: str, top_k: int = 5, filters: {author?: str, since?: date, paths?: []}}`
-- Process: embed query → FAISS search → metadata filter → return ranked commits
-- Output: `{results: [{commit_hash, author, date, message, files_changed, score}]}`
-- Each result includes enough info to reconstruct context; the extension can `git show <hash>` for full diff if needed
-
-#### 2.4.3 Integration Points
-- Context enricher: when explaining code, also search git history for "why was this written?" context
-- Agent pipeline: before generating changes, search for recent commits touching the same files to understand velocity and patterns
-- Chat: users can ask "what changed around the auth module last week?" and get semantic results
-- Extension `ragClient.ts`: add `gitSearch()` method alongside existing `search()`
-
-**Files**: New `backend/app/rag/git_indexer.py`, `backend/app/rag/git_store.py`, modify `backend/app/rag/router.py`, modify `extension/src/services/ragClient.ts`
-
----
-
-## Phase 3: Collaboration Features
-
-Goal: Make the chat experience richer and more useful for engineering teams.
-
-### 3.1 Message Search
-
-**Plan**:
-- Add DuckDB full-text index on `chat_messages.content`
-- New endpoint: `GET /chat/{room_id}/search?q=<query>&limit=20`
-- Extension UI: search bar in chat panel with result highlighting
-
-### 3.2 Message Threading
-
-**Plan**:
-- Add `parent_message_id` field to message schema
-- Threads displayed as collapsible replies in the WebView
-- Thread-level notifications
-
-### 3.3 User Presence
-
-**Plan**:
-- Track `last_seen_at` per user per room (update on any WebSocket message)
-- Broadcast presence status: online (active connection), idle (no message in 5min), offline
-- Display status indicators in the participant list
-
-### 3.4 Typing Indicators
-
-**Plan**:
-- New WebSocket message type: `typing_start` / `typing_stop`
-- Debounced on the extension side (send `typing_start` on keypress, `typing_stop` after 3s idle)
-- Display "X is typing..." in chat UI
-
----
-
-## Phase 4: Security and Observability
-
-Goal: Harden the system for enterprise deployment.
-
-### 4.1 Rate Limiting
-
-**Plan**:
-- Add per-IP rate limiting to public endpoints (`/auth/*`, `/health`, WebSocket connect)
-- Use `slowapi` or custom middleware
-- Config: `security.rate_limit_per_minute: 60`
-
-### 4.2 Input Validation Hardening
-
-**Plan**:
-- Enforce max message length in WebSocket handler (currently unbounded)
-- Validate `room_id` format (alphanumeric + hyphens, max 64 chars)
-- Validate `user_id` format
-- Sanitize file upload filenames (path traversal prevention)
-
-### 4.3 Expanded Audit Trail
-
-**Problem**: Audit logs only record "change applied" events. No record of session events, policy violations, or SSO logins.
-
-**Plan**:
-- New event types: `session_start`, `session_end`, `user_join`, `user_leave`, `policy_violation`, `sso_login`
-- Unified `audit_events` table with `event_type` discriminator
-- Retention policy: configurable via `audit.retention_days`
-
-### 4.4 Structured Logging and Metrics
-
-**Plan**:
-- Replace `logging.basicConfig` with structured JSON logging (e.g., `python-json-logger`)
-- Add key metrics:
-  - Active rooms count
-  - Messages per minute
-  - AI provider latency (p50, p95, p99)
-  - WebSocket connection count
-- Optional: OpenTelemetry integration for distributed tracing
-
----
-
-## Phase 5: Scalability
-
-Goal: Support multiple backend instances and larger teams.
-
-### 5.1 External Message Broker
-
-**Problem**: `ConnectionManager` uses in-memory state. Cannot scale horizontally — each backend instance has its own rooms and connections.
-
-**Plan**:
-- Replace in-memory message passing with Redis Pub/Sub (or NATS)
-- Each backend instance subscribes to room channels
-- Connection state remains local; message routing becomes distributed
-- Preserve the current `ConnectionManager` interface for backward compatibility
-
-### 5.2 Database Migration to PostgreSQL
-
-**Problem**: DuckDB is single-writer. Cannot support multiple backend instances writing concurrently.
-
-**Plan**:
-- Migrate audit, file metadata, and chat messages to PostgreSQL
-- Use SQLAlchemy or asyncpg for async database access
-- Add Alembic for schema migrations
-- Keep DuckDB as an option for single-instance deployments via config
-
-### 5.3 File Storage Backend
-
-**Problem**: Files stored on local filesystem (`uploads/` directory). Not shared across instances. The TODO in `files/service.py:253-259` mentions S3/GCS/Azure backup.
-
-**Plan**:
-- Add pluggable storage backend: `local` (current), `s3`, `gcs`
-- Config: `files.storage_backend: "local" | "s3"`
-- Implement `S3FileStorage` with same interface as current local storage
-- Migrate existing files on deployment
-
----
-
-## Implementation Priority
-
-```
-Now ──────────────────────────────────────────────────── Future
-
-Phase 1                Phase 2              Phase 3        Phase 4-5
-Production Ready       LLM Agent + RAG      Collab UX      Enterprise
-
-1.1 Message persist    2.1 LLM agent        3.1 Search     4.1 Rate limits
-1.2 Room lifecycle     [2.2 DONE: RAG]      3.2 Threads    4.2 Input validation
-1.3 Config enforce     2.3 Multi-file       3.3 Presence   4.3 Audit expansion
-1.4 Error responses    2.4 Git retrieval    3.4 Typing     5.1 Redis pub/sub
-                                                           5.2 PostgreSQL
-                                                           5.3 S3 storage
-```
-
-**Recommended order**: ~~1.3 (quick win, config enforcement)~~ ✅ → 1.1 (persistence is critical) → 1.2 (prevents memory leaks) → 2.4 (Git retrieval — reuses existing RAG infra) → 2.1 (LLM agent, now with RAG context) → 2.3 (multi-file, agent is ready) → Phase 3+.
-
----
-
-## Evaluation Set
-
-Goal: Build a curated set of 20–30 code explanation test cases to track quality regressions and improvements across changes to the context enricher, RAG pipeline, and structured output.
-
-### Recommended Metrics
-
-| Metric | How to measure |
-|--------|---------------|
-| **Structured JSON parse rate** | % of responses that parse into valid `StructuredExplanation` fields (target: >90%) |
-| **Explanation quality** | Human-scored 1–5 rubric on purpose accuracy, completeness, and clarity |
-| **Citation hit rate** | % of RAG results whose `content` is referenced or paraphrased in the explanation |
-| **Latency** | End-to-end time from pipeline start to response, broken down by stage |
-| **Cost** | Token usage (input + output) per explanation |
-
-### Test Case Selection
-
-- Cover all supported languages (Python, TypeScript, Java, Go)
-- Include at least 3 cases per category: single function, class method, cross-file dependency, configuration/infra code
-- Mix simple (< 10 lines) and complex (> 50 lines) selections
-- Include edge cases: decorator-heavy code, deeply nested generics, code with no imports, generated/minified code
-- Store test cases in `tests/evaluation/` with one JSON file per case: `{snippet, file_path, language, expected_topics, expected_dependencies}`
+Conductor is a VS Code collaboration extension with a FastAPI backend. The project currently has working implementations of:
+
+- Real-time WebSocket chat (with reconnect, typing indicators, read receipts)
+- File upload/download (20MB limit, dedup, retry)
+- Code snippet sharing + editor navigation
+- Change review workflow (MockAgent, policy check, diff preview, audit log)
+- AI provider workflow (health check, provider selection, streaming inference)
+- **Git Workspace Management (Model A)**:
+  - Per-room bare repo + worktree isolation
+  - GIT_ASKPASS token authentication
+  - FileSystemProvider (`conductor://` URI scheme)
+  - WorkspacePanel 5-step creation wizard
+  - WorkspaceClient typed HTTP client
+  - Workspace code search (`GET /workspace/{room_id}/search`)
+
+## Phase 1: Foundation (COMPLETE)
+
+### 1.1 VS Code Extension Scaffold
+- [x] WebView panel with FSM lifecycle
+- [x] WebSocket service with reconnect
+- [x] Basic chat UI (send/receive messages)
+- [x] TypeScript compilation + ESLint
+- [x] VS Code command registration
+
+### 1.2 FastAPI Backend Scaffold
+- [x] FastAPI app with CORS middleware
+- [x] WebSocket endpoint (`/ws/{room_id}`)
+- [x] REST chat history endpoint
+- [x] Pydantic models for request/response
+- [x] pytest test suite
+
+## Phase 2: Collaboration Features (COMPLETE)
+
+### 2.1 Enhanced Chat
+- [x] Reconnect with `since` parameter
+- [x] Typing indicators (WebSocket broadcast)
+- [x] Read receipts
+- [x] Message deduplication (client-side UUID)
+- [x] Paginated history (`GET /chat/{room_id}/history`)
+
+### 2.2 File Sharing
+- [x] File upload endpoint (`POST /files/upload`)
+- [x] File download endpoint (`GET /files/{file_id}`)
+- [x] 20MB size limit enforcement
+- [x] Duplicate detection (SHA-256 hash)
+- [x] Extension-host upload proxy
+- [x] Retry logic (3 attempts with backoff)
+
+### 2.3 Code Snippet Sharing
+- [x] Snippet upload with language metadata
+- [x] Editor navigation (open file at line)
+- [x] Syntax highlighting in WebView
+
+## Phase 3: AI & Change Workflows (COMPLETE)
+
+### 3.1 Change Review Workflow
+- [x] MockAgent for generating changes (`POST /generate-changes`)
+- [x] Policy evaluation (`POST /policy/evaluate-auto-apply`)
+- [x] Per-change diff preview
+- [x] Sequential apply/skip UI
+- [x] Audit logging (`POST /audit/log-apply`)
+
+### 3.2 AI Provider Integration
+- [x] Provider health/status endpoint (`GET /ai/status`)
+- [x] Four-step provider selection UI
+- [x] Streaming inference (`POST /ai/infer`)
+- [x] Mock provider for testing
+
+## Phase 4: Git Workspace Management (COMPLETE)
+
+### 4.1 Model A: Token Authentication
+- [x] Backend: bare repo clone with GIT_ASKPASS
+- [x] Backend: worktree creation per room (`session/{room_id}` branch)
+- [x] Backend: file CRUD endpoints (`/workspace/{room_id}/file`)
+- [x] Backend: commit + push endpoint
+- [x] Extension: WorkspaceClient typed HTTP client
+- [x] Extension: WorkspacePanel 5-step creation wizard
+- [x] Extension: FSM `CreatingWorkspace` state
+- [x] Extension: FileSystemProvider (`conductor://` URI scheme)
+
+### 4.2 Workspace Code Search
+- [x] Backend: `GET /workspace/{room_id}/search?q=...` full-text search
+- [x] Extension: `WorkspaceClient.searchCode()` method
+- [x] Extension: inline search panel in WebView (`Ctrl+Shift+F`)
+- [x] Tests: search endpoint + client method coverage
+
+## Phase 5: Model B & Advanced Features (PLANNED)
+
+### 5.1 Model B: Delegate Authentication
+- [ ] Extension performs Git clone/push via VS Code Git API
+- [ ] Backend receives file diffs, not Git credentials
+- [ ] No PAT required from user
+- [ ] Migration path from Model A sessions
+
+### 5.2 Conflict Resolution
+- [ ] Detect concurrent edit conflicts in worktree
+- [ ] Show conflict diff in VS Code merge editor
+- [ ] Three-way merge with base branch
+- [ ] Conflict notification via WebSocket broadcast
+
+### 5.3 Workspace Search Enhancements
+- [ ] Search result navigation in VS Code (jump to file:line)
+- [ ] Regex search support
+- [ ] Search across all active rooms (admin view)
+- [ ] Search history and saved queries
+
+### 5.4 Enterprise Features
+- [ ] Room access control (invite-only rooms)
+- [ ] Audit log export (CSV/JSON)
+- [ ] Session recording and replay
+- [ ] Admin dashboard (active rooms, user count, file stats)
+
+## Phase 6: Production Hardening (PLANNED)
+
+### 6.1 Performance
+- [ ] Worker pool for Git operations (avoid blocking event loop)
+- [ ] Worktree cleanup scheduler (remove stale sessions)
+- [ ] File diff streaming (chunked transfer for large files)
+- [ ] Backend horizontal scaling (shared Redis for WebSocket state)
+
+### 6.2 Security
+- [ ] Token rotation (short-lived PATs via OAuth device flow)
+- [ ] Rate limiting on all endpoints
+- [ ] Path traversal hardening audit
+- [ ] Secrets scanning in uploaded files
+
+### 6.3 Observability
+- [ ] Structured logging (JSON, correlation IDs)
+- [ ] OpenTelemetry tracing
+- [ ] Prometheus metrics endpoint
+- [ ] Health check improvements (deep checks for Git, AI provider)
+
+## Milestone Summary
+
+| Milestone | Status | Completed |
+|-----------|--------|----------|
+| Phase 1: Foundation | ✅ Complete | Sprint 1 |
+| Phase 2: Collaboration | ✅ Complete | Sprint 2 |
+| Phase 3: AI Workflows | ✅ Complete | Sprint 3 |
+| Phase 4: Git Workspace (Model A) | ✅ Complete | Sprint 4 |
+| Phase 4.2: Workspace Code Search | ✅ Complete | Sprint 4 |
+| Phase 5: Model B + Advanced | 🟡 Planned | Sprint 5 |
+| Phase 6: Production Hardening | 🟡 Planned | Sprint 6 |
+
+## Architecture Decision Log
+
+### ADR-001: Model A over Model B for initial workspace
+**Decision**: Implement Model A (PAT token via GIT_ASKPASS) first.
+**Rationale**: Simpler to implement, test, and debug. Model B requires the extension to proxy Git operations, adding significant complexity. Model A validates the core workspace isolation design.
+**Status**: Implemented in Phase 4.
+
+### ADR-002: FileSystemProvider over SFTP/SCP
+**Decision**: Use VS Code `FileSystemProvider` API with `conductor://` URI scheme.
+**Rationale**: Native VS Code integration without SSH infrastructure. Files appear in the file explorer, search, and editor just like local files.
+**Status**: Implemented in Phase 4.
+
+### ADR-003: WorkspacePanel over WebView wizard
+**Decision**: Use native VS Code `InputBox` / `QuickPick` for workspace creation.
+**Rationale**: No CSP configuration needed. Integrates with VS Code themes. Feels native compared to a WebView form.
+**Status**: Implemented in Phase 4.
+
+### ADR-004: Per-room worktrees over shared workspace
+**Decision**: Each session room gets its own Git branch (`session/{room_id}`) and worktree.
+**Rationale**: Isolates concurrent sessions. Allows independent commit history per room. Simplifies conflict detection.
+**Status**: Implemented in Phase 4.
+
+### ADR-005: Inline search panel over separate view
+**Decision**: Workspace code search opens in an inline WebView panel with `Ctrl+Shift+F`.
+**Rationale**: Familiar keyboard shortcut. Keeps search results visible alongside code. No need for a separate VS Code sidebar view.
+**Status**: Implemented in Phase 4.2.

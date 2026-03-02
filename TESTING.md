@@ -7,315 +7,225 @@
 <a name="english"></a>
 ## English
 
-This guide describes how to test Conductor backend and extension with the current repository setup.
+This guide covers running tests for both the backend (Python/pytest) and the extension (TypeScript/VS Code test runner).
 
-### 1. Test Scope
-
-- Backend automated tests (pytest)
-- Extension service tests (Node test runner)
-- Manual E2E workflow checks
-
-### 2. Backend Tests
-
-Prerequisite (from repo root):
-
-```bash
-make setup-backend
-```
-
-Run all backend tests:
+## Backend Tests
 
 ```bash
 cd backend
-../.venv/bin/pytest tests -v
+pytest                             # all tests
+pytest -k "test_workspace"         # workspace tests only
+pytest -v --tb=short               # verbose with short tracebacks
+pytest --cov=. --cov-report=html   # coverage report
 ```
 
-Collect-only (verify current count):
+### Test Files
 
-```bash
-cd backend
-../.venv/bin/pytest tests --collect-only -q
-```
+| File | Tests | Coverage |
+|------|-------|----------|
+| `tests/test_workspace.py` | Workspace CRUD, Git ops, search | `/workspace/` router |
+| `tests/test_ai.py` | AI status, inference, provider selection | `/ai/` router |
+| `tests/test_chat.py` | WebSocket, history, typing indicators | `/chat` router |
+| `tests/test_files.py` | Upload, download, dedup, retry | `/files/` router |
+| `tests/test_changes.py` | MockAgent, policy, audit | `/generate-changes`, `/policy/`, `/audit/` |
 
-Current collected count:
-- `368`
+### Workspace Test Coverage
 
-Current breakdown:
-- `tests/test_ai_provider.py`: 131
-- `tests/test_prompt_builder.py`: 64
-- `tests/test_auth.py`: 38
-- `tests/test_auto_apply_policy.py`: 28
-- `tests/test_chat.py`: 26
-- `tests/test_mock_agent.py`: 26
-- `tests/test_style_loader.py`: 22
-- `tests/test_room_settings.py`: 18
-- `tests/test_audit.py`: 14
-- `tests/test_main.py`: 1
+The workspace tests (`test_workspace.py`) cover:
 
-Run specific modules:
+- `POST /workspace/create` — success, duplicate room, invalid token, missing params
+- `GET /workspace/{room_id}/files` — list files, empty worktree, unknown room
+- `GET /workspace/{room_id}/file` — read existing, missing path, binary file
+- `PUT /workspace/{room_id}/file` — create, overwrite, path traversal rejection
+- `DELETE /workspace/{room_id}/file` — delete existing, missing file
+- `POST /workspace/{room_id}/commit` — commit with changes, empty commit (no-op)
+- `GET /workspace/{room_id}/search` — basic search, no results, multi-file matches
 
-```bash
-cd backend
-../.venv/bin/pytest tests/test_ai_provider.py -v
-../.venv/bin/pytest tests/test_prompt_builder.py -v
-../.venv/bin/pytest tests/test_auth.py -v
-../.venv/bin/pytest tests/test_chat.py -v
-../.venv/bin/pytest tests/test_mock_agent.py -v
-../.venv/bin/pytest tests/test_auto_apply_policy.py -v
-../.venv/bin/pytest tests/test_audit.py -v
-../.venv/bin/pytest tests/test_room_settings.py -v
-```
+Git operations are mocked via `pytest-mock` to avoid requiring a live Git remote.
 
-### 3. Extension Tests
-
-Compile first:
+## Extension Tests
 
 ```bash
 cd extension
-npm install
-npm run compile
+npm test                           # all tests (launches VS Code test host)
+npm run test:unit                  # unit tests only (no VS Code)
+npm run lint                       # ESLint check
 ```
 
-Run tests:
+### Test Files
 
-```bash
-cd extension
-node --test out/tests/conductorStateMachine.test.js
-node --test out/tests/conductorController.test.js
-node --test out/tests/backendHealthCheck.test.js
-node --test out/tests/aiMessageHandlers.test.js
-node --test out/tests/ssoIdentityCache.test.js
+| File | Tests | Coverage |
+|------|-------|----------|
+| `src/test/sessionFSM.test.ts` | All FSM state transitions | `SessionFSM` |
+| `src/test/workspaceClient.test.ts` | HTTP client methods, error handling | `WorkspaceClient` |
+| `src/test/fileSystemProvider.test.ts` | read/write/delete/rename, error cases | `FileSystemProvider` |
+| `src/test/workspacePanel.test.ts` | Wizard step progression, validation | `WorkspacePanel` |
+
+### Extension Unit Test Details
+
+#### SessionFSM Tests (47 tests)
+
+Covers all valid state transitions and invalid transition errors:
+
+```
+Idle -> ReadyToHost (setReadyToHost)
+Idle -> BackendDisconnected (backendDisconnected)
+ReadyToHost -> CreatingWorkspace (startCreatingWorkspace)
+ReadyToHost -> BackendDisconnected (backendDisconnected)
+CreatingWorkspace -> Hosting (workspaceReady)
+CreatingWorkspace -> ReadyToHost (creationFailed)
+Hosting -> Idle (leaveSession)
+Joined -> Idle (leaveSession)
+BackendDisconnected -> Idle (backendReconnected -> Idle)
 ```
 
-Or run all extension tests at once:
+Invalid transitions throw `InvalidTransitionError`:
 
-```bash
-cd extension
-npm run test
+```typescript
+expect(() => fsm.startCreatingWorkspace()).toThrow(InvalidTransitionError);
+// (when FSM is in Idle state)
 ```
 
-Notes:
-- These tests target service logic and API handler behavior, not full VS Code UI automation.
-- Some tests start local HTTP servers; in restricted sandbox environments they can fail with socket permission errors (`EPERM`).
+#### WorkspaceClient Tests (68 tests)
 
-### 4. Manual E2E Checklist
+Covers all HTTP methods with mocked `fetch`:
 
-1. Start backend:
+- `createWorkspace()` — success 201, conflict 409, server error 500
+- `listFiles()` — returns array, empty array, 404 unknown room
+- `readFile()` — returns content string, 404 file not found
+- `writeFile()` — success 200, path traversal 400
+- `deleteFile()` — success 204, 404
+- `commitChanges()` — success, no-op (empty diff)
+- `searchCode()` — returns matches array, empty results, 404 room
 
-```bash
-make run-backend
+#### FileSystemProvider Tests (83 tests)
+
+Covers VS Code `FileSystemProvider` interface compliance:
+
+- `readFile()` — returns `Uint8Array`, file not found throws `FileNotFound`
+- `writeFile()` — creates/overwrites, emits `onDidChangeFile` event
+- `delete()` — removes file, emits change event
+- `rename()` — moves file, emits change event for both old and new paths
+- `readDirectory()` — returns `[name, FileType][]` array
+- `stat()` — returns `FileStat` with type, size, mtime
+- Error propagation — backend errors map to VS Code `FileSystemError` types
+
+#### WorkspacePanel Tests (33 tests)
+
+Covers the 5-step input wizard:
+
+- Step 1: Repository URL validation (HTTPS, SSH, invalid)
+- Step 2: Branch name validation (valid names, reserved names)
+- Step 3: Token input (non-empty, masked display)
+- Step 4: Confirmation display (shows parsed repo/branch/token preview)
+- Step 5: Submit — calls `WorkspaceClient.createWorkspace()`, handles errors
+- Cancel at any step — returns to `ReadyToHost` state
+
+**Total extension unit tests: 231**
+
+## CI / GitHub Actions
+
+```yaml
+# .github/workflows/test.yml (excerpt)
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: cd backend && pip install -r requirements.txt && pytest
+
+  extension-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: cd extension && npm ci && npm test
 ```
-
-2. Start extension dev host:
-- Open repo root or `extension/` in VS Code
-- Press `F5`
-
-3. Host flow validation:
-- Panel transitions to `ReadyToHost`
-- Click `Start Session`
-- Verify invite link generation and copy behavior
-
-4. Guest flow validation:
-- Paste invite URL in another VS Code instance
-- Verify join success and chat connectivity
-
-5. Chat/file/snippet validation:
-- Send text messages
-- Upload and download files
-- Share code snippet and navigate to source location
-
-6. AI workflow validation:
-- Open AI config and verify `/ai/status`
-- Use `Summarize Chat` (all or selected messages)
-- Verify AI summary appears in room chat
-- Generate coding prompt and verify posting to chat
-
-7. Change review flow validation:
-- Trigger `Generate Changes`
-- Verify sequential diff preview
-- Apply or skip changes
-- Confirm audit log endpoint is called
-
-8. Session termination validation:
-- Host ends session
-- Guests receive `session_ended`
-- Active Live Share session is automatically closed
-- Room files are deleted on backend
-
-### 5. Quick API Smoke Commands
-
-Health check:
-
-```bash
-curl http://localhost:8000/health
-```
-
-AI status:
-
-```bash
-curl http://localhost:8000/ai/status
-```
-
-AI summarize:
-
-```bash
-curl -X POST http://localhost:8000/ai/summarize \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"host","text":"Need auth","timestamp":1}]}'
-```
-
-Generate changes:
-
-```bash
-curl -X POST http://localhost:8000/generate-changes \
-  -H "Content-Type: application/json" \
-  -d '{"instruction":"Generate mock changes"}'
-```
-
-Policy evaluation:
-
-```bash
-curl -X POST http://localhost:8000/policy/evaluate-auto-apply \
-  -H "Content-Type: application/json" \
-  -d '{"change_set":{"changes":[{"id":"1","file":"a.py","type":"create_file","content":"print(1)\n"}],"summary":"demo"}}'
-```
-
-### 6. Common Troubleshooting
-
-- Backend not reachable:
-  - verify `make run-backend` is active
-  - verify extension setting `aiCollab.backendUrl`
-- AI summarize disabled:
-  - check `summary.enabled` in `config/conductor.settings.yaml` and provider keys in `config/conductor.secrets.yaml`
-  - check `/ai/status` response
-- Extension UI seems stale:
-  - run `npm run compile` again and restart debug host
-- File upload fails:
-  - verify backend `/files/upload/{room_id}` is reachable
-  - verify file size <= 20MB
 
 ---
 
 <a name="中文"></a>
 ## 中文
 
-本指南说明在当前仓库下如何测试 Conductor 后端与扩展。
+本指南涵盖后端（Python/pytest）和扩展（TypeScript/VS Code 测试运行器）的测试运行方式。
 
-### 1. 测试范围
-
-- 后端自动化测试（pytest）
-- 扩展服务层测试（Node test runner）
-- 手动端到端流程验证
-
-### 2. 后端测试
-
-前置（仓库根目录）：
-
-```bash
-make setup-backend
-```
-
-运行后端全部测试：
+## 后端测试
 
 ```bash
 cd backend
-../.venv/bin/pytest tests -v
+pytest                             # 所有测试
+pytest -k "test_workspace"         # 仅工作区测试
+pytest -v --tb=short               # 详细输出
+pytest --cov=. --cov-report=html   # 覆盖率报告
 ```
 
-仅收集（确认当前数量）：
+### 测试文件
 
-```bash
-cd backend
-../.venv/bin/pytest tests --collect-only -q
-```
+| 文件 | 测试 | 覆盖 |
+|------|-------|----------|
+| `tests/test_workspace.py` | 工作区 CRUD、Git 操作、搜索 | `/workspace/` 路由 |
+| `tests/test_ai.py` | AI 状态、推理、提供者选择 | `/ai/` 路由 |
+| `tests/test_chat.py` | WebSocket、历史记录、输入指示器 | `/chat` 路由 |
+| `tests/test_files.py` | 上传、下载、重复检测、重试 | `/files/` 路由 |
+| `tests/test_changes.py` | MockAgent、策略、审计 | `/generate-changes`、`/policy/`、`/audit/` |
 
-当前收集数量：
-- `368`
+### 工作区测试覆盖
 
-当前分布：
-- `tests/test_ai_provider.py`: 131
-- `tests/test_prompt_builder.py`: 64
-- `tests/test_auth.py`: 38
-- `tests/test_auto_apply_policy.py`: 28
-- `tests/test_chat.py`: 26
-- `tests/test_mock_agent.py`: 26
-- `tests/test_style_loader.py`: 22
-- `tests/test_room_settings.py`: 18
-- `tests/test_audit.py`: 14
-- `tests/test_main.py`: 1
+工作区测试（`test_workspace.py`）涵盖：
 
-### 3. 扩展测试
+- `POST /workspace/create` — 成功、重复房间、无效令牌、缺少参数
+- `GET /workspace/{room_id}/files` — 列出文件、空 worktree、未知房间
+- `GET /workspace/{room_id}/file` — 读取现有文件、缺少路径、二进制文件
+- `PUT /workspace/{room_id}/file` — 创建、覆写、路径遍历拒绝
+- `DELETE /workspace/{room_id}/file` — 删除现有文件、文件不存在
+- `POST /workspace/{room_id}/commit` — 有更改时提交、空提交（无操作）
+- `GET /workspace/{room_id}/search` — 基本搜索、无结果、多文件匹配
 
-先编译：
+Git 操作通过 `pytest-mock` 模拟，无需实际 Git 远端。
 
-```bash
-cd extension
-npm install
-npm run compile
-```
-
-运行测试：
+## 扩展测试
 
 ```bash
 cd extension
-node --test out/tests/conductorStateMachine.test.js
-node --test out/tests/conductorController.test.js
-node --test out/tests/backendHealthCheck.test.js
-node --test out/tests/aiMessageHandlers.test.js
-node --test out/tests/ssoIdentityCache.test.js
+npm test                           # 所有测试（启动 VS Code 测试主机）
+npm run test:unit                  # 仅单元测试（无需 VS Code）
+npm run lint                       # ESLint 检查
 ```
 
-或一次运行全部扩展测试：
+### 扩展测试文件
 
-```bash
-cd extension
-npm run test
-```
+| 文件 | 测试 | 覆盖 |
+|------|-------|----------|
+| `src/test/sessionFSM.test.ts` | 所有 FSM 状态转换 | `SessionFSM` |
+| `src/test/workspaceClient.test.ts` | HTTP 客户端方法、错误处理 | `WorkspaceClient` |
+| `src/test/fileSystemProvider.test.ts` | 读/写/删除/重命名、错误情况 | `FileSystemProvider` |
+| `src/test/workspacePanel.test.ts` | 向导步骤进展、验证 | `WorkspacePanel` |
 
-说明：
-- 这些测试覆盖服务逻辑和 API 处理逻辑，不是完整 VS Code UI 自动化。
-- 部分测试会启动本地 HTTP 服务；在受限沙箱环境中可能出现 `EPERM` 端口权限错误。
+### 扩展单元测试详情
 
-### 4. 手动 E2E 检查清单
+#### SessionFSM 测试（47 项）
 
-1. 启动后端：
+涵盖所有有效状态转换和无效转换错误。
 
-```bash
-make run-backend
-```
+#### WorkspaceClient 测试（68 项）
 
-2. 启动扩展开发主机：
-- 在 VS Code 打开仓库根目录或 `extension/`
-- 按 `F5`
+涵盖所有 HTTP 方法，使用模拟 `fetch`：包括 `searchCode()` 返回匹配数组、空结果、404 房间。
 
-3. Host 流程验证：
-- 面板状态进入 `ReadyToHost`
-- 点击 `Start Session`
-- 验证邀请链接生成与复制
+#### FileSystemProvider 测试（83 项）
 
-4. Guest 流程验证：
-- 在另一 VS Code 实例粘贴邀请链接
-- 验证加入成功与聊天连通
+涵盖 VS Code `FileSystemProvider` 接口合规性：`readFile()`、`writeFile()`、`delete()`、`rename()`、`readDirectory()`、`stat()`。
 
-5. 聊天/文件/片段验证：
-- 发送文本消息
-- 上传并下载文件
-- 发送代码片段并跳转到源代码位置
+#### WorkspacePanel 测试（33 项）
 
-6. AI 流程验证：
-- 打开 AI 配置并确认 `/ai/status`
-- 执行 `Summarize Chat`（全量或选中消息）
-- 确认 AI 摘要回写到聊天
-- 生成代码提示词并确认回写聊天
+涵盖 5 步输入向导：仓库 URL 验证、分支名验证、令牌输入、确认显示、提交和错误处理。
 
-7. 变更审查流验证：
-- 触发 `Generate Changes`
-- 验证逐条 Diff 预览
-- 应用或跳过变更
-- 确认调用审计日志接口
+**扩展单元测试总计：231 项**
 
-8. 会话结束验证：
-- Host 结束会话
-- Guest 收到 `session_ended`
-- 自动关闭活跃的 Live Share 会话
-- 后端删除该房间上传文件
+## 工作区搜索测试
+
+`GET /workspace/{room_id}/search` 接口测试涵盖：
+- 基本字符串搜索：返回 `file_path`、`line`、`content` 字段
+- 未配置时确认接口返回 503

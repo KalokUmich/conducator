@@ -7,363 +7,319 @@
 <a name="english"></a>
 ## English
 
-This document describes the architecture that is currently implemented in the repository.
+This document describes the architecture of the Conductor system: a VS Code extension frontend and a FastAPI backend.
 
-### 1. System Boundary
+## System Overview
 
-Conductor has two runtime parts:
-
-1. VS Code extension (TypeScript)
-- WebView UI (`extension/media/chat.html`)
-- session FSM and orchestration
-- Live Share integration
-- diff preview/apply in workspace
-
-2. FastAPI backend (Python)
-- WebSocket chat + REST APIs
-- AI provider resolution and summary pipeline
-- policy checks
-- audit logs
-- file storage
-
-```text
-WebView <-> Extension Host <-> FastAPI
-              |                |
-              |                +-> DuckDB + local file storage
-              +-> Live Share
+```
+┌───────────────────────┐  WebSocket  ┌───────────────────────┐
+│   VS Code Extension      ├───────────┤   FastAPI Backend        │
+│                         │  REST/HTTP │                         │
+│  CollabPanel (WebView)  ├───────────┤  Routers:               │
+│  WorkspacePanel         │           │  - chat                  │
+│  SessionFSM             │           │  - workspace             │
+│  FileSystemProvider     │           │  - files                 │
+│  WorkspaceClient        │           │  - ai                    │
+│  WebSocketService       │           │  - changes               │
+└───────────────────────┘           └───────────────────────┘
+                                                  │
+                                         ┌───────┴───────┐
+                                         │  Git Worktrees  │
+                                         │  worktrees/     │
+                                         │  {room_id}/     │
+                                         └───────────────┘
 ```
 
-### 2. Main Module Map
+## Extension Architecture
 
-```text
-extension/
-  src/extension.ts
-    ├─ SessionService
-    ├─ PermissionsService
-    ├─ ConductorStateMachine + ConductorController
-    ├─ DiffPreviewService
-    └─ ExplainWithContextPipeline (8 stages)
-  media/chat.html
+### Session FSM
 
-backend/app/
-  main.py
-    ├─ chat.router
-    ├─ ai_provider.router
-    ├─ agent.router
-    ├─ auth.router
-    ├─ policy.router
-    ├─ audit.router
-    ├─ files.router
-    ├─ context.router
-    ├─ todos.router
-    ├─ embeddings.router
-    └─ rag.router
+The extension manages session lifecycle through a Finite State Machine (FSM). All state transitions are explicit and validated.
+
+```
+                    ┌──────────┐
+                    │   Idle   │
+                    └────┬───┘
+                         │ setReadyToHost()
+                         ▼
+                    ┌──────────────┐
+                    │ ReadyToHost  │
+                    └─────┬─────┘
+                          │ startCreatingWorkspace()
+                          ▼
+                    ┌───────────────────┐
+                    │  CreatingWorkspace  │
+                    └──────┬─────────┘
+                           │ workspaceReady() or creationFailed()
+               ┌─────────┼─────────┐
+               ▼                    ▼
+         ┌─────────┐      ┌────────────┐
+         │ Hosting │      │ ReadyToHost  │ (retry)
+         └────┬───┘      └────────────┘
+              │ leaveSession()
+              ▼
+         ┌─────────┐
+         │   Idle  │
+         └─────────┘
 ```
 
-### 3. Backend Architecture
+**Model A FSM States:**
 
-#### Entry and Lifecycle
+| State | Entry Condition | Exit Transitions |
+|-------|----------------|------------------|
+| `Idle` | Initial / after leave | `setReadyToHost()` → `ReadyToHost` |
+| `ReadyToHost` | Host mode selected | `startCreatingWorkspace()` → `CreatingWorkspace` |
+| `CreatingWorkspace` | Wizard launched | `workspaceReady()` → `Hosting`; `creationFailed()` → `ReadyToHost` |
+| `Hosting` | Workspace provisioned | `leaveSession()` → `Idle` |
+| `Joined` | Joined another host | `leaveSession()` → `Idle` |
+| `BackendDisconnected` | WebSocket lost | `backendReconnected()` → `Idle` |
 
-`backend/app/main.py`:
-- registers routers
-- exposes `/health` and `/public-url`
-- optionally starts ngrok from config
-- initializes AI provider resolver when `summary.enabled=true`
-- stops ngrok on shutdown
+### FileSystemProvider Design
 
-#### Router Responsibilities
+The `FileSystemProvider` implements VS Code's `vscode.FileSystemProvider` interface to expose remote worktree files under the `conductor://` URI scheme.
 
-- `chat`:
-  - `GET /invite`
-  - `GET /chat`
-  - `GET /chat/{room_id}/history`
-  - `POST /chat/{room_id}/ai-message`
-  - `WS /ws/chat/{room_id}`
-- `ai_provider`:
-  - `GET /ai/status`
-  - `POST /ai/summarize`
-  - `POST /ai/code-prompt`
-  - `POST /ai/code-prompt/selective`
-- `agent`:
-  - `POST /generate-changes` (MockAgent)
-- `policy`:
-  - `POST /policy/evaluate-auto-apply`
-- `audit`:
-  - `POST /audit/log-apply`
-  - `GET /audit/logs`
-- `auth`:
-  - `POST /auth/sso/start`
-  - `POST /auth/sso/poll`
-  - `POST /auth/google/start`
-  - `POST /auth/google/poll`
-  - `GET /auth/providers`
-- `files`:
-  - `POST /files/upload/{room_id}`
-  - `GET /files/download/{file_id}`
-  - `DELETE /files/room/{room_id}`
-- `context`:
-  - `POST /context/explain` — enriches request with `ContextEnricher` then calls LLM
-  - `POST /context/explain-rich` — accepts pre-assembled XML prompt, optionally injects RAG context, calls LLM directly
-- `todos`:
-  - `GET /todos/{room_id}` — list room tasks
-  - `POST /todos/{room_id}` — create task
-  - `PUT /todos/{room_id}/{todo_id}` — update task
-  - `DELETE /todos/{room_id}/{todo_id}` — delete task
-- `embeddings`:
-  - `GET /embeddings/config` — active model ID + dim + provider
-  - `POST /embeddings` — batch embed 1–32 texts → `[[float]]`
-- `rag`:
-  - `POST /rag/index` — incremental upsert/delete files in workspace index
-  - `POST /rag/reindex` — full workspace rebuild
-  - `POST /rag/search` — semantic query → ranked `SearchResult[]`
+```
+VS Code Explorer                 FileSystemProvider          Backend REST
+     │                                 │                        │
+     │  readFile(uri)                  │                        │
+     ├────────────────────────────►│                        │
+     │                                 │  GET /workspace/{id}/  │
+     │                                 ├──────────────────────►│
+     │                                 │   file?path=src/main   │
+     │                                 │◄──────────────────────┤
+     │  returns Uint8Array              │   200 { content: ... } │
+     ◄────────────────────────────┤
+```
 
-#### AI Summary Pipeline
+**URI Mapping:**
+```
+conductor://{room_id}/src/main.py
+         └────────┘└───────────┘
+           room_id      file path in worktree
+```
 
-Implemented in `backend/app/ai_provider/pipeline.py`:
+**Methods implemented:**
 
-1. Classification stage
-- classify discussion into one type:
-  - `api_design`, `product_flow`, `code_change`, `architecture`, `innovation`, `debugging`, `general`
+| Method | VS Code API | Backend Call |
+|--------|------------|-------------|
+| `readFile` | `FileSystemProvider.readFile` | `GET /workspace/{id}/file` |
+| `writeFile` | `FileSystemProvider.writeFile` | `PUT /workspace/{id}/file` |
+| `delete` | `FileSystemProvider.delete` | `DELETE /workspace/{id}/file` |
+| `rename` | `FileSystemProvider.rename` | `DELETE` old + `PUT` new |
+| `readDirectory` | `FileSystemProvider.readDirectory` | `GET /workspace/{id}/files` |
+| `stat` | `FileSystemProvider.stat` | Derived from file listing |
 
-2. Targeted summary stage
-- generate structured summary based on classified type
-- includes `topic`, `core_problem`, `proposed_solution`, `impact_scope`, `risk_level`, etc.
+### WorkspacePanel Flow
 
-3. Code relevance stage
-- compute `code_relevant_types` for selective code prompt generation
+The 5-step workspace creation wizard using native VS Code `InputBox`:
 
-4. Item extraction stage
-- extract actionable `CodeRelevantItem` list (title, description, affected_components, type, priority)
-- drives which code-generation prompts are offered in the extension UI
+```
+Step 1: Enter repository URL
+        ↓ (validate HTTPS or SSH format)
+Step 2: Enter branch name
+        ↓ (validate branch name format)
+Step 3: Enter Personal Access Token
+        ↓ (non-empty, masked input)
+Step 4: Confirm (show repo/branch/token preview)
+        ↓ (user confirms or cancels)
+Step 5: POST /workspace/create
+        ↓ (success or error message)
+     FSM.workspaceReady() / creationFailed()
+```
 
-Provider resolution:
-- configured in `summary` section of `conductor.settings.yaml` and provider keys in `conductor.secrets.yaml`
-- priority order: `anthropic` -> `aws_bedrock` -> `openai`
-- first healthy provider with a valid API key becomes active
+## Backend Architecture
 
-#### Chat Core: ConnectionManager
+### Workspace Service
 
-Current responsibilities:
-- room-scoped active WebSocket connections
-- backend-assigned user identity (`host` first, then `guest`)
-- in-memory message history
-- read receipt tracking
-- message dedup (LRU)
-- paginated history
-- broadcast cleanup for dead sockets
+The `workspace_service.py` manages Git operations:
 
-### 4. Extension Architecture
+```python
+class WorkspaceService:
+    def create_workspace(room_id, repo_url, token, base_branch):
+        # 1. Clone bare repo to repos/{room_id}.git
+        # 2. Create worktree at worktrees/{room_id}/
+        # 3. Checkout new branch session/{room_id}
+        # 4. Store mapping: room_id -> worktree path
+        
+    def read_file(room_id, file_path):
+        # Reads file from worktrees/{room_id}/{file_path}
+        
+    def write_file(room_id, file_path, content):
+        # Writes to worktrees/{room_id}/{file_path}
+        
+    def commit_and_push(room_id, message):
+        # git add -A && git commit -m message && git push
+        
+    def search_files(room_id, query):
+        # grep -r query worktrees/{room_id}/
+        # returns: List[{file_path, line, content}]
+```
 
-#### FSM and Controller
+### Router Layer
 
-Files:
-- `extension/src/services/conductorStateMachine.ts`
-- `extension/src/services/conductorController.ts`
+```python
+# routers/workspace.py
 
-States:
-- `Idle`
-- `BackendDisconnected`
-- `ReadyToHost`
-- `Hosting`
-- `Joining`
-- `Joined`
+@router.post("/workspace/create")
+async def create_workspace(req: CreateWorkspaceRequest):
+    # Delegates to workspace_service.create_workspace()
+    
+@router.get("/workspace/{room_id}/search")
+async def search_workspace(room_id: str, q: str):
+    # Delegates to workspace_service.search_files()
+    # Returns: List[SearchResult]
+    
+@router.get("/workspace/{room_id}/file")
+async def read_file(room_id: str, path: str):
+    # Returns file content as text
+```
 
-Key behavior:
-- join-only mode supported via `BackendDisconnected -> JOIN_SESSION -> Joining`
-- start hosting checks backend health and Live Share conflict first
+### Data Flow: Workspace Creation
 
-#### Session and Permissions
+```
+Extension (WorkspacePanel)
+    │
+    │ POST /workspace/create
+    │ { room_id, repo_url, token, base_branch }
+    ▼
+FastAPI (workspace router)
+    │
+    │ workspace_service.create_workspace()
+    ▼
+Git Operations
+    │
+    ├─ git clone --bare {repo_url} repos/{room_id}.git
+    ├─ git worktree add worktrees/{room_id} -b session/{room_id}
+    └─ store mapping
+    │
+    ▼
+Response { status: "created", worktree_path: "..." }
+    │
+    ▼
+Extension FSM.workspaceReady()
+    │
+    ▼
+FileSystemProvider registered at conductor://{room_id}/
+```
 
-- `SessionService` (`extension/src/services/session.ts`):
-  - globalState persistence for room/session IDs
-  - backend URL resolution (including ngrok detection)
-  - guest override from invite URL
-- `PermissionsService` (`extension/src/services/permissions.ts`):
-  - local role model (`lead` / `member`)
+### Data Flow: Code Search
 
-#### WebView and Host Message Bridge
+```
+Extension (WebView Ctrl+Shift+F)
+    │
+    │ WorkspaceClient.searchCode(roomId, query)
+    │ GET /workspace/{room_id}/search?q={query}
+    ▼
+FastAPI (workspace router)
+    │
+    │ workspace_service.search_files(room_id, query)
+    ▼
+Grep in worktrees/{room_id}/
+    │
+    ▼
+Response: [{ file_path, line, content }, ...]
+    │
+    ▼
+Extension: display results in inline search panel
+```
 
-WebView: `extension/media/chat.html`
-Host: `extension/src/extension.ts`
+## Dependency Map
 
-Implemented host commands include:
-- Session: `startSession`, `stopSession`, `retryConnection`, `joinSession`, `leaveSession`, `copyInviteLink`
-- Files/snippets: `uploadFile`, `downloadFile`, `getCodeSnippet`, `navigateToCode`
-- Review flow: `generateChanges`, `applyChanges`, `viewDiff`, `setAutoApply`
-- AI flow: `getAiStatus`, `summarize`, `generateCodePrompt`, `generateCodePromptAndPost`
+```
+extension/src/extension.ts
+    ├── panels/collabPanel.ts
+    │       ├── services/sessionFSM.ts
+    │       ├── services/webSocketService.ts
+    │       └── services/fileUploadService.ts
+    ├── panels/workspacePanel.ts
+    │       └── services/workspaceClient.ts
+    └── services/fileSystemProvider.ts
+            └── services/workspaceClient.ts
 
-### 5. Data Contract
+backend/main.py
+    ├── routers/chat.py
+    ├── routers/workspace.py
+    │       └── services/workspace_service.py
+    ├── routers/files.py
+    ├── routers/ai.py
+    │       └── services/ai_service.py
+    └── routers/changes.py
+```
 
-Shared schema:
-- `shared/changeset.schema.json`
+## Configuration
 
-Core concepts:
-- `ChangeSet.changes[]`
-- `FileChange.type` in `create_file | replace_range`
-- `replace_range` requires `range` and `content`
+### Backend Environment Variables
 
-### 6. Runtime Sequences (Implemented)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKEND_HOST` | `0.0.0.0` | Bind address |
+| `BACKEND_PORT` | `8000` | Port |
+| `GIT_WORKSPACE_ROOT` | `/tmp/conductor_workspaces` | Worktree storage root |
+| `GIT_WORKSPACE_ENABLED` | `false` | Enable Git workspace feature |
 
-Host start:
-1. user clicks `Start Session`
-2. extension checks backend health and Live Share conflicts
-3. FSM enters `Hosting`
-4. extension starts Live Share and generates invite URL
-5. WebView connects to room WebSocket
+### Extension VS Code Settings
 
-Guest join:
-1. guest pastes invite URL
-2. controller parses `roomId` / `backendUrl` / `liveShareUrl`
-3. session service switches to guest room/backend
-4. FSM transitions to `Joined`
-5. optional Live Share join prompt runs in background
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `conductor.backendUrl` | `http://localhost:8000` | Backend base URL |
+| `conductor.enableWorkspace` | `true` | Enable workspace features |
 
-AI summary and prompt:
-1. WebView requests `/ai/status` for provider state
-2. WebView sends selected messages to extension
-3. extension calls `/ai/summarize`
-4. extension posts AI summary via `/chat/{room_id}/ai-message`
-5. user can request `/ai/code-prompt`
-6. prompt can be posted as `ai_code_prompt` message
+## Security Considerations
 
-Change review:
-1. extension calls `/generate-changes`
-2. extension calls `/policy/evaluate-auto-apply`
-3. changes enter sequential review queue
-4. each change diff-previewed and applied/skipped
-5. applied changes logged to `/audit/log-apply`
-
-### 7. Persistence
-
-- audit DB: `audit_logs.duckdb`
-- file metadata DB: `file_metadata.duckdb`
-- TODO DB: `todos.duckdb`
-- file binaries: `uploads/`
-- FAISS indices: `data/rag/{workspace_id}/index.faiss` + `metadata.json`
-- chat room state: in-memory per process
-- extension symbol/vector cache: `~/.conductor/workspace.db` (SQLite, per workspace)
-
-### 8. Implemented vs Limited
-
-Implemented:
-- chat/file/snippet/session/review workflow
-- AI provider status + summary + code prompt workflow in extension UI
-- TODO tracking (room-scoped, DuckDB, full CRUD)
-- Embeddings service (Bedrock Cohere, 1024-dim)
-- FAISS code RAG: AST chunking, workspace-scoped index, incremental updates, semantic search
-- Explain with Context 8-stage pipeline (LSP + dependency resolution + ranking + XML assembly + `/context/explain-rich`)
-
-Limited:
-- `/generate-changes` is still MockAgent-based
-- extension currently uses `/ai/code-prompt` (not selective endpoint)
-- git commit retrieval not yet implemented (planned in former Phase 2.4)
+- **Path traversal**: All file paths are validated against the worktree root before access. Paths containing `..` are rejected with HTTP 400.
+- **Token storage**: PATs are held in memory only during the session; not persisted to disk by the extension.
+- **Git isolation**: Each room's worktree is on a dedicated branch (`session/{room_id}`). Rooms cannot access each other's files.
+- **File size limits**: File read/write operations enforce a 10MB per-file limit on the backend.
 
 ---
 
 <a name="中文"></a>
 ## 中文
 
-本文档描述仓库中当前已经实现的架构。
+本文档描述 Conductor 系统架构：VS Code 扩展前端和 FastAPI 后端。
 
-### 1. 系统边界
+## 系统概览
 
-Conductor 由两部分运行时组成：
+同上方系统概览图。
 
-1. VS Code 扩展（TypeScript）
-- WebView UI（`extension/media/chat.html`）
-- 会话状态机与编排
-- Live Share 集成
-- 工作区 Diff 预览与应用
+## 扩展架构
 
-2. FastAPI 后端（Python）
-- WebSocket 聊天 + REST API
-- AI Provider 解析与摘要流水线
-- 策略评估
-- 审计日志
-- 文件存储
+### 会话 FSM
 
-### 2. 后端路由职责（当前实现）
+扩展通过有限状态机（FSM）管理会话生命周期，所有状态转换都是显式且经过验证的。
 
-- `chat`：`/invite`、`/chat`、`/chat/{room_id}/history`、`/chat/{room_id}/ai-message`、`/ws/chat/{room_id}`
-- `ai_provider`：`/ai/status`、`/ai/summarize`、`/ai/code-prompt`、`/ai/code-prompt/selective`
-- `agent`：`/generate-changes`（MockAgent）
-- `policy`：`/policy/evaluate-auto-apply`
-- `audit`：`/audit/log-apply`、`/audit/logs`
-- `auth`：`/auth/sso/start`、`/auth/sso/poll`、`/auth/google/start`、`/auth/google/poll`、`/auth/providers`
-- `files`：上传/下载/房间清理
-- `context`：`/context/explain`（后端填充上下文）、`/context/explain-rich`（扩展预组装 XML 提示词直接转发至 LLM，可选 RAG 增强）
-- `todos`：`/todos/{room_id}` CRUD（GET/POST/PUT/DELETE）
-- `embeddings`：`/embeddings/config`（模型配置）、`/embeddings`（批量向量化，1–32 条文本）
-- `rag`：`/rag/index`（增量索引）、`/rag/reindex`（全量重建）、`/rag/search`（语义检索）
+**Model A FSM 状态表:**
 
-### 3. AI 摘要流水线
+| 状态 | 进入条件 | 退出转换 |
+|-------|----------------|------------------|
+| `Idle` | 初始 / 离开后 | `setReadyToHost()` → `ReadyToHost` |
+| `ReadyToHost` | 选择主机模式 | `startCreatingWorkspace()` → `CreatingWorkspace` |
+| `CreatingWorkspace` | 向导已启动 | `workspaceReady()` → `Hosting`；`creationFailed()` → `ReadyToHost` |
+| `Hosting` | 工作区已配置 | `leaveSession()` → `Idle` |
+| `Joined` | 已加入其他主机 | `leaveSession()` → `Idle` |
+| `BackendDisconnected` | WebSocket 断开 | `backendReconnected()` → `Idle` |
 
-`backend/app/ai_provider/pipeline.py` 当前实现四阶段：
+### FileSystemProvider 设计
 
-1. 对话分类（7 类讨论类型）
-2. 按分类生成定向结构化摘要
-3. 计算 `code_relevant_types`（用于 selective code prompt）
-4. 条目提取——生成 `CodeRelevantItem` 列表（标题、描述、影响组件、类型、优先级）
+`FileSystemProvider` 实现 VS Code `vscode.FileSystemProvider` 接口，将远程 worktree 文件暴露在 `conductor://` URI 方案下。
 
-Provider 选择由 `conductor.settings.yaml` 的 `summary` 配置和 `conductor.secrets.yaml` 的 provider 密钥驱动，优先级 `anthropic -> aws_bedrock -> openai`。
+**已实现方法：**
 
-### 4. 扩展侧关键模块
+| 方法 | VS Code API | 后端调用 |
+|--------|------------|-------------|
+| `readFile` | `FileSystemProvider.readFile` | `GET /workspace/{id}/file` |
+| `writeFile` | `FileSystemProvider.writeFile` | `PUT /workspace/{id}/file` |
+| `delete` | `FileSystemProvider.delete` | `DELETE /workspace/{id}/file` |
+| `rename` | `FileSystemProvider.rename` | `DELETE` 旧路径 + `PUT` 新路径 |
+| `readDirectory` | `FileSystemProvider.readDirectory` | `GET /workspace/{id}/files` |
+| `stat` | `FileSystemProvider.stat` | 由文件列表推导 |
 
-- 状态机/控制器：`conductorStateMachine.ts`、`conductorController.ts`
-- 会话服务：`session.ts`（globalState、ngrok 检测、guest 覆盖）
-- 权限服务：`permissions.ts`（`lead/member`）
-- WebView + Host 消息桥：`chat.html` + `extension.ts`
+## 后端架构
 
-已接入的 AI 命令：
-- `getAiStatus`
-- `summarize`
-- `generateCodePrompt`
-- `generateCodePromptAndPost`
+### 工作区服务
 
-### 5. 关键运行时序
+`workspace_service.py` 管理 Git 操作：创建工作区、读写文件、提交推送、搜索文件。
 
-Host 发起：
-1. 点击 `Start Session`
-2. 扩展检查后端健康与 Live Share 冲突
-3. FSM 进入 `Hosting`
-4. 启动 Live Share 并生成邀请链接
-5. WebView 建立房间 WebSocket
+### 配置
 
-Guest 加入：
-1. 粘贴邀请链接
-2. 解析 `roomId/backendUrl/liveShareUrl`
-3. SessionService 切换到 guest 房间与后端
-4. FSM 转到 `Joined`
-5. Live Share 加入提示异步执行（可只聊天）
-
-AI 摘要与代码提示词：
-1. WebView 拉取 `/ai/status`
-2. WebView 发送消息集合给 extension
-3. extension 调 `/ai/summarize`
-4. extension 通过 `/chat/{room_id}/ai-message` 写回 AI 摘要
-5. 用户可继续请求 `/ai/code-prompt` 并回写聊天
-
-### 6. 持久化
-
-- 审计库：`audit_logs.duckdb`
-- 文件元数据库：`file_metadata.duckdb`
-- TODO 库：`todos.duckdb`
-- 文件目录：`uploads/`
-- FAISS 索引：`data/rag/{workspace_id}/index.faiss` + `metadata.json`
-- 聊天房间状态：进程内内存
-- 扩展符号/向量缓存：`~/.conductor/workspace.db`（SQLite，每工作区一份）
-
-### 7. 已实现与限制
-
-已实现：
-- 聊天、文件、片段、会话、审查流程
-- 扩展 UI 内 AI 状态/摘要/代码提示词流程
-- TODO 任务管理（DuckDB 持久化，房间隔离）
-- 向量嵌入服务（Bedrock Cohere，1024 维）
-- FAISS 代码 RAG：AST 分块、工作区级索引、增量更新、语义检索
-- 8 阶段代码解释流水线（LSP + 依赖解析 + 排名 + XML 组装 + `/context/explain-rich`）
-
-限制：
-- `/generate-changes` 仍为 MockAgent
-- 扩展目前调用 `/ai/code-prompt`，未走 selective 接口
-- Git 提交语义检索尚未实现
+- Git 工作区默认未启用（`git_workspace.enabled: false`）
