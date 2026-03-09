@@ -1,8 +1,8 @@
-# Guide Addendum: Embedding Providers & RepoMap
+# Guide Addendum: Embedding Providers, RepoMap & Reranking
 
 **This is an addendum to the main [Backend Code Walkthrough](GUIDE.md).**
 
-Sections 8.5 and 8.6 extend the Workspace Code Search chapter.
+Sections 8.5, 8.6, and 8.7 extend the Workspace Code Search chapter.
 
 ---
 
@@ -278,6 +278,209 @@ This gives the AI both "zoom-in" (specific lines) and "zoom-out" (architectural 
 
 ---
 
+## 8.7 Reranking: Post-Retrieval Precision Boost
+
+### 8.7.1 The Problem with Vector Search Ranking
+
+Embedding models compress entire text chunks into a single vector. When you compare query and document vectors via cosine similarity, you get a rough semantic score — but it's lossy. The embedding captures the "gist" but may miss nuances like:
+
+- The query mentions a specific function name, but the embedding model treats it as a generic word
+- Two chunks have similar topics but different relevance to the exact question
+- The top-5 from vector search might not be the best top-5 a more careful model would pick
+
+### 8.7.2 How Reranking Works
+
+Reranking is a **two-stage retrieval** pattern used in production search systems:
+
+```
+Stage 1: Vector search (fast, approximate)
+    Query → embedding → cosine similarity → top-K candidates (e.g. 20)
+
+Stage 2: Reranking (slow, precise)
+    For each candidate: score(query, document) → re-sort → top-N results (e.g. 5)
+```
+
+The reranker sees the full query and full document text together (not compressed into vectors), so it can make more nuanced relevance judgments. This is called a **cross-encoder** approach — both inputs go through the model simultaneously, producing a single relevance score.
+
+### 8.7.3 The RerankProvider Abstraction
+
+```python
+# backend/app/code_search/rerank_provider.py
+
+@dataclass
+class RerankResult:
+    index: int      # Original position in the input list
+    score: float    # Reranker relevance score (higher = more relevant)
+    text: str       # The document text
+
+class RerankProvider(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def name(self) -> str: ...
+
+    @abc.abstractmethod
+    async def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        top_n: Optional[int] = None,
+    ) -> List[RerankResult]: ...
+
+    def health_check(self) -> Dict[str, Any]:
+        return {"provider": self.name, "status": "ok"}
+```
+
+The interface is simple: give it a query and a list of candidate documents, get back a sorted list of results with relevance scores.
+
+### 8.7.4 The Four Backends
+
+**1. Noop (Passthrough)**
+
+```python
+class NoopRerankProvider(RerankProvider):
+    async def rerank(self, query, documents, top_n=None):
+        # Returns documents in original order with monotonically decreasing scores
+        return [RerankResult(index=i, score=1.0 - (i * 0.001), text=doc)
+                for i, doc in enumerate(documents[:n])]
+```
+
+Default backend — reranking disabled. Documents keep their vector search ranking.
+
+**2. Cohere Rerank (Direct API)**
+
+```python
+class CohereRerankProvider(RerankProvider):
+    async def rerank(self, query, documents, top_n=None):
+        response = await loop.run_in_executor(
+            None,
+            lambda: self._client.rerank(
+                model=self._model,
+                query=query,
+                documents=doc_list,
+                top_n=n,
+            ),
+        )
+        # Map response to RerankResult objects
+```
+
+Uses the Cohere Rerank API directly. Model: `rerank-v3.5`. Cost: ~$2/1K queries. Each query can rerank up to 100 documents.
+
+**3. Bedrock Rerank (Cohere on AWS)**
+
+```python
+class BedrockRerankProvider(RerankProvider):
+    async def rerank(self, query, documents, top_n=None):
+        body = json.dumps({"query": query, "documents": doc_list, "top_n": n})
+        response = await loop.run_in_executor(
+            None,
+            lambda: self._client.invoke_model(
+                modelId=self._model_id, body=body, ...
+            ),
+        )
+```
+
+Same Cohere Rerank 3.5 model, but accessed through AWS Bedrock. Reuses existing AWS credentials from `conductor.secrets.yaml`. Model ID: `cohere.rerank-v3-5:0`.
+
+**4. Cross-Encoder (Local)**
+
+```python
+class CrossEncoderRerankProvider(RerankProvider):
+    async def rerank(self, query, documents, top_n=None):
+        pairs = [(query, doc) for doc in doc_list]
+        scores = await loop.run_in_executor(
+            None,
+            lambda: self._model.predict(pairs),
+        )
+        # Sort by score descending
+```
+
+Uses `sentence-transformers` `CrossEncoder` class. Default model: `cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB). Free, runs on CPU. Good for development and testing.
+
+### 8.7.5 The Factory
+
+```python
+def create_rerank_provider(settings) -> RerankProvider:
+    backend = getattr(settings, "rerank_backend", "none")
+    if backend == "none":
+        return NoopRerankProvider()
+    if backend == "cohere":
+        return CohereRerankProvider(model=settings.cohere_rerank_model)
+    if backend == "bedrock":
+        return BedrockRerankProvider(model_id=settings.bedrock_rerank_model_id, ...)
+    if backend == "cross_encoder":
+        return CrossEncoderRerankProvider(model_name=settings.cross_encoder_model_name)
+    raise ValueError(f"Unknown rerank backend: {backend!r}")
+```
+
+### 8.7.6 Integration with the Context Router
+
+The context router now has a 3-stage pipeline:
+
+```python
+@router.post("/context", response_model=ContextResponse)
+async def get_context(req: ContextRequest):
+    # 1. Vector search — fetch a larger candidate set when reranking
+    if should_rerank:
+        fetch_k = settings.code_search.rerank_candidates  # e.g. 20
+    else:
+        fetch_k = req.top_k  # e.g. 5
+
+    search_result = await code_search.search(query, workspace_path, fetch_k)
+
+    # 2. Rerank — re-score candidates and take top-N
+    if should_rerank and chunks:
+        rerank_results = await rerank_provider.rerank(
+            query=req.query,
+            documents=[c.content for c in chunks],
+            top_n=req.top_k,
+        )
+        # Rebuild chunks in reranked order with rerank_score
+
+    # 3. Graph search — personalised PageRank biased to (reranked) results
+    repo_map_text = repo_map_svc.generate_repo_map(
+        workspace_path, query_files=vector_files
+    )
+```
+
+Key points:
+- Reranking is optional and controlled by `rerank_backend` in settings or per-request via `enable_reranking`
+- When reranking is enabled, vector search fetches more candidates (default: 20 → rerank → top 5)
+- Graph search receives the reranked file list, so PageRank is biased towards the best results
+- The `ContextResponse` includes `reranked: bool` and per-chunk `rerank_score: Optional[float]`
+- If reranking fails (API error), the system falls back gracefully to vector search results
+
+### 8.7.7 Configuration
+
+```yaml
+# conductor.settings.yaml
+code_search:
+  rerank_backend: "none"     # none | cohere | bedrock | cross_encoder
+  rerank_top_n: 5            # Return top N after reranking
+  rerank_candidates: 20      # Fetch this many from vector search before reranking
+  cohere_rerank_model: "rerank-v3.5"
+  bedrock_rerank_model_id: "cohere.rerank-v3-5:0"
+  cross_encoder_model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+```
+
+```yaml
+# conductor.secrets.yaml (for direct Cohere API)
+cohere:
+  api_key: "..."
+```
+
+### 8.7.8 Choosing a Backend
+
+| Backend | Model | Cost | Latency | Best For |
+|---------|-------|------|---------|----------|
+| `none` | — | Free | 0ms | Development, cost-sensitive |
+| `cohere` | rerank-v3.5 | $2/1K queries | ~200ms | Best quality, direct API |
+| `bedrock` | cohere.rerank-v3-5:0 | $2/1K queries | ~200ms | AWS infrastructure, credential reuse |
+| `cross_encoder` | ms-marco-MiniLM-L-6-v2 | Free | ~100ms | Local development, offline, CI |
+
+For production, we recommend `bedrock` (reuses AWS credentials) or `cohere` (direct API). For development, use `cross_encoder` (free, no API key) or `none` (skip entirely).
+
+---
+
 ## Testing the New Modules
 
 ### Running Tests
@@ -286,13 +489,16 @@ This gives the AI both "zoom-in" (specific lines) and "zoom-out" (architectural 
 # Embedding providers (78 tests)
 pytest tests/test_embedding_provider.py -v
 
+# Reranking providers (86 tests)
+pytest tests/test_rerank_provider.py -v
+
 # Repo graph (72 tests)
 pytest tests/test_repo_graph.py -v
 
 # Config (42 tests)
 pytest tests/test_config_new.py -v
 
-# Context router (28 tests)
+# Context router (42 tests)
 pytest tests/test_context.py -v
 ```
 
@@ -317,6 +523,35 @@ async def test_embed_texts(provider):
 ```
 
 External API calls are always mocked. No real API calls in tests.
+
+### Writing New Reranking Provider Tests
+
+Reranking tests follow a similar pattern to embedding tests:
+
+```python
+@pytest.fixture()
+def provider():
+    p = SomeCohereRerankProvider(model="rerank-v3.5")
+    mock_client = MagicMock()
+    p._client = mock_client
+    return p, mock_client
+
+@pytest.mark.asyncio
+async def test_rerank(provider):
+    p, mock_client = provider
+    mock_client.rerank.return_value = MockResponse(results=[...])
+    result = await p.rerank("query", ["doc1", "doc2"], top_n=2)
+    assert len(result) == 2
+    assert result[0].score >= result[1].score  # Sorted descending
+```
+
+Key testing patterns:
+- All external APIs (Cohere, Bedrock, CrossEncoder) are fully mocked
+- Empty document list → returns `[]`
+- `top_n` truncation is verified
+- Score ordering (descending) is asserted
+- Factory function tested for all 4 backends + unknown backend error
+- ABC contract: cannot instantiate `RerankProvider` directly
 
 ### Writing New RepoMap Tests
 

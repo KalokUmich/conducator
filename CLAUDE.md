@@ -19,6 +19,7 @@ uvicorn main:app --reload          # development server
 pytest                             # run all tests
 pytest -k "test_embedding"        # embedding provider tests
 pytest -k "test_repo_graph"       # repo graph tests
+pytest -k "test_rerank"           # reranking provider tests
 pytest --cov=. --cov-report=html   # coverage report
 ```
 
@@ -49,6 +50,7 @@ backend/
 │   ├── code_search/                 # CocoIndex semantic code search
 │   │   ├── service.py               # CodeSearchService
 │   │   ├── embedding_provider.py    # 5 embedding backends (abstract + concrete)
+│   │   ├── rerank_provider.py       # 4 reranking backends (abstract + concrete)
 │   │   ├── schemas.py               # Request/response Pydantic models
 │   │   └── router.py                # /api/code-search/ endpoints
 │   ├── repo_graph/                  # RepoMap graph-based context
@@ -56,15 +58,16 @@ backend/
 │   │   ├── graph.py                 # networkx dependency graph + PageRank
 │   │   └── service.py               # RepoMapService (map generation, caching)
 │   └── context/
-│       └── router.py                # /api/context/ hybrid retrieval endpoint
+│       └── router.py                # /api/context/ hybrid retrieval + reranking
 ├── config/
 │   └── conductor.settings.yaml      # Non-secret settings template
 ├── requirements.txt
 └── tests/
-    ├── test_embedding_provider.py   # 78 tests — all 5 backends
+    ├── test_embedding_provider.py   # 78 tests — all 5 embedding backends
+    ├── test_rerank_provider.py      # 86 tests — all 4 reranking backends
     ├── test_repo_graph.py           # 72 tests — parser + graph + service
     ├── test_config_new.py           # 42 tests — config + secrets + env vars
-    ├── test_context.py              # 28 tests — context router + hybrid retrieval
+    ├── test_context.py              # 42 tests — context router + hybrid + reranking
     ├── test_code_search.py          # 52 tests — code search service + router
     └── test_git_workspace.py        # Git workspace lifecycle
 ```
@@ -101,11 +104,26 @@ The `embedding_provider.py` module defines an `EmbeddingProvider` ABC with 5 imp
 
 Default: **bedrock** with Cohere Embed v4.
 
+### Reranking Provider Architecture
+
+The `rerank_provider.py` module defines a `RerankProvider` ABC with 4 implementations:
+
+| Provider | Default Model | Cost | Notes |
+|----------|--------------|------|-------|
+| `none` | — | Free | Passthrough (no reranking) |
+| `cohere` | `rerank-v3.5` | $2/1K queries | Direct Cohere API |
+| `bedrock` | `cohere.rerank-v3-5:0` | $2/1K queries | Reuses AWS creds |
+| `cross_encoder` | `ms-marco-MiniLM-L-6-v2` | Free | Local, ~80 MB |
+
+Default: **none** (disabled). Enable for better search precision.
+
 Configuration in `conductor.settings.yaml`:
 ```yaml
 code_search:
   embedding_backend: "bedrock"     # local | bedrock | openai | voyage | mistral
-  bedrock_model_id: "cohere.embed-v4:0"
+  rerank_backend: "none"           # none | cohere | bedrock | cross_encoder
+  rerank_top_n: 5                  # Return top N after reranking
+  rerank_candidates: 20            # Fetch this many from vector search
 ```
 
 Credentials in `conductor.secrets.yaml`:
@@ -118,6 +136,8 @@ voyage:
   api_key: "pa-..."
 mistral:
   api_key: "..."
+cohere:
+  api_key: "..."                   # For direct Cohere Rerank API
 ```
 
 ### RepoMap Architecture
@@ -130,6 +150,7 @@ The `repo_graph/` module implements Aider-style repository mapping:
 
 **Hybrid retrieval** in `context/router.py`:
 - Vector search (CocoIndex) finds semantically similar code
+- Reranking (optional) re-scores candidates for better precision
 - Graph search (PageRank) finds structurally important files
 - PageRank is personalised: biased towards files from vector search
 
@@ -158,6 +179,19 @@ vectors = await provider.embed_texts(["def main(): pass"])  # batch embed
 query_vec = await provider.embed_query("search for main")   # query embed
 ```
 
+### RerankProvider Pattern
+```python
+from backend.app.code_search.rerank_provider import create_rerank_provider
+
+reranker = create_rerank_provider(settings)  # factory
+results = await reranker.rerank(
+    query="how does authentication work",
+    documents=["chunk1...", "chunk2...", ...],
+    top_n=5,
+)
+# results: List[RerankResult] sorted by relevance score (descending)
+```
+
 ### RepoMapService Pattern
 ```python
 from backend.app.repo_graph.service import RepoMapService
@@ -181,9 +215,10 @@ _inject_embedding_env_vars(settings)        # pushes secrets → env vars
 
 - Backend tests use `pytest` with mocked external dependencies
 - All embedding providers are tested with mocked API clients (no real API calls)
+- All reranking providers are tested with mocked API clients
 - RepoMap tests use real filesystem operations for parser/graph tests
 - tree-sitter and networkx are mocked in import stubs
-- Config tests verify env var injection for all 5 backends
+- Config tests verify env var injection for all 5 embedding + 4 reranking backends
 
 ## Environment Variables
 
@@ -201,6 +236,9 @@ OPENAI_API_KEY=sk-...            # openai backend
 VOYAGE_API_KEY=pa-...            # voyage backend
 MISTRAL_API_KEY=...              # mistral backend
 
+# Reranking (injected by _inject_embedding_env_vars)
+CO_API_KEY=...                   # cohere rerank backend
+
 # Extension (VS Code settings)
 conductor.backendUrl=http://localhost:8000
 conductor.enableWorkspace=true
@@ -210,10 +248,11 @@ conductor.enableWorkspace=true
 
 - **P0: Multi-Provider Embeddings** — 5 configurable embedding backends with `EmbeddingProvider` abstraction
 - **P1: RepoMap** — tree-sitter + networkx graph + PageRank for graph-based context
-- **Hybrid retrieval** — vector search + graph search combined in context router
-- Added `VoyageSecrets` + `MistralSecrets` to config
-- Updated `_inject_embedding_env_vars()` for all 5 backends
-- 220+ new backend test cases
+- **P2: Reranking** — 4 configurable reranking backends (`RerankProvider` abstraction) integrated into the context router as a post-retrieval step
+- **Hybrid retrieval** — vector search + reranking + graph search combined in context router
+- Added `CohereSecrets`, `VoyageSecrets`, `MistralSecrets` to config
+- Updated `_inject_embedding_env_vars()` for all embedding + reranking backends
+- 300+ new backend test cases
 
 ## What's Next
 

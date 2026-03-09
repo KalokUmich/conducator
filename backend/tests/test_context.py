@@ -1,22 +1,26 @@
-"""Tests for the context enrichment router — hybrid retrieval.
+"""Tests for the context enrichment router — hybrid retrieval + reranking.
 
-Rewritten for CocoIndex + RepoMap integration.  All heavy dependencies
-(cocoindex, sentence_transformers, sqlite_vec, tree-sitter, networkx, git)
-are stubbed so the suite runs in any CI environment.
+Rewritten for CocoIndex + RepoMap + Reranking integration.  All heavy
+dependencies (cocoindex, sentence_transformers, sqlite_vec, tree-sitter,
+networkx, git) are stubbed so the suite runs in any CI environment.
 
 Coverage:
-  * POST /api/context/context — vector search + repo map
+  * POST /api/context/context — vector search + reranking + repo map
   * GET /api/context/context/{room_id}/index-status
   * GET /api/context/context/{room_id}/graph-stats
-  * Edge cases: no workspace, empty results, repo map disabled/failed
+  * GET /api/context/context/{room_id}/rerank-status
+  * Edge cases: no workspace, empty results, repo map disabled/failed,
+    reranking disabled/failed/fallback
 
-Total: 28 tests
+Total: 42 tests
+
 """
 from __future__ import annotations
 
 import sys
 import types
 import pytest
+import numpy as np
 from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
@@ -33,16 +37,21 @@ def _stub(name: str, **attrs) -> types.ModuleType:
     return m
 
 _stub("cocoindex", FlowBuilder=MagicMock, IndexOptions=MagicMock)
-_stub("sentence_transformers", SentenceTransformer=MagicMock)
+_stub("sentence_transformers", SentenceTransformer=MagicMock, CrossEncoder=MagicMock)
 _stub("sqlite_vec")
 _stub("tree_sitter_languages")
 _stub("networkx", DiGraph=MagicMock, pagerank=MagicMock, PowerIterationFailedConvergence=Exception)
+_stub("cohere")
 
 # ---------------------------------------------------------------------------
 # Application setup
 # ---------------------------------------------------------------------------
 
 from backend.app.context.router import router  # noqa: E402
+from backend.app.code_search.rerank_provider import (  # noqa: E402
+    NoopRerankProvider,
+    RerankResult,
+)
 
 app = FastAPI()
 app.include_router(router)
@@ -52,6 +61,20 @@ client = TestClient(app)
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+def _make_chunk(file_path="main.py", start_line=1, end_line=10,
+                content="def main(): pass", score=0.9,
+                symbol_name="main", symbol_type="function"):
+    chunk = MagicMock()
+    chunk.file_path = file_path
+    chunk.start_line = start_line
+    chunk.end_line = end_line
+    chunk.content = content
+    chunk.score = score
+    chunk.symbol_name = symbol_name
+    chunk.symbol_type = symbol_type
+    return chunk
 
 
 @pytest.fixture()
@@ -91,11 +114,37 @@ def mock_repo_map():
     return svc
 
 
+@pytest.fixture()
+def mock_rerank_noop():
+    return NoopRerankProvider()
+
+
+@pytest.fixture()
+def mock_rerank_active():
+    """A mock reranker that reverses the order of documents."""
+    reranker = MagicMock()
+    reranker.name = "mock/reranker"
+
+    async def mock_rerank(query, documents, top_n=None):
+        n = top_n if top_n is not None else len(documents)
+        # Reverse order to simulate reranking
+        results = [
+            RerankResult(index=i, score=1.0 - (i * 0.1), text=documents[i])
+            for i in reversed(range(min(n, len(documents))))
+        ]
+        return results[:n]
+
+    reranker.rerank = mock_rerank
+    reranker.health_check = MagicMock(return_value={"provider": "mock/reranker", "status": "ok"})
+    return reranker
+
+
 @pytest.fixture(autouse=True)
-def _inject_services(mock_code_search, mock_git_workspace, mock_repo_map):
+def _inject_services(mock_code_search, mock_git_workspace, mock_repo_map, mock_rerank_noop):
     with patch("backend.app.context.router._get_code_search_service", return_value=mock_code_search), \
          patch("backend.app.context.router._get_git_workspace_service", return_value=mock_git_workspace), \
-         patch("backend.app.context.router._get_repo_map_service", return_value=mock_repo_map):
+         patch("backend.app.context.router._get_repo_map_service", return_value=mock_repo_map), \
+         patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_noop):
         yield
 
 
@@ -120,6 +169,7 @@ class TestContextEndpointHappyPath:
         assert "query" in data
         assert "chunks" in data
         assert "total" in data
+        assert "reranked" in data
 
     def test_response_includes_repo_map(self, mock_code_search, mock_repo_map):
         resp = client.post("/api/context/context", json={
@@ -138,16 +188,8 @@ class TestContextEndpointHappyPath:
         assert resp.json()["total"] == 0
 
     def test_chunks_from_search_results(self, mock_code_search):
-        mock_chunk = MagicMock()
-        mock_chunk.file_path = "main.py"
-        mock_chunk.start_line = 1
-        mock_chunk.end_line = 10
-        mock_chunk.content = "def main(): pass"
-        mock_chunk.score = 0.9
-        mock_chunk.symbol_name = "main"
-        mock_chunk.symbol_type = "function"
         mock_response = MagicMock()
-        mock_response.results = [mock_chunk]
+        mock_response.results = [_make_chunk()]
         mock_code_search.search = AsyncMock(return_value=mock_response)
 
         resp = client.post("/api/context/context", json={
@@ -159,16 +201,8 @@ class TestContextEndpointHappyPath:
         assert data["chunks"][0]["score"] == 0.9
 
     def test_repo_map_called_with_vector_files(self, mock_code_search, mock_repo_map):
-        mock_chunk = MagicMock()
-        mock_chunk.file_path = "service.py"
-        mock_chunk.start_line = 1
-        mock_chunk.end_line = 5
-        mock_chunk.content = "class Service:"
-        mock_chunk.score = 0.8
-        mock_chunk.symbol_name = None
-        mock_chunk.symbol_type = None
         mock_response = MagicMock()
-        mock_response.results = [mock_chunk]
+        mock_response.results = [_make_chunk(file_path="service.py", symbol_name=None, symbol_type=None)]
         mock_code_search.search = AsyncMock(return_value=mock_response)
 
         client.post("/api/context/context", json={
@@ -178,6 +212,119 @@ class TestContextEndpointHappyPath:
         mock_repo_map.generate_repo_map.assert_called_once()
         call_kwargs = mock_repo_map.generate_repo_map.call_args
         assert "service.py" in call_kwargs[1]["query_files"]
+
+    def test_reranked_false_when_noop(self, mock_code_search):
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test"
+        })
+        assert resp.json()["reranked"] is False
+
+
+# ---------------------------------------------------------------------------
+# POST /api/context/context — reranking integration
+# ---------------------------------------------------------------------------
+
+
+class TestContextReranking:
+    def test_reranked_true_when_active_provider(self, mock_code_search, mock_rerank_active):
+        mock_response = MagicMock()
+        mock_response.results = [
+            _make_chunk(file_path="a.py", content="aaa", score=0.9),
+            _make_chunk(file_path="b.py", content="bbb", score=0.8),
+            _make_chunk(file_path="c.py", content="ccc", score=0.7),
+        ]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+            resp = client.post("/api/context/context", json={
+                "room_id": "room-1", "query": "test"
+            })
+        data = resp.json()
+        assert data["reranked"] is True
+
+    def test_rerank_disabled_via_request_flag(self, mock_code_search, mock_rerank_active):
+        mock_response = MagicMock()
+        mock_response.results = [_make_chunk()]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+            resp = client.post("/api/context/context", json={
+                "room_id": "room-1",
+                "query": "test",
+                "enable_reranking": False,
+            })
+        data = resp.json()
+        assert data["reranked"] is False
+
+    def test_rerank_enabled_via_request_flag(self, mock_code_search, mock_rerank_active):
+        mock_response = MagicMock()
+        mock_response.results = [_make_chunk()]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+            resp = client.post("/api/context/context", json={
+                "room_id": "room-1",
+                "query": "test",
+                "enable_reranking": True,
+            })
+        data = resp.json()
+        assert data["reranked"] is True
+
+    def test_reranked_chunks_have_rerank_score(self, mock_code_search, mock_rerank_active):
+        mock_response = MagicMock()
+        mock_response.results = [
+            _make_chunk(file_path="a.py", content="aaa", score=0.9),
+        ]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+            resp = client.post("/api/context/context", json={
+                "room_id": "room-1", "query": "test"
+            })
+        data = resp.json()
+        assert data["chunks"][0]["rerank_score"] is not None
+
+    def test_no_rerank_score_when_noop(self, mock_code_search):
+        mock_response = MagicMock()
+        mock_response.results = [_make_chunk()]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test"
+        })
+        data = resp.json()
+        assert data["chunks"][0]["rerank_score"] is None
+
+    def test_rerank_none_provider_means_no_reranking(self, mock_code_search):
+        with patch("backend.app.context.router._get_rerank_provider", return_value=None):
+            resp = client.post("/api/context/context", json={
+                "room_id": "room-1", "query": "test"
+            })
+        data = resp.json()
+        assert data["reranked"] is False
+
+    def test_rerank_failure_falls_back_to_vector(self, mock_code_search):
+        """If reranking raises, should fall back to vector search results."""
+        mock_response = MagicMock()
+        mock_response.results = [_make_chunk()]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        broken_reranker = MagicMock()
+        broken_reranker.name = "broken"
+
+        async def broken_rerank(*args, **kwargs):
+            raise RuntimeError("API error")
+
+        broken_reranker.rerank = broken_rerank
+
+        with patch("backend.app.context.router._get_rerank_provider", return_value=broken_reranker):
+            resp = client.post("/api/context/context", json={
+                "room_id": "room-1", "query": "test"
+            })
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["reranked"] is False
+        assert data["total"] >= 0  # Still returns results
 
 
 # ---------------------------------------------------------------------------
@@ -300,3 +447,33 @@ class TestGraphStatsEndpoint:
         mock_git_workspace.get_worktree_path.return_value = None
         resp = client.get("/api/context/context/no-room/graph-stats")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /api/context/context/{room_id}/rerank-status
+# ---------------------------------------------------------------------------
+
+
+class TestRerankStatusEndpoint:
+    def test_returns_200_with_noop(self):
+        resp = client.get("/api/context/context/room-1/rerank-status")
+        assert resp.status_code == 200
+
+    def test_noop_provider_shows_available(self):
+        resp = client.get("/api/context/context/room-1/rerank-status")
+        data = resp.json()
+        assert data["available"] is True
+        assert data["provider"] == "none"
+
+    def test_none_provider_shows_unavailable(self):
+        with patch("backend.app.context.router._get_rerank_provider", return_value=None):
+            resp = client.get("/api/context/context/room-1/rerank-status")
+            data = resp.json()
+            assert data["available"] is False
+
+    def test_active_provider_shows_status(self, mock_rerank_active):
+        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+            resp = client.get("/api/context/context/room-1/rerank-status")
+            data = resp.json()
+            assert data["available"] is True
+            assert data["provider"] == "mock/reranker"

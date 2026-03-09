@@ -28,6 +28,11 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
   - File dependency graph (networkx) with PageRank ranking
   - Hybrid retrieval: vector search + graph-based repo map
   - Personalised PageRank (biased towards vector search results)
+- **Reranking (Post-Retrieval Precision)**:
+  - 4 configurable reranking backends (none, cohere, bedrock, cross_encoder)
+  - Two-stage retrieval: vector search → rerank → top-N
+  - Pluggable RerankProvider abstraction
+  - Integrated into context router as optional post-retrieval step
 
 ## Phase 1: Foundation (COMPLETE)
 
@@ -130,6 +135,19 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 - [x] `GET /api/context/context/{room_id}/graph-stats` endpoint
 - [x] Comprehensive tests (72 test cases)
 
+### 4.5.4 Reranking for Code Search (P2)
+- [x] RerankProvider abstract base class + RerankResult dataclass
+- [x] NoopRerankProvider (passthrough, default)
+- [x] CohereRerankProvider (Cohere Rerank 3.5 direct API)
+- [x] BedrockRerankProvider (Cohere Rerank 3.5 via AWS Bedrock)
+- [x] CrossEncoderRerankProvider (local `ms-marco-MiniLM-L-6-v2`)
+- [x] Factory function `create_rerank_provider(settings)`
+- [x] CohereSecrets in config + `_inject_embedding_env_vars()` for reranking
+- [x] Context router: 3-stage pipeline (vector → rerank → graph)
+- [x] Per-request `enable_reranking` override + `rerank_score` in response
+- [x] `GET /api/context/context/{room_id}/rerank-status` endpoint
+- [x] Comprehensive tests (86 reranking + 14 context integration = 100 test cases)
+
 ## Phase 5: Model B & Advanced Features (PLANNED)
 
 ### 5.1 Model B: Delegate Authentication
@@ -188,6 +206,7 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 | Phase 4.5: Semantic Code Search | ✅ Complete | Sprint 5 |
 | Phase 4.5.2: Multi-Provider Embeddings | ✅ Complete | Sprint 5 |
 | Phase 4.5.3: RepoMap Graph Context | ✅ Complete | Sprint 5 |
+| Phase 4.5.4: Reranking for Code Search | ✅ Complete | Sprint 5 |
 | Phase 5: Model B + Advanced | 🟡 Planned | Sprint 6 |
 | Phase 6: Production Hardening | 🟡 Planned | Sprint 7 |
 
@@ -237,3 +256,8 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 **Decision**: Use tree-sitter AST parsing + networkx dependency graph + PageRank for file importance ranking.
 **Rationale**: Vector search finds semantically similar code but misses structural context. The dependency graph identifies files that are structurally important (heavily imported, central to architecture) even if they don't contain text matching the query. Personalised PageRank bridges the two: bias towards files from vector search, then expand via graph.
 **Status**: Implemented in Phase 4.5.3.
+
+### ADR-010: Two-stage reranking with pluggable backends
+**Decision**: Add optional reranking as a post-retrieval step with 4 backends (none, cohere, bedrock, cross_encoder).
+**Rationale**: Vector search returns approximate results — the embedding compresses semantics into a single vector, losing nuance. A reranker (cross-encoder) sees the full query and document text together, making more precise relevance judgments. Cohere Rerank 3.5 provides excellent quality at $2/1K queries. Bedrock variant reuses existing AWS credentials. Cross-encoder provides a free local option for development. The noop backend allows disabling reranking with zero overhead.
+**Status**: Implemented in Phase 4.5.4.

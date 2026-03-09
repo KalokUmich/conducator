@@ -89,3 +89,38 @@ code_search:
   # -- RepoMap (graph-based context) --
   repo_map_enabled: true                   # Enable tree-sitter + PageRank repo map
   repo_map_top_n: 10                       # Top N files to include in context map
+
+  # ---------------------------------------------------------------------------
+  # Reranking (post-retrieval re-scoring)
+  # ---------------------------------------------------------------------------
+  # Reranking is an optional post-retrieval step that uses a cross-encoder
+  # or dedicated reranking model to re-score vector search candidates.
+  # This significantly improves precision (10-30% on typical benchmarks).
+  #
+  # How it works:
+  #   1. Vector search returns a large candidate set (rerank_candidates)
+  #   2. The reranker scores each (query, document) pair
+  #   3. Only the top-N best results are returned
+  #
+  # Backend options:
+  #   "none"           — No reranking (default, zero cost)
+  #   "cohere"         — Cohere Rerank API (rerank-v3.5, $2/1K queries)
+  #   "bedrock"        — AWS Bedrock Rerank (Cohere Rerank 3.5 on Bedrock, $2/1K queries)
+  #   "cross_encoder"  — Local cross-encoder (free, ~80 MB, runs on CPU)
+  #
+  # Recommended:
+  #   - Production: "bedrock" (reuses AWS credentials, no extra API key)
+  #   - Development: "cross_encoder" (free, offline, decent quality)
+  #   - Best quality: "cohere" (direct API, lowest latency)
+  rerank_backend: "none"                   # "none" | "cohere" | "bedrock" | "cross_encoder"
+  rerank_top_n: 5                          # Return this many results after reranking
+  rerank_candidates: 20                    # Fetch this many from vector search before reranking
+
+  # -- Cohere Rerank (direct API) --
+  cohere_rerank_model: "rerank-v3.5"       # Cohere Rerank 3.5 ($2/1K queries)
+
+  # -- Bedrock Rerank --
+  bedrock_rerank_model_id: "cohere.rerank-v3-5:0"  # Reuses AWS credentials from secrets.yaml
+
+  # -- Cross-Encoder (local) --
+  cross_encoder_model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Free, ~80 MB

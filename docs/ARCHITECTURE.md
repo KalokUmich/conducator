@@ -31,6 +31,16 @@ Last updated: 2026-03-09
 │                          │     │  └───────────────────────┘  │
 │                          │     │                             │
 │                          │     │  ┌───────────────────────┐  │
+│                          │     │  │ Rerank Service        │  │
+│                          │     │  │ ┌─────────────────┐   │  │
+│                          │     │  │ │RerankProvider   │   │  │
+│                          │     │  │ │ none│cohere│    │   │  │
+│                          │     │  │ │ bedrock│cross_  │   │  │
+│                          │     │  │ │ encoder         │   │  │
+│                          │     │  │ └─────────────────┘   │  │
+│                          │     │  └───────────────────────┘  │
+│                          │     │                             │
+│                          │     │  ┌───────────────────────┐  │
 │                          │     │  │ RepoMap Service       │  │
 │                          │     │  │ tree-sitter → graph   │  │
 │                          │     │  │ → PageRank ranking    │  │
@@ -38,7 +48,8 @@ Last updated: 2026-03-09
 │                          │     │                             │
 │                          │     │  ┌───────────────────────┐  │
 │                          │     │  │ Context Router        │  │
-│                          │     │  │ vector + graph hybrid │  │
+│                          │     │  │ vector → rerank →     │  │
+│                          │     │  │ graph hybrid          │  │
 │                          │     │  └───────────────────────┘  │
 └──────────────────────────┘     └─────────────────────────────┘
 ```
@@ -51,7 +62,7 @@ Settings are loaded from two YAML files:
 - `conductor.settings.yaml` — non-secret configuration
 - `conductor.secrets.yaml` — API keys, credentials (never committed)
 
-The `AppSettings` Pydantic model contains all sub-settings. The `_inject_embedding_env_vars()` function pushes secrets from our config into environment variables expected by downstream SDKs.
+The `AppSettings` Pydantic model contains all sub-settings. The `_inject_embedding_env_vars()` function pushes secrets from our config into environment variables expected by downstream SDKs (embedding and reranking providers).
 
 ### Git Workspace (`git_workspace/`)
 
@@ -88,6 +99,38 @@ Source files → AST chunking → Embedding → sqlite-vec storage
 - `VoyageEmbeddingProvider` — code-specialised models
 - `MistralEmbeddingProvider` — Codestral Embed
 
+### Reranking (`code_search/rerank_provider.py`)
+
+Post-retrieval re-scoring for improved search precision:
+
+```
+Vector search candidates (K=20)
+          │
+          ▼
+    ┌─────────────────────────────┐
+    │      RerankProvider          │
+    │                              │
+    │  ┌─────┐ ┌──────┐ ┌──────┐ │
+    │  │Noop │ │Cohere│ │Bedrk │ │
+    │  │     │ │ API  │ │Cohere│ │
+    │  └─────┘ └──────┘ └──────┘ │
+    │  ┌──────────┐               │
+    │  │CrossEnc  │               │
+    │  │ms-marco  │               │
+    │  └──────────┘               │
+    └─────────────────────────────┘
+          │
+          ▼
+    Top-N reranked results (N=5)
+```
+
+**RerankProvider hierarchy:**
+- `RerankProvider` (ABC) — defines `rerank()`, `name`, `health_check()`
+- `NoopRerankProvider` — passthrough (default, no reranking)
+- `CohereRerankProvider` — Cohere Rerank 3.5 via direct API
+- `BedrockRerankProvider` — Cohere Rerank 3.5 via AWS Bedrock
+- `CrossEncoderRerankProvider` — local cross-encoder (ms-marco-MiniLM-L-6-v2)
+
 ### RepoMap (`repo_graph/`)
 
 Aider-style repository understanding via dependency graph:
@@ -112,23 +155,28 @@ Source files → tree-sitter AST → Extract definitions + references
 
 ### Context Router (`context/router.py`)
 
-Hybrid retrieval combining vector and graph search:
+Three-stage hybrid retrieval combining vector search, reranking, and graph search:
 
 ```
 User query
     │
-    ├── Vector search (CocoIndex)
-    │   → top-K semantically similar code chunks
+    ├── 1. Vector search (CocoIndex)
+    │   → top-K semantically similar code chunks (K=20 if reranking)
     │
-    └── Graph search (RepoMap)
-        → personalised PageRank (biased to vector results)
-        → top-N structurally important files
+    ├── 2. Reranking (optional, RerankProvider)
+    │   → re-score candidates with cross-encoder / API reranker
+    │   → top-N most relevant chunks (N=5)
+    │
+    └── 3. Graph search (RepoMap)
+        → personalised PageRank (biased to reranked results)
+        → top-M structurally important files
         → text-based repo map for AI prompt
 ```
 
-The `POST /api/context/context` endpoint returns both:
-- `chunks` — ranked code snippets from vector search
+The `POST /api/context/context` endpoint returns:
+- `chunks` — ranked code snippets (with optional `rerank_score`)
 - `repo_map` — text showing file structure for AI context
+- `reranked` — boolean indicating whether reranking was applied
 
 ## Data Flow: Semantic Search
 
@@ -137,11 +185,12 @@ The `POST /api/context/context` endpoint returns both:
 2. Extension sends POST /api/context/context {room_id, query}
 3. Backend resolves room → workspace path
 4. CodeSearchService runs vector search via CocoIndex
-5. RepoMapService builds/caches dependency graph
-6. PageRank is personalised to files from step 4
-7. RepoMap text is generated from top-ranked files
-8. Response: {chunks, repo_map} sent to extension
-9. Extension feeds chunks + repo_map to AI provider as context
+5. (Optional) RerankProvider re-scores candidates
+6. RepoMapService builds/caches dependency graph
+7. PageRank is personalised to files from step 4/5
+8. RepoMap text is generated from top-ranked files
+9. Response: {chunks, repo_map, reranked} sent to extension
+10. Extension feeds chunks + repo_map to AI provider as context
 ```
 
 ## Data Flow: Index Building
@@ -169,6 +218,15 @@ The `POST /api/context/context` endpoint returns both:
 | `voyage` | `voyage-code-3` | 1024 | 16K | $0.06 | Voyage key |
 | `mistral` | `codestral-embed-2505` | 1024 | — | — | Mistral key |
 
+### Reranking Backends
+
+| Backend | Model | Cost/1K queries | Latency | Credentials |
+|---------|-------|-----------------|---------|-------------|
+| `none` | — | Free | 0ms | None |
+| `cohere` | `rerank-v3.5` | $2.00 | ~200ms | Cohere API key |
+| `bedrock` | `cohere.rerank-v3-5:0` | $2.00 | ~200ms | AWS keys |
+| `cross_encoder` | `ms-marco-MiniLM-L-6-v2` | Free | ~100ms | None |
+
 ### Settings YAML
 
 ```yaml
@@ -182,6 +240,14 @@ code_search:
   mistral_model_name: "codestral-embed-2505"
   repo_map_enabled: true
   repo_map_top_n: 10
+
+  # Reranking
+  rerank_backend: "none"                 # none|cohere|bedrock|cross_encoder
+  rerank_top_n: 5                        # Return top N after reranking
+  rerank_candidates: 20                  # Fetch from vector search before reranking
+  cohere_rerank_model: "rerank-v3.5"
+  bedrock_rerank_model_id: "cohere.rerank-v3-5:0"
+  cross_encoder_model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
 ```
 
 ### Secrets YAML
@@ -197,4 +263,6 @@ voyage:
   api_key: "pa-..."
 mistral:
   api_key: "..."
+cohere:
+  api_key: "..."                         # For direct Cohere Rerank API
 ```

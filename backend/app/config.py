@@ -7,8 +7,12 @@ Loads settings from two YAML files:
 Supported embedding backends: local, bedrock, openai, voyage, mistral.
 Default backend is ``bedrock`` with Cohere Embed v4.
 
-Secrets for Voyage and Mistral are loaded from conductor.secrets.yaml
-and injected into environment variables so downstream SDKs can use them.
+Supported rerank backends: none, cohere, bedrock, cross_encoder.
+Default is ``none`` (disabled). Enable for better search precision.
+
+Secrets for Voyage, Mistral, and Cohere are loaded from
+conductor.secrets.yaml and injected into environment variables so
+downstream SDKs can use them.
 """
 from __future__ import annotations
 
@@ -64,6 +68,11 @@ class MistralSecrets(BaseModel):
     api_key: Optional[str] = None
 
 
+class CohereSecrets(BaseModel):
+    """Cohere credentials (reranking and embedding)."""
+    api_key: Optional[str] = None
+
+
 class DatabaseSecrets(BaseModel):
     url: Optional[str] = None
 
@@ -78,6 +87,7 @@ class Secrets(BaseModel):
     openai:   OpenAISecrets   = Field(default_factory=OpenAISecrets)
     voyage:   VoyageSecrets   = Field(default_factory=VoyageSecrets)
     mistral:  MistralSecrets  = Field(default_factory=MistralSecrets)
+    cohere:   CohereSecrets   = Field(default_factory=CohereSecrets)
     database: DatabaseSecrets = Field(default_factory=DatabaseSecrets)
     jwt:      JWTSecrets      = Field(default_factory=JWTSecrets)
 
@@ -143,7 +153,13 @@ class CodeSearchSettings(BaseModel):
       * ``voyage``  – Voyage AI (code-specialised)
       * ``mistral`` – Mistral Embeddings (Codestral Embed)
 
-    The default is ``bedrock`` with ``cohere.embed-v4:0``.
+    Rerank backend choices:
+      * ``none``           – No reranking (default)
+      * ``cohere``         – Cohere Rerank API (rerank-v3.5)
+      * ``bedrock``        – AWS Bedrock Rerank (Cohere on Bedrock)
+      * ``cross_encoder``  – Local cross-encoder model
+
+    The default embedding is ``bedrock`` with ``cohere.embed-v4:0``.
     Credentials are read from ``conductor.secrets.yaml`` and injected
     into environment variables by :func:`_inject_embedding_env_vars`.
     """
@@ -175,6 +191,20 @@ class CodeSearchSettings(BaseModel):
     repo_map_enabled:    bool = True
     repo_map_top_n:      int  = 10  # Top N files by PageRank to include in map
 
+    # -- Reranking (post-retrieval) --
+    rerank_backend:         Literal["none", "cohere", "bedrock", "cross_encoder"] = "none"
+    rerank_top_n:           int  = 5   # Return top N after reranking
+    rerank_candidates:      int  = 20  # Fetch this many candidates from vector search before reranking
+
+    # -- Cohere Rerank (direct API) --
+    cohere_rerank_model:    str = "rerank-v3.5"
+
+    # -- Bedrock Rerank --
+    bedrock_rerank_model_id: str = "cohere.rerank-v3-5:0"
+
+    # -- Cross-encoder (local) --
+    cross_encoder_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
 
 class AppSettings(BaseModel):
     server:         ServerSettings       = Field(default_factory=ServerSettings)
@@ -188,7 +218,7 @@ class AppSettings(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Environment variable injection for embedding providers
+# Environment variable injection for embedding + reranking providers
 # ---------------------------------------------------------------------------
 
 
@@ -205,6 +235,7 @@ def _inject_embedding_env_vars(settings: AppSettings) -> None:
         openai   → OPENAI_API_KEY
         voyage   → VOYAGE_API_KEY
         mistral  → MISTRAL_API_KEY
+        cohere   → CO_API_KEY (for direct Cohere Rerank API)
     """
     backend = settings.code_search.embedding_backend
     secrets = settings.secrets
@@ -237,6 +268,25 @@ def _inject_embedding_env_vars(settings: AppSettings) -> None:
     else:  # local
         logger.debug("Local embedding backend — no env var injection needed.")
 
+    # --- Reranking credentials ---
+    rerank_backend = settings.code_search.rerank_backend
+
+    if rerank_backend == "cohere":
+        if secrets.cohere.api_key:
+            os.environ["CO_API_KEY"] = secrets.cohere.api_key
+        logger.info("Injected Cohere API key for Cohere rerank backend.")
+
+    elif rerank_backend == "bedrock":
+        # Reuse AWS credentials already injected above (or inject if not yet)
+        if secrets.aws.access_key_id and "AWS_ACCESS_KEY_ID" not in os.environ:
+            os.environ["AWS_ACCESS_KEY_ID"]     = secrets.aws.access_key_id
+        if secrets.aws.secret_access_key and "AWS_SECRET_ACCESS_KEY" not in os.environ:
+            os.environ["AWS_SECRET_ACCESS_KEY"] = secrets.aws.secret_access_key
+        region = settings.code_search.bedrock_region or secrets.aws.region
+        if region and "AWS_DEFAULT_REGION" not in os.environ:
+            os.environ["AWS_DEFAULT_REGION"]    = region
+        logger.info("Injected AWS credentials for Bedrock rerank backend.")
+
 
 # ---------------------------------------------------------------------------
 # Public loader
@@ -254,11 +304,12 @@ def load_settings() -> AppSettings:
     app_settings = AppSettings(**settings_data)
     logger.info(
         "Settings loaded (server=%s:%s, git_workspace.enabled=%s, code_search.enabled=%s, "
-        "embedding_backend=%s)",
+        "embedding_backend=%s, rerank_backend=%s)",
         app_settings.server.host,
         app_settings.server.port,
         app_settings.git_workspace.enabled,
         app_settings.code_search.enabled,
         app_settings.code_search.embedding_backend,
+        app_settings.code_search.rerank_backend,
     )
     return app_settings

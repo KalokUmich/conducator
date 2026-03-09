@@ -6,6 +6,7 @@ Lifespan initializes:
   * CocoIndex Code Search Service (replaces home-built RAG)
   * Embedding Provider (configurable: local / bedrock / openai / voyage / mistral)
   * RepoMap Graph Service (Aider-style file dependency graph + PageRank)
+  * Rerank Provider (configurable: none / cohere / bedrock / cross_encoder)
 
 Removed in this version:
   * FAISS index loading
@@ -26,6 +27,7 @@ from .config import AppSettings, _inject_embedding_env_vars, load_settings
 from .git_workspace.service import GitWorkspaceService
 from .git_workspace.delegate_broker import DelegateBroker
 from .code_search.service import CodeSearchService
+from .code_search.rerank_provider import create_rerank_provider
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Install tree-sitter + networkx to enable.", exc
             )
     app.state.repo_map_service = repo_map_service
+
+    # ---- Reranking Service ----
+    rerank_provider = None
+    try:
+        rerank_provider = create_rerank_provider(settings.code_search)
+        logger.info("Rerank provider initialized: %s", rerank_provider.name)
+    except Exception as exc:
+        logger.warning(
+            "Failed to create rerank provider (%s): %s — reranking disabled.",
+            settings.code_search.rerank_backend,
+            exc,
+        )
+    app.state.rerank_provider = rerank_provider
 
     logger.info("Conducator startup complete.")
     yield

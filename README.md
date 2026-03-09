@@ -55,6 +55,10 @@ Conductor is a VS Code collaboration extension plus a FastAPI backend for team c
   - File dependency graph (networkx) with PageRank ranking
   - Hybrid retrieval: vector search + graph-based repo map
   - Personalised PageRank biased towards query-relevant files
+- **Reranking (Post-Retrieval Precision)**:
+  - 4 configurable reranking backends: none (default), cohere (Rerank 3.5), bedrock (Cohere on AWS), cross_encoder (local)
+  - Two-stage retrieval: vector search → rerank → top-N for improved precision
+  - Optional per-request enable/disable with graceful fallback
 - Workspace code search:
   - `GET /workspace/{room_id}/search?q=...` — full-text search across all files in a session worktree
   - results include file path, line number, and matched line content
@@ -72,13 +76,13 @@ extension/          VS Code extension (TypeScript)
 backend/            FastAPI server (Python)
   app/
     git_workspace/  Git worktree management (Model A/B)
-    code_search/    CocoIndex + EmbeddingProvider abstraction
+    code_search/    CocoIndex + EmbeddingProvider + RerankProvider abstraction
     repo_graph/     tree-sitter + networkx + PageRank
-    context/        Hybrid retrieval (vector + graph)
+    context/        Hybrid retrieval (vector + rerank + graph)
     config.py       Settings + Secrets from YAML
     main.py         App factory + lifespan
   config/           YAML config templates
-  tests/            pytest test suite (220+ new tests)
+  tests/            pytest test suite (320+ new tests)
 ```
 
 ### Embedding Backend Options
@@ -91,10 +95,20 @@ backend/            FastAPI server (Python)
 | `voyage` | voyage-code-3 | 1024 | $0.06 | 16K |
 | `mistral` | codestral-embed-2505 | 1024 | — | — |
 
+### Reranking Backend Options
+
+| Backend | Model | Cost/1K | Notes |
+|---------|-------|---------|-------|
+| `none` | — | Free | Default, passthrough |
+| `cohere` | rerank-v3.5 | $2.00 | Direct Cohere API |
+| `bedrock` | cohere.rerank-v3-5:0 | $2.00 | Reuses AWS creds |
+| `cross_encoder` | ms-marco-MiniLM-L-6-v2 | Free | Local, ~80 MB |
+
 Switch backends in `conductor.settings.yaml`:
 ```yaml
 code_search:
   embedding_backend: "bedrock"  # local | bedrock | openai | voyage | mistral
+  rerank_backend: "none"        # none | cohere | bedrock | cross_encoder
 ```
 
 ### Quick Start
@@ -116,17 +130,19 @@ npm run compile
 
 ```bash
 cd backend
-pytest                             # all tests
-pytest tests/test_embedding_provider.py -v  # embedding tests (78)
-pytest tests/test_repo_graph.py -v          # repo graph tests (72)
-pytest tests/test_config_new.py -v          # config tests (42)
+pytest                                           # all tests
+pytest tests/test_embedding_provider.py -v       # embedding tests (78)
+pytest tests/test_rerank_provider.py -v          # reranking tests (86)
+pytest tests/test_repo_graph.py -v               # repo graph tests (72)
+pytest tests/test_config_new.py -v               # config tests (42)
+pytest tests/test_context.py -v                  # context router tests (42)
 ```
 
 ### Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — system components and data flow
 - [Backend Guide](docs/GUIDE.md) — code walkthrough for junior engineers
-- [Guide Addendum](docs/GUIDE_ADDENDUM.md) — embedding providers and RepoMap
+- [Guide Addendum](docs/GUIDE_ADDENDUM.md) — embedding providers, RepoMap, and reranking
 - [Testing](TESTING.md) — comprehensive test guide (EN + 中文)
 - [Roadmap](ROADMAP.md) — project phases and ADRs
 - [Claude](CLAUDE.md) — guide for AI coding assistants
@@ -145,7 +161,10 @@ Conductor 是一个 VS Code 协作扩展 + FastAPI 后端，用于团队聊天�
   - 本地: SentenceTransformers (免费, 无需 API 密钥)
   - 还支持: OpenAI, Voyage AI, Mistral
 - **RepoMap 图上下文**: tree-sitter AST 解析 + networkx 依赖图 + PageRank 排名
-- **混合检索**: 向量搜索 + 图搜索组合, 个性化 PageRank
+- **重排序 (Reranking)**: 4 种可配置后端 (none / cohere / bedrock / cross_encoder)
+  - 两阶段检索: 向量搜索 → 重排序 → top-N，提高搜索精度
+  - Cohere Rerank 3.5 (API 或 Bedrock) + 本地 cross-encoder
+- **混合检索**: 向量搜索 + 重排序 + 图搜索组合, 个性化 PageRank
 - Git 工作区管理 (替代 Live Share)
 - 实时 WebSocket 聊天
 - 文件上传/下载
@@ -158,6 +177,7 @@ Conductor 是一个 VS Code 协作扩展 + FastAPI 后端，用于团队聊天�
 ```yaml
 code_search:
   embedding_backend: "bedrock"  # local | bedrock | openai | voyage | mistral
+  rerank_backend: "none"        # none | cohere | bedrock | cross_encoder
 ```
 
 密钥在 `conductor.secrets.yaml` 中配置:
@@ -169,13 +189,17 @@ voyage:
   api_key: "pa-..."
 mistral:
   api_key: "..."
+cohere:
+  api_key: "..."
 ```
 
 ### 测试
 
 ```bash
 cd backend
-pytest                                        # 所有测试
-pytest tests/test_embedding_provider.py -v    # embedding 测试 (78 项)
-pytest tests/test_repo_graph.py -v            # 图测试 (72 项)
+pytest                                           # 所有测试
+pytest tests/test_embedding_provider.py -v       # embedding 测试 (78 项)
+pytest tests/test_rerank_provider.py -v          # reranking 测试 (86 项)
+pytest tests/test_repo_graph.py -v               # 图测试 (72 项)
+pytest tests/test_context.py -v                  # 上下文路由测试 (42 项)
 ```

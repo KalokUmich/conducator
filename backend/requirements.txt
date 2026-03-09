@@ -27,6 +27,10 @@ voyageai
 # Mistral AI embeddings (codestral-embed-2505)
 mistralai
 
+# --- Reranking Providers ---
+# Cohere Rerank API (rerank-v3.5)
+cohere
+
 # --- RepoMap (Graph-Based Context) ---
 # Dependency graph construction and PageRank
 networkx

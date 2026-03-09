@@ -2,7 +2,13 @@
 
 Hybrid retrieval strategy:
   1. **Vector search** (CocoIndex) — semantic similarity to the query
-  2. **Graph search** (RepoMap) — structurally important files via PageRank
+  2. **Reranking** (optional) — cross-encoder or API reranker re-scores candidates
+  3. **Graph search** (RepoMap) — structurally important files via PageRank
+
+The reranker is a post-retrieval step: vector search returns a larger
+candidate set (e.g. 20), the reranker re-scores them, and only the
+top-N (e.g. 5) are returned.  This significantly improves precision
+without the cost of running an expensive model over the entire corpus.
 
 The graph search is personalised: files found by vector search receive
 higher teleportation probability in PageRank, so the graph naturally
@@ -32,6 +38,10 @@ class ContextRequest(BaseModel):
     query:   str = Field(..., description="Natural-language query to search for context.")
     top_k:   int = Field(default=5, ge=1, le=20)
     include_repo_map: bool = Field(default=True, description="Include graph-based repo map.")
+    enable_reranking: Optional[bool] = Field(
+        default=None,
+        description="Override reranking for this request. None = use server default.",
+    )
 
 
 class ContextChunk(BaseModel):
@@ -42,6 +52,7 @@ class ContextChunk(BaseModel):
     score:       float
     symbol_name: Optional[str] = None
     symbol_type: Optional[str] = None
+    rerank_score: Optional[float] = None  # Set when reranking is applied
 
 
 class ContextResponse(BaseModel):
@@ -49,7 +60,8 @@ class ContextResponse(BaseModel):
     query:     str
     chunks:    List[ContextChunk]
     total:     int
-    repo_map:  Optional[str] = None   # Graph-based repo map text
+    repo_map:  Optional[str] = None    # Graph-based repo map text
+    reranked:  bool = False             # Whether reranking was applied
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +84,11 @@ def _get_repo_map_service():
     return getattr(app.state, "repo_map_service", None)
 
 
+def _get_rerank_provider():
+    from backend.app.main import app
+    return getattr(app.state, "rerank_provider", None)
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -83,13 +100,15 @@ async def get_context(
     code_search=Depends(_get_code_search_service),
     git_workspace=Depends(_get_git_workspace_service),
     repo_map_svc=Depends(_get_repo_map_service),
+    rerank_provider=Depends(_get_rerank_provider),
 ) -> ContextResponse:
     """
     Retrieve relevant code context for a room + query.
 
     Uses hybrid retrieval:
       1. Vector search (CocoIndex) for semantic matches
-      2. Graph-based repo map (PageRank) for structural context
+      2. Reranking (optional) for improved precision
+      3. Graph-based repo map (PageRank) for structural context
     """
     # --- 1. Resolve the workspace path for this room ---
     worktree_path = git_workspace.get_worktree_path(req.room_id)
@@ -100,14 +119,34 @@ async def get_context(
                    f"Create one via POST /api/git-workspace/workspaces first.",
         )
 
-    # --- 2. Run vector search ---
+    # --- 2. Determine whether to rerank ---
+    should_rerank = False
+    if rerank_provider is not None and rerank_provider.name != "none":
+        if req.enable_reranking is None:
+            should_rerank = True  # Use server default (provider is configured)
+        else:
+            should_rerank = req.enable_reranking
+
+    # --- 3. Run vector search ---
+    # If reranking, fetch more candidates so the reranker has good coverage
+    if should_rerank:
+        # Fetch a larger candidate set for reranking
+        from backend.app.config import load_settings
+        try:
+            settings = load_settings()
+            fetch_k = settings.code_search.rerank_candidates
+        except Exception:
+            fetch_k = max(req.top_k * 4, 20)
+    else:
+        fetch_k = req.top_k
+
     search_result = await code_search.search(
         query          = req.query,
         workspace_path = str(worktree_path),
-        top_k          = req.top_k,
+        top_k          = fetch_k,
     )
 
-    # --- 3. Map results to context chunks ---
+    # --- 4. Map results to context chunks ---
     chunks = [
         ContextChunk(
             file_path   = chunk.file_path,
@@ -121,11 +160,57 @@ async def get_context(
         for chunk in search_result.results
     ]
 
-    # --- 4. Generate repo map (if enabled and available) ---
+    # --- 5. Rerank if enabled ---
+    reranked = False
+    if should_rerank and chunks:
+        try:
+            documents = [c.content for c in chunks]
+            rerank_results = await rerank_provider.rerank(
+                query=req.query,
+                documents=documents,
+                top_n=req.top_k,
+            )
+            # Rebuild chunks in reranked order
+            reranked_chunks = []
+            for rr in rerank_results:
+                original = chunks[rr.index]
+                reranked_chunks.append(
+                    ContextChunk(
+                        file_path    = original.file_path,
+                        start_line   = original.start_line,
+                        end_line     = original.end_line,
+                        content      = original.content,
+                        score        = original.score,
+                        symbol_name  = original.symbol_name,
+                        symbol_type  = original.symbol_type,
+                        rerank_score = rr.score,
+                    )
+                )
+            chunks = reranked_chunks
+            reranked = True
+            logger.info(
+                "Reranked %d candidates → %d results (provider=%s)",
+                len(documents),
+                len(chunks),
+                rerank_provider.name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Reranking failed (provider=%s): %s — returning vector results.",
+                rerank_provider.name,
+                exc,
+            )
+            # Fall back to original vector search results, truncated
+            chunks = chunks[:req.top_k]
+    elif not should_rerank:
+        # No reranking — just truncate to top_k
+        chunks = chunks[:req.top_k]
+
+    # --- 6. Generate repo map (if enabled and available) ---
     repo_map_text = None
     if req.include_repo_map and repo_map_svc is not None:
         try:
-            # Personalise PageRank to files from vector search
+            # Personalise PageRank to files from (reranked) results
             vector_files = list({c.file_path for c in chunks})
             repo_map_text = repo_map_svc.generate_repo_map(
                 workspace_path = str(worktree_path),
@@ -141,6 +226,7 @@ async def get_context(
         chunks   = chunks,
         total    = len(chunks),
         repo_map = repo_map_text,
+        reranked = reranked,
     )
 
 
@@ -180,3 +266,14 @@ async def get_graph_stats(
 
     stats = repo_map_svc.get_graph_stats(str(worktree_path))
     return {"available": True, **stats}
+
+
+@router.get("/context/{room_id}/rerank-status")
+async def get_rerank_status(
+    room_id: str,
+    rerank_provider=Depends(_get_rerank_provider),
+) -> Dict[str, Any]:
+    """Return the status of the reranking provider."""
+    if rerank_provider is None:
+        return {"available": False, "provider": "none", "detail": "No rerank provider configured"}
+    return {"available": True, **rerank_provider.health_check()}
