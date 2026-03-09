@@ -1,6 +1,6 @@
 # Conductor Project Roadmap
 
-Last updated: 2026-03-02
+Last updated: 2026-03-09
 
 ## Current State
 
@@ -18,6 +18,16 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
   - WorkspacePanel 5-step creation wizard
   - WorkspaceClient typed HTTP client
   - Workspace code search (`GET /workspace/{room_id}/search`)
+- **CocoIndex Code Search**:
+  - AST-aware chunking + embedding + sqlite-vec storage
+  - 5 configurable embedding backends (local, bedrock, openai, voyage, mistral)
+  - Default: Cohere Embed v4 via AWS Bedrock
+  - Pluggable EmbeddingProvider abstraction
+- **RepoMap (Graph-based Context)**:
+  - tree-sitter AST parsing for symbol extraction
+  - File dependency graph (networkx) with PageRank ranking
+  - Hybrid retrieval: vector search + graph-based repo map
+  - Personalised PageRank (biased towards vector search results)
 
 ## Phase 1: Foundation (COMPLETE)
 
@@ -90,6 +100,36 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 - [x] Extension: inline search panel in WebView (`Ctrl+Shift+F`)
 - [x] Tests: search endpoint + client method coverage
 
+## Phase 4.5: Semantic Code Search (COMPLETE)
+
+### 4.5.1 CocoIndex Integration
+- [x] CocoIndex Code Search Service (AST-aware chunking + sqlite-vec)
+- [x] Code search router (`/api/code-search/`)
+- [x] Context router with hybrid retrieval (`/api/context/`)
+- [x] Per-workspace index management
+
+### 4.5.2 Multi-Provider Embeddings (P0)
+- [x] EmbeddingProvider abstract base class
+- [x] LocalEmbeddingProvider (SentenceTransformers, `all-MiniLM-L6-v2`)
+- [x] BedrockEmbeddingProvider (Cohere Embed v4, Titan V2)
+- [x] OpenAIEmbeddingProvider (`text-embedding-3-small`)
+- [x] VoyageEmbeddingProvider (`voyage-code-3`)
+- [x] MistralEmbeddingProvider (`codestral-embed-2505`)
+- [x] Factory function `create_embedding_provider(settings)`
+- [x] VoyageSecrets + MistralSecrets in config
+- [x] `_inject_embedding_env_vars()` for all 5 backends
+- [x] Default: Bedrock with Cohere Embed v4 ($0.12/1M tokens)
+- [x] Comprehensive tests (78 test cases)
+
+### 4.5.3 RepoMap Graph-Based Context (P1)
+- [x] `repo_graph/parser.py` — tree-sitter AST + regex fallback
+- [x] `repo_graph/graph.py` — networkx dependency graph + PageRank
+- [x] `repo_graph/service.py` — RepoMapService with caching
+- [x] Hybrid retrieval in context router (vector + graph)
+- [x] Personalised PageRank (biased by vector search results)
+- [x] `GET /api/context/context/{room_id}/graph-stats` endpoint
+- [x] Comprehensive tests (72 test cases)
+
 ## Phase 5: Model B & Advanced Features (PLANNED)
 
 ### 5.1 Model B: Delegate Authentication
@@ -145,8 +185,11 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 | Phase 3: AI Workflows | ✅ Complete | Sprint 3 |
 | Phase 4: Git Workspace (Model A) | ✅ Complete | Sprint 4 |
 | Phase 4.2: Workspace Code Search | ✅ Complete | Sprint 4 |
-| Phase 5: Model B + Advanced | 🟡 Planned | Sprint 5 |
-| Phase 6: Production Hardening | 🟡 Planned | Sprint 6 |
+| Phase 4.5: Semantic Code Search | ✅ Complete | Sprint 5 |
+| Phase 4.5.2: Multi-Provider Embeddings | ✅ Complete | Sprint 5 |
+| Phase 4.5.3: RepoMap Graph Context | ✅ Complete | Sprint 5 |
+| Phase 5: Model B + Advanced | 🟡 Planned | Sprint 6 |
+| Phase 6: Production Hardening | 🟡 Planned | Sprint 7 |
 
 ## Architecture Decision Log
 
@@ -174,3 +217,23 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 **Decision**: Workspace code search opens in an inline WebView panel with `Ctrl+Shift+F`.
 **Rationale**: Familiar keyboard shortcut. Keeps search results visible alongside code. No need for a separate VS Code sidebar view.
 **Status**: Implemented in Phase 4.2.
+
+### ADR-006: CocoIndex over FAISS for code search
+**Decision**: Use CocoIndex for AST-aware code chunking and sqlite-vec for vector storage.
+**Rationale**: AST-aware chunking produces more meaningful code segments than naive text splitting. sqlite-vec is embedded (no external vector DB infra needed). CocoIndex handles language detection and symbol boundary detection.
+**Status**: Implemented in Phase 4.5.
+
+### ADR-007: Cohere Embed v4 as default embedding model
+**Decision**: Default to Cohere Embed v4 via AWS Bedrock ($0.12/1M tokens, 128K context).
+**Rationale**: Best price-performance ratio. 128K context window handles large code files. Reuses existing AWS Bedrock credentials from AI Summary feature. Titan V2 was considered but has only 8K context at $0.20/1M.
+**Status**: Implemented in Phase 4.5.2.
+
+### ADR-008: Pluggable embedding backends
+**Decision**: Abstract embedding behind `EmbeddingProvider` with 5 concrete implementations.
+**Rationale**: Teams have different cloud provider preferences and API access. Local mode (SentenceTransformers) enables offline/free development. Voyage AI's `voyage-code-3` is code-specialised. Having all options lets teams choose based on cost, latency, and quality.
+**Status**: Implemented in Phase 4.5.2.
+
+### ADR-009: Aider-style RepoMap for graph-based context
+**Decision**: Use tree-sitter AST parsing + networkx dependency graph + PageRank for file importance ranking.
+**Rationale**: Vector search finds semantically similar code but misses structural context. The dependency graph identifies files that are structurally important (heavily imported, central to architecture) even if they don't contain text matching the query. Personalised PageRank bridges the two: bias towards files from vector search, then expand via graph.
+**Status**: Implemented in Phase 4.5.3.

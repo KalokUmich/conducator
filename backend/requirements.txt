@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 pytest
+pytest-asyncio
 httpx
 jsonschema
 duckdb
@@ -17,3 +18,17 @@ cocoindex-code
 sentence-transformers
 # Vector storage backend used by CocoIndex
 sqlite-vec
+
+# --- Embedding Providers ---
+# OpenAI embeddings (text-embedding-3-small etc.)
+openai
+# Voyage AI embeddings (voyage-code-3, code-specialised)
+voyageai
+# Mistral AI embeddings (codestral-embed-2505)
+mistralai
+
+# --- RepoMap (Graph-Based Context) ---
+# Dependency graph construction and PageRank
+networkx
+# AST parsing for symbol extraction (Python, JS, TS, Go, Rust, etc.)
+tree-sitter-languages

@@ -1,6 +1,13 @@
 """Context router — provides code context for AI chat rooms.
 
-Switched from home-built RAG (FAISS + Bedrock Embeddings) to CocoIndex.
+Hybrid retrieval strategy:
+  1. **Vector search** (CocoIndex) — semantic similarity to the query
+  2. **Graph search** (RepoMap) — structurally important files via PageRank
+
+The graph search is personalised: files found by vector search receive
+higher teleportation probability in PageRank, so the graph naturally
+returns files that are structurally connected to the semantically
+relevant ones.
 """
 from __future__ import annotations
 
@@ -24,6 +31,7 @@ class ContextRequest(BaseModel):
     room_id: str
     query:   str = Field(..., description="Natural-language query to search for context.")
     top_k:   int = Field(default=5, ge=1, le=20)
+    include_repo_map: bool = Field(default=True, description="Include graph-based repo map.")
 
 
 class ContextChunk(BaseModel):
@@ -37,10 +45,11 @@ class ContextChunk(BaseModel):
 
 
 class ContextResponse(BaseModel):
-    room_id:  str
-    query:    str
-    chunks:   List[ContextChunk]
-    total:    int
+    room_id:   str
+    query:     str
+    chunks:    List[ContextChunk]
+    total:     int
+    repo_map:  Optional[str] = None   # Graph-based repo map text
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +67,11 @@ def _get_git_workspace_service():
     return app.state.git_workspace_service
 
 
+def _get_repo_map_service():
+    from backend.app.main import app
+    return getattr(app.state, "repo_map_service", None)
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -68,12 +82,14 @@ async def get_context(
     req: ContextRequest,
     code_search=Depends(_get_code_search_service),
     git_workspace=Depends(_get_git_workspace_service),
+    repo_map_svc=Depends(_get_repo_map_service),
 ) -> ContextResponse:
     """
     Retrieve relevant code context for a room + query.
 
-    Resolves the room's git worktree path, then runs a CocoIndex
-    semantic search over the worktree's code.
+    Uses hybrid retrieval:
+      1. Vector search (CocoIndex) for semantic matches
+      2. Graph-based repo map (PageRank) for structural context
     """
     # --- 1. Resolve the workspace path for this room ---
     worktree_path = git_workspace.get_worktree_path(req.room_id)
@@ -84,7 +100,7 @@ async def get_context(
                    f"Create one via POST /api/git-workspace/workspaces first.",
         )
 
-    # --- 2. Run code search ---
+    # --- 2. Run vector search ---
     search_result = await code_search.search(
         query          = req.query,
         workspace_path = str(worktree_path),
@@ -105,11 +121,26 @@ async def get_context(
         for chunk in search_result.results
     ]
 
+    # --- 4. Generate repo map (if enabled and available) ---
+    repo_map_text = None
+    if req.include_repo_map and repo_map_svc is not None:
+        try:
+            # Personalise PageRank to files from vector search
+            vector_files = list({c.file_path for c in chunks})
+            repo_map_text = repo_map_svc.generate_repo_map(
+                workspace_path = str(worktree_path),
+                query_files    = vector_files,
+            )
+        except Exception as exc:
+            logger.warning("RepoMap generation failed: %s", exc)
+            repo_map_text = None
+
     return ContextResponse(
-        room_id = req.room_id,
-        query   = req.query,
-        chunks  = chunks,
-        total   = len(chunks),
+        room_id  = req.room_id,
+        query    = req.query,
+        chunks   = chunks,
+        total    = len(chunks),
+        repo_map = repo_map_text,
     )
 
 
@@ -128,3 +159,24 @@ async def get_index_status(
         )
     status_obj = code_search.get_index_status(str(worktree_path))
     return status_obj.model_dump()
+
+
+@router.get("/context/{room_id}/graph-stats")
+async def get_graph_stats(
+    room_id: str,
+    git_workspace=Depends(_get_git_workspace_service),
+    repo_map_svc=Depends(_get_repo_map_service),
+) -> Dict[str, Any]:
+    """Return dependency graph statistics for a workspace."""
+    if repo_map_svc is None:
+        return {"available": False, "detail": "RepoMap service not configured"}
+
+    worktree_path = git_workspace.get_worktree_path(room_id)
+    if worktree_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No workspace for room {room_id!r}",
+        )
+
+    stats = repo_map_svc.get_graph_stats(str(worktree_path))
+    return {"available": True, **stats}

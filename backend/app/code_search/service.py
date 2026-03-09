@@ -4,6 +4,9 @@ Wraps cocoindex-code to provide:
   * Index building (AST-aware chunking + embedding + sqlite-vec storage)
   * Semantic search over code chunks
   * Per-workspace index management
+
+Uses the pluggable ``EmbeddingProvider`` abstraction so the embedding
+backend is configurable (local / bedrock / openai / voyage / mistral).
 """
 from __future__ import annotations
 
@@ -12,6 +15,8 @@ import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from .embedding_provider import EmbeddingProvider, create_embedding_provider
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +49,12 @@ class CodeSearchService:
 
     def __init__(self) -> None:
         self._index_dir: Path = Path("./cocoindex_data")
-        self._embedding_backend: str = "local"
+        self._embedding_backend: str = "bedrock"
         self._top_k_default: int = 5
         self._indices: Dict[str, _IndexRecord] = {}  # workspace_path → record
         self._initialized: bool = False
         self._cocoindex = None  # lazy import
+        self._embedding_provider: Optional[EmbeddingProvider] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -60,6 +66,22 @@ class CodeSearchService:
         self._embedding_backend = settings.embedding_backend
         self._top_k_default    = settings.top_k_results
         self._index_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create embedding provider
+        try:
+            self._embedding_provider = create_embedding_provider(settings)
+            logger.info(
+                "Embedding provider created: %s (dims=%d)",
+                self._embedding_provider.name,
+                self._embedding_provider.dimensions,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to create embedding provider (%s): %s — "
+                "CodeSearchService will be degraded.",
+                settings.embedding_backend,
+                exc,
+            )
 
         try:
             import cocoindex  # type: ignore
@@ -79,6 +101,11 @@ class CodeSearchService:
 
     async def shutdown(self) -> None:
         self._initialized = False
+
+    @property
+    def embedding_provider(self) -> Optional[EmbeddingProvider]:
+        """Access the configured embedding provider (may be None if init failed)."""
+        return self._embedding_provider
 
     # ------------------------------------------------------------------
     # Index management

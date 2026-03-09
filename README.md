@@ -45,6 +45,16 @@ Conductor is a VS Code collaboration extension plus a FastAPI backend for team c
   - provider health/status (`GET /ai/status`)
   - four-step provider selection + confirmation UI
   - streaming inference (`POST /ai/infer`)
+- **Semantic Code Search (CocoIndex)**:
+  - AST-aware code chunking + embedding + sqlite-vec vector storage
+  - 5 configurable embedding backends: local (SentenceTransformers), bedrock (Cohere Embed v4), openai, voyage, mistral
+  - Default: Cohere Embed v4 via AWS Bedrock ($0.12/1M tokens, 128K context)
+  - Per-workspace index management
+- **RepoMap (Graph-Based Context)**:
+  - tree-sitter AST parsing for symbol extraction (regex fallback)
+  - File dependency graph (networkx) with PageRank ranking
+  - Hybrid retrieval: vector search + graph-based repo map
+  - Personalised PageRank biased towards query-relevant files
 - Workspace code search:
   - `GET /workspace/{room_id}/search?q=...` — full-text search across all files in a session worktree
   - results include file path, line number, and matched line content
@@ -60,9 +70,31 @@ extension/          VS Code extension (TypeScript)
     services/       FSM, WebSocket, FileSystemProvider, WorkspaceClient
     commands/       VS Code command handlers
 backend/            FastAPI server (Python)
-  routers/          HTTP route handlers
-  services/         Business logic (workspace, auth, AI)
-  models/           Pydantic schemas
+  app/
+    git_workspace/  Git worktree management (Model A/B)
+    code_search/    CocoIndex + EmbeddingProvider abstraction
+    repo_graph/     tree-sitter + networkx + PageRank
+    context/        Hybrid retrieval (vector + graph)
+    config.py       Settings + Secrets from YAML
+    main.py         App factory + lifespan
+  config/           YAML config templates
+  tests/            pytest test suite (220+ new tests)
+```
+
+### Embedding Backend Options
+
+| Backend | Model | Dimensions | Cost/1M | Context |
+|---------|-------|------------|---------|---------|
+| `local` | all-MiniLM-L6-v2 | 384 | Free | — |
+| `bedrock` | cohere.embed-v4:0 | 1024 | $0.12 | 128K |
+| `openai` | text-embedding-3-small | 1536 | $0.02 | 8K |
+| `voyage` | voyage-code-3 | 1024 | $0.06 | 16K |
+| `mistral` | codestral-embed-2505 | 1024 | — | — |
+
+Switch backends in `conductor.settings.yaml`:
+```yaml
+code_search:
+  embedding_backend: "bedrock"  # local | bedrock | openai | voyage | mistral
 ```
 
 ### Quick Start
@@ -71,7 +103,7 @@ backend/            FastAPI server (Python)
 # Backend
 cd backend
 pip install -r requirements.txt
-uvicorn main:app --reload
+uvicorn app.main:app --reload
 
 # Extension
 cd extension
@@ -80,104 +112,70 @@ npm run compile
 # Press F5 in VS Code to launch Extension Development Host
 ```
 
-### Testing
-
-See [TESTING.md](TESTING.md) for the full test guide.
+### Running Tests
 
 ```bash
-# Backend
-cd backend && pytest
-
-# Extension
-cd extension && npm test
+cd backend
+pytest                             # all tests
+pytest tests/test_embedding_provider.py -v  # embedding tests (78)
+pytest tests/test_repo_graph.py -v          # repo graph tests (72)
+pytest tests/test_config_new.py -v          # config tests (42)
 ```
+
+### Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) — system components and data flow
+- [Backend Guide](docs/GUIDE.md) — code walkthrough for junior engineers
+- [Guide Addendum](docs/GUIDE_ADDENDUM.md) — embedding providers and RepoMap
+- [Testing](TESTING.md) — comprehensive test guide (EN + 中文)
+- [Roadmap](ROADMAP.md) — project phases and ADRs
+- [Claude](CLAUDE.md) — guide for AI coding assistants
 
 ---
 
 <a name="中文"></a>
 ## 中文
 
-Conductor 是一个 VS Code 协作扩展加 FastAPI 后端，支持团队聊天、Git 工作区管理、文件共享和 AI 辅助决策/代码工作流。
+Conductor 是一个 VS Code 协作扩展 + FastAPI 后端，用于团队聊天、Git 工作区管理、文件共享和 AI 辅助代码工作流。
 
 ### 当前功能
 
-- VS Code WebView 协作面板，FSM 驱动的会话生命周期：
-  - `Idle`（空闲）
-  - `BackendDisconnected`（仅加入模式）
-  - `ReadyToHost`（准备托管）
-  - `CreatingWorkspace`（在后端配置 Git worktree）
-  - `Hosting`（托管中）
-  - `Joining`（加入中）
-  - `Joined`（已加入）
-- Git 工作区管理（替代 Live Share）：
-  - 每个房间独立的裸仓库 + worktree 隔离（每个房间获得独立 Git 分支 `session/{room_id}`）
-  - 模式 A：通过 GIT_ASKPASS 进行令牌认证（用户提供个人访问令牌）
-  - 模式 B：委托认证（VS Code 扩展代表后端执行 Git 操作）
-  - 文件同步广播（带防抖）；从后端提交和推送
-  - **FileSystemProvider**（`conductor://` URI 方案）：远程 worktree 文件在 VS Code 资源管理器中显示为本地文件；完整的读/写/删除/重命名支持，由后端 REST API 支持
-  - **WorkspacePanel**：5 步原生 VS Code 输入向导（无 WebView）
-  - **WorkspaceClient**：所有 `/workspace/` 端点的类型化 HTTP 客户端
-- 实时 WebSocket 聊天：
-  - 重连恢复（`since`）
-  - 输入指示器
-  - 已读回执
-  - 消息去重
-  - 分页历史
-- 文件上传/下载（20MB 限制，扩展主机上传代理，重复检测，重试逻辑）
-- 代码片段共享 + 编辑器导航
-- 变更审查工作流：
-  - `POST /generate-changes`（MockAgent）
-  - 策略检查（`POST /policy/evaluate-auto-apply`）
-  - 每个变更的差异预览
-  - 顺序应用/跳过
-  - 审计日志（`POST /audit/log-apply`）
-- AI 提供者工作流：
-  - 提供者健康/状态（`GET /ai/status`）
-  - 四步提供者选择 + 确认界面
-  - 流式推理（`POST /ai/infer`）
-- 工作区代码搜索：
-  - `GET /workspace/{room_id}/search?q=...` — 在会话 worktree 的所有文件中进行全文搜索
-  - 结果包括文件路径、行号和匹配行内容
-  - VS Code 扩展 `WorkspaceClient.searchCode()` 方法
-  - 键盘快捷键 `Ctrl+Shift+F` / `Cmd+Shift+F` 在 WebView 中打开内联搜索面板
+- **语义代码搜索**: CocoIndex AST 感知分块 + 5 种可配置 embedding 后端
+  - 默认: Cohere Embed v4 (AWS Bedrock, $0.12/百万 token, 128K 上下文)
+  - 本地: SentenceTransformers (免费, 无需 API 密钥)
+  - 还支持: OpenAI, Voyage AI, Mistral
+- **RepoMap 图上下文**: tree-sitter AST 解析 + networkx 依赖图 + PageRank 排名
+- **混合检索**: 向量搜索 + 图搜索组合, 个性化 PageRank
+- Git 工作区管理 (替代 Live Share)
+- 实时 WebSocket 聊天
+- 文件上传/下载
+- AI 提供者集成
+- 变更审查工作流
 
-### 架构
+### Embedding 后端
 
-```
-extension/          VS Code 扩展（TypeScript）
-  src/
-    panels/         WebView 面板（CollabPanel、WorkspacePanel）
-    services/       FSM、WebSocket、FileSystemProvider、WorkspaceClient
-    commands/       VS Code 命令处理器
-backend/            FastAPI 服务器（Python）
-  routers/          HTTP 路由处理器
-  services/         业务逻辑（工作区、认证、AI）
-  models/           Pydantic 模式
+在 `conductor.settings.yaml` 中切换:
+```yaml
+code_search:
+  embedding_backend: "bedrock"  # local | bedrock | openai | voyage | mistral
 ```
 
-### 快速开始
-
-```bash
-# 后端
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
-
-# 扩展
-cd extension
-npm install
-npm run compile
-# 在 VS Code 中按 F5 启动扩展开发主机
+密钥在 `conductor.secrets.yaml` 中配置:
+```yaml
+aws:
+  access_key_id: "AKIA..."
+  secret_access_key: "..."
+voyage:
+  api_key: "pa-..."
+mistral:
+  api_key: "..."
 ```
 
 ### 测试
 
-查看 [TESTING.md](TESTING.md) 了解完整测试指南。
-
 ```bash
-# 后端
-cd backend && pytest
-
-# 扩展
-cd extension && npm test
+cd backend
+pytest                                        # 所有测试
+pytest tests/test_embedding_provider.py -v    # embedding 测试 (78 项)
+pytest tests/test_repo_graph.py -v            # 图测试 (72 项)
 ```

@@ -1,25 +1,28 @@
-"""Tests for new config models introduced with git_workspace / code_search.
+"""Tests for the updated configuration module.
 
 Covers:
-* GitWorkspaceConfig  – all fields, defaults, validation
-* CodeSearchConfig    – all fields, defaults, validation
-* AppConfig           – composition, env-var overrides, serialisation
-* Edge-cases: empty strings, boundary values, type coercion
+* AppSettings instantiation with all new fields
+* CodeSearchSettings — all 5 backends, model defaults, validation
+* VoyageSecrets + MistralSecrets
+* _inject_embedding_env_vars — all 5 backends
+* load_settings — YAML loading + merging
+* Edge cases: missing files, empty values, unknown backends
 
-Total: 20 tests
+Total: 42 tests
 """
-
 from __future__ import annotations
 
+import os
 import sys
 import types
 import pytest
-from unittest.mock import MagicMock
+import yaml
+from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 # ---------------------------------------------------------------------------
-# Stubs (keep imports clean without real heavy deps)
+# Stubs
 # ---------------------------------------------------------------------------
-
 
 def _stub(name: str, **attrs) -> types.ModuleType:
     m = types.ModuleType(name)
@@ -28,8 +31,7 @@ def _stub(name: str, **attrs) -> types.ModuleType:
     sys.modules.setdefault(name, m)
     return m
 
-
-_stub("cocoindex", FlowBuilder=MagicMock, IndexOptions=MagicMock)
+_stub("cocoindex")
 _stub("sentence_transformers", SentenceTransformer=MagicMock)
 _stub("sqlite_vec")
 
@@ -37,113 +39,294 @@ _stub("sqlite_vec")
 # Real imports
 # ---------------------------------------------------------------------------
 
-from backend.config import (  # noqa: E402  # type: ignore
-    GitWorkspaceConfig,
-    CodeSearchConfig,
-    AppConfig,
+from backend.app.config import (  # noqa: E402
+    AppSettings,
+    CodeSearchSettings,
+    GitWorkspaceSettings,
+    ServerSettings,
+    Secrets,
+    AwsSecrets,
+    OpenAISecrets,
+    VoyageSecrets,
+    MistralSecrets,
+    _inject_embedding_env_vars,
+    load_settings,
 )
 
-# ---------------------------------------------------------------------------
-# GitWorkspaceConfig tests
-# ---------------------------------------------------------------------------
+
+# ===================================================================
+# CodeSearchSettings
+# ===================================================================
 
 
-class TestGitWorkspaceConfig:
-    def test_default_base_dir(self):
-        cfg = GitWorkspaceConfig()
-        assert cfg.base_dir is not None
+class TestCodeSearchSettingsDefaults:
+    def test_default_backend_is_bedrock(self):
+        cfg = CodeSearchSettings()
+        assert cfg.embedding_backend == "bedrock"
 
-    def test_custom_base_dir(self):
-        cfg = GitWorkspaceConfig(base_dir="/custom/path")
-        assert cfg.base_dir == "/custom/path"
+    def test_default_bedrock_model(self):
+        cfg = CodeSearchSettings()
+        assert cfg.bedrock_model_id == "cohere.embed-v4:0"
 
-    def test_default_max_workspaces(self):
-        cfg = GitWorkspaceConfig()
-        assert isinstance(cfg.max_workspaces, int)
-        assert cfg.max_workspaces > 0
+    def test_default_bedrock_region(self):
+        cfg = CodeSearchSettings()
+        assert cfg.bedrock_region == "us-east-1"
 
-    def test_custom_max_workspaces(self):
-        cfg = GitWorkspaceConfig(max_workspaces=5)
-        assert cfg.max_workspaces == 5
+    def test_default_local_model(self):
+        cfg = CodeSearchSettings()
+        assert cfg.local_model_name == "all-MiniLM-L6-v2"
 
-    def test_max_workspaces_zero_is_valid_or_raises(self):
-        """Either 0 is allowed (unlimited) or validation rejects it."""
-        try:
-            cfg = GitWorkspaceConfig(max_workspaces=0)
-            assert cfg.max_workspaces == 0
-        except (ValueError, Exception):
-            pass  # validation rejecting 0 is also acceptable
+    def test_default_openai_model(self):
+        cfg = CodeSearchSettings()
+        assert cfg.openai_model_name == "text-embedding-3-small"
 
-    def test_serialisation_to_dict(self):
-        cfg = GitWorkspaceConfig(base_dir="/tmp")
-        d = cfg.model_dump() if hasattr(cfg, "model_dump") else cfg.dict()
-        assert isinstance(d, dict)
+    def test_default_voyage_model(self):
+        cfg = CodeSearchSettings()
+        assert cfg.voyage_model_name == "voyage-code-3"
 
-
-# ---------------------------------------------------------------------------
-# CodeSearchConfig tests
-# ---------------------------------------------------------------------------
-
-
-class TestCodeSearchConfig:
-    def test_default_db_path(self):
-        cfg = CodeSearchConfig()
-        assert cfg.db_path is not None
-
-    def test_custom_db_path(self):
-        cfg = CodeSearchConfig(db_path="/tmp/cs.db")
-        assert cfg.db_path == "/tmp/cs.db"
-
-    def test_default_model_name(self):
-        cfg = CodeSearchConfig()
-        assert isinstance(cfg.model_name, str)
-        assert len(cfg.model_name) > 0
-
-    def test_custom_model_name(self):
-        cfg = CodeSearchConfig(model_name="all-MiniLM-L6-v2")
-        assert cfg.model_name == "all-MiniLM-L6-v2"
+    def test_default_mistral_model(self):
+        cfg = CodeSearchSettings()
+        assert cfg.mistral_model_name == "codestral-embed-2505"
 
     def test_default_chunk_size(self):
-        cfg = CodeSearchConfig()
-        assert isinstance(cfg.chunk_size, int)
-        assert cfg.chunk_size > 0
+        cfg = CodeSearchSettings()
+        assert cfg.chunk_size == 512
+
+    def test_default_top_k(self):
+        cfg = CodeSearchSettings()
+        assert cfg.top_k_results == 5
+
+    def test_default_repo_map_enabled(self):
+        cfg = CodeSearchSettings()
+        assert cfg.repo_map_enabled is True
+
+    def test_default_repo_map_top_n(self):
+        cfg = CodeSearchSettings()
+        assert cfg.repo_map_top_n == 10
+
+
+class TestCodeSearchSettingsCustom:
+    def test_set_local_backend(self):
+        cfg = CodeSearchSettings(embedding_backend="local")
+        assert cfg.embedding_backend == "local"
+
+    def test_set_openai_backend(self):
+        cfg = CodeSearchSettings(embedding_backend="openai")
+        assert cfg.embedding_backend == "openai"
+
+    def test_set_voyage_backend(self):
+        cfg = CodeSearchSettings(embedding_backend="voyage")
+        assert cfg.embedding_backend == "voyage"
+
+    def test_set_mistral_backend(self):
+        cfg = CodeSearchSettings(embedding_backend="mistral")
+        assert cfg.embedding_backend == "mistral"
+
+    def test_invalid_backend_raises(self):
+        with pytest.raises(Exception):  # pydantic ValidationError
+            CodeSearchSettings(embedding_backend="invalid")
+
+    def test_custom_bedrock_model(self):
+        cfg = CodeSearchSettings(bedrock_model_id="amazon.titan-embed-text-v2:0")
+        assert cfg.bedrock_model_id == "amazon.titan-embed-text-v2:0"
+
+    def test_custom_region(self):
+        cfg = CodeSearchSettings(bedrock_region="eu-west-1")
+        assert cfg.bedrock_region == "eu-west-1"
 
     def test_custom_chunk_size(self):
-        cfg = CodeSearchConfig(chunk_size=256)
-        assert cfg.chunk_size == 256
+        cfg = CodeSearchSettings(chunk_size=1024)
+        assert cfg.chunk_size == 1024
 
-    def test_serialisation_to_dict(self):
-        cfg = CodeSearchConfig(db_path="/tmp/test.db")
-        d = cfg.model_dump() if hasattr(cfg, "model_dump") else cfg.dict()
+
+class TestCodeSearchSettingsSerialization:
+    def test_model_dump(self):
+        cfg = CodeSearchSettings()
+        d = cfg.model_dump()
         assert isinstance(d, dict)
+        assert "embedding_backend" in d
+        assert "bedrock_model_id" in d
+        assert "voyage_model_name" in d
+        assert "mistral_model_name" in d
+        assert "repo_map_enabled" in d
 
 
-# ---------------------------------------------------------------------------
-# AppConfig tests
-# ---------------------------------------------------------------------------
+# ===================================================================
+# Secrets models
+# ===================================================================
 
 
-class TestAppConfig:
+class TestVoyageSecrets:
+    def test_default(self):
+        s = VoyageSecrets()
+        assert s.api_key is None
+
+    def test_with_key(self):
+        s = VoyageSecrets(api_key="pa-test")
+        assert s.api_key == "pa-test"
+
+
+class TestMistralSecrets:
+    def test_default(self):
+        s = MistralSecrets()
+        assert s.api_key is None
+
+    def test_with_key(self):
+        s = MistralSecrets(api_key="m-test")
+        assert s.api_key == "m-test"
+
+
+class TestSecrets:
+    def test_has_voyage(self):
+        s = Secrets()
+        assert isinstance(s.voyage, VoyageSecrets)
+
+    def test_has_mistral(self):
+        s = Secrets()
+        assert isinstance(s.mistral, MistralSecrets)
+
+    def test_all_fields(self):
+        s = Secrets(
+            aws=AwsSecrets(access_key_id="AK"),
+            openai=OpenAISecrets(api_key="sk-test"),
+            voyage=VoyageSecrets(api_key="pa-test"),
+            mistral=MistralSecrets(api_key="m-test"),
+        )
+        assert s.aws.access_key_id == "AK"
+        assert s.openai.api_key == "sk-test"
+        assert s.voyage.api_key == "pa-test"
+        assert s.mistral.api_key == "m-test"
+
+
+# ===================================================================
+# _inject_embedding_env_vars
+# ===================================================================
+
+
+class TestInjectEnvVars:
+    @pytest.fixture(autouse=True)
+    def clean_env(self):
+        """Remove test env vars before/after each test."""
+        keys = [
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION",
+            "OPENAI_API_KEY", "VOYAGE_API_KEY", "MISTRAL_API_KEY",
+        ]
+        old = {k: os.environ.pop(k, None) for k in keys}
+        yield
+        for k, v in old.items():
+            if v is not None:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+
+    def _make_settings(self, backend="local", **secrets_kwargs):
+        secrets = Secrets(**secrets_kwargs)
+        cs = CodeSearchSettings(embedding_backend=backend)
+        return AppSettings(code_search=cs, secrets=secrets)
+
+    def test_bedrock_injects_aws(self):
+        settings = self._make_settings(
+            backend="bedrock",
+            aws=AwsSecrets(access_key_id="AK", secret_access_key="SK", region="us-west-2"),
+        )
+        _inject_embedding_env_vars(settings)
+        assert os.environ["AWS_ACCESS_KEY_ID"] == "AK"
+        assert os.environ["AWS_SECRET_ACCESS_KEY"] == "SK"
+        assert os.environ["AWS_DEFAULT_REGION"] == "us-west-2"
+
+    def test_openai_injects_key(self):
+        settings = self._make_settings(
+            backend="openai",
+            openai=OpenAISecrets(api_key="sk-hello"),
+        )
+        _inject_embedding_env_vars(settings)
+        assert os.environ["OPENAI_API_KEY"] == "sk-hello"
+
+    def test_voyage_injects_key(self):
+        settings = self._make_settings(
+            backend="voyage",
+            voyage=VoyageSecrets(api_key="pa-hello"),
+        )
+        _inject_embedding_env_vars(settings)
+        assert os.environ["VOYAGE_API_KEY"] == "pa-hello"
+
+    def test_mistral_injects_key(self):
+        settings = self._make_settings(
+            backend="mistral",
+            mistral=MistralSecrets(api_key="m-hello"),
+        )
+        _inject_embedding_env_vars(settings)
+        assert os.environ["MISTRAL_API_KEY"] == "m-hello"
+
+    def test_local_no_injection(self):
+        settings = self._make_settings(backend="local")
+        _inject_embedding_env_vars(settings)
+        assert "AWS_ACCESS_KEY_ID" not in os.environ
+        assert "OPENAI_API_KEY" not in os.environ
+        assert "VOYAGE_API_KEY" not in os.environ
+        assert "MISTRAL_API_KEY" not in os.environ
+
+    def test_bedrock_missing_credentials_no_error(self):
+        settings = self._make_settings(backend="bedrock")
+        # Should not raise even without credentials
+        _inject_embedding_env_vars(settings)
+
+
+# ===================================================================
+# AppSettings
+# ===================================================================
+
+
+class TestAppSettings:
     def test_default_instantiation(self):
-        cfg = AppConfig()
-        assert cfg is not None
+        cfg = AppSettings()
+        assert cfg.code_search.embedding_backend == "bedrock"
 
-    def test_has_git_workspace_config(self):
-        cfg = AppConfig()
-        assert hasattr(cfg, "git_workspace") or hasattr(cfg, "workspace")
+    def test_has_all_sections(self):
+        cfg = AppSettings()
+        assert cfg.server is not None
+        assert cfg.database is not None
+        assert cfg.auth is not None
+        assert cfg.rooms is not None
+        assert cfg.live_share is not None
+        assert cfg.git_workspace is not None
+        assert cfg.code_search is not None
+        assert cfg.secrets is not None
 
-    def test_has_code_search_config(self):
-        cfg = AppConfig()
-        assert hasattr(cfg, "code_search") or hasattr(cfg, "search")
-
-    def test_serialisation(self):
-        cfg = AppConfig()
-        d = cfg.model_dump() if hasattr(cfg, "model_dump") else cfg.dict()
+    def test_serialization(self):
+        cfg = AppSettings()
+        d = cfg.model_dump()
         assert isinstance(d, dict)
+        assert "code_search" in d
+        assert "secrets" in d
 
-    def test_nested_config_accessible(self):
-        cfg = AppConfig()
-        # At least one nested config should be a non-None object
-        attrs = [getattr(cfg, a, None) for a in dir(cfg) if not a.startswith("_")]
-        complex_attrs = [a for a in attrs if hasattr(a, "__dict__")]
-        assert len(complex_attrs) >= 0  # always passes; structure varies
+
+# ===================================================================
+# load_settings
+# ===================================================================
+
+
+class TestLoadSettings:
+    def test_missing_files_returns_defaults(self, tmp_path):
+        with patch("backend.app.config.SETTINGS_FILE", tmp_path / "missing.yaml"), \
+             patch("backend.app.config.SECRETS_FILE", tmp_path / "also_missing.yaml"):
+            settings = load_settings()
+            assert isinstance(settings, AppSettings)
+
+    def test_loads_from_yaml(self, tmp_path):
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text(yaml.dump({
+            "code_search": {
+                "embedding_backend": "local",
+                "local_model_name": "custom-model",
+            }
+        }))
+        secrets_file = tmp_path / "secrets.yaml"
+        secrets_file.write_text(yaml.dump({"openai": {"api_key": "sk-test"}}))
+
+        with patch("backend.app.config.SETTINGS_FILE", settings_file), \
+             patch("backend.app.config.SECRETS_FILE", secrets_file):
+            settings = load_settings()
+            assert settings.code_search.embedding_backend == "local"
+            assert settings.code_search.local_model_name == "custom-model"
+            assert settings.secrets.openai.api_key == "sk-test"

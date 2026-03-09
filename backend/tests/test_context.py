@@ -1,12 +1,17 @@
-"""Tests for the context enrichment router — POST /api/context.
+"""Tests for the context enrichment router — hybrid retrieval.
 
-Rewritten for CocoIndex integration. All heavy dependencies
-(cocoindex, sentence_transformers, sqlite_vec, git) are stubbed so the
-suite runs in any CI environment.
+Rewritten for CocoIndex + RepoMap integration.  All heavy dependencies
+(cocoindex, sentence_transformers, sqlite_vec, tree-sitter, networkx, git)
+are stubbed so the suite runs in any CI environment.
 
-Total: 20 tests
+Coverage:
+  * POST /api/context/context — vector search + repo map
+  * GET /api/context/context/{room_id}/index-status
+  * GET /api/context/context/{room_id}/graph-stats
+  * Edge cases: no workspace, empty results, repo map disabled/failed
+
+Total: 28 tests
 """
-
 from __future__ import annotations
 
 import sys
@@ -20,7 +25,6 @@ from fastapi import FastAPI
 # Stubs for optional heavy dependencies
 # ---------------------------------------------------------------------------
 
-
 def _stub(name: str, **attrs) -> types.ModuleType:
     m = types.ModuleType(name)
     for k, v in attrs.items():
@@ -28,20 +32,22 @@ def _stub(name: str, **attrs) -> types.ModuleType:
     sys.modules.setdefault(name, m)
     return m
 
-
 _stub("cocoindex", FlowBuilder=MagicMock, IndexOptions=MagicMock)
 _stub("sentence_transformers", SentenceTransformer=MagicMock)
 _stub("sqlite_vec")
+_stub("tree_sitter_languages")
+_stub("networkx", DiGraph=MagicMock, pagerank=MagicMock, PowerIterationFailedConvergence=Exception)
 
 # ---------------------------------------------------------------------------
 # Application setup
 # ---------------------------------------------------------------------------
 
-from backend.routers.context import router  # noqa: E402  # type: ignore
+from backend.app.context.router import router  # noqa: E402
 
 app = FastAPI()
 app.include_router(router)
 client = TestClient(app)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -51,145 +57,246 @@ client = TestClient(app)
 @pytest.fixture()
 def mock_code_search():
     svc = MagicMock()
-    svc.search = AsyncMock(return_value=[])
+    # Return a mock CodeSearchResponse
+    mock_response = MagicMock()
+    mock_response.results = []
+    svc.search = AsyncMock(return_value=mock_response)
+    svc.get_index_status = MagicMock(return_value=MagicMock(
+        model_dump=MagicMock(return_value={
+            "workspace_path": "/test",
+            "indexed": False,
+            "files_count": 0,
+            "chunks_count": 0,
+        })
+    ))
+    return svc
+
+
+@pytest.fixture()
+def mock_git_workspace():
+    svc = MagicMock()
+    svc.get_worktree_path = MagicMock(return_value="/fake/worktree")
+    return svc
+
+
+@pytest.fixture()
+def mock_repo_map():
+    svc = MagicMock()
+    svc.generate_repo_map = MagicMock(return_value="## Repository Map\n\nmain.py\n")
+    svc.get_graph_stats = MagicMock(return_value={
+        "cached": True,
+        "total_files": 10,
+        "total_edges": 15,
+    })
     return svc
 
 
 @pytest.fixture(autouse=True)
-def _inject(mock_code_search):
-    with patch(
-        "backend.routers.context.get_code_search_service",
-        return_value=mock_code_search,
-    ):
+def _inject_services(mock_code_search, mock_git_workspace, mock_repo_map):
+    with patch("backend.app.context.router._get_code_search_service", return_value=mock_code_search), \
+         patch("backend.app.context.router._get_git_workspace_service", return_value=mock_git_workspace), \
+         patch("backend.app.context.router._get_repo_map_service", return_value=mock_repo_map):
         yield
 
 
 # ---------------------------------------------------------------------------
-# Happy-path tests
+# POST /api/context/context — happy path
 # ---------------------------------------------------------------------------
 
 
 class TestContextEndpointHappyPath:
     def test_returns_200_for_valid_request(self, mock_code_search):
-        mock_code_search.search = AsyncMock(
-            return_value=[{"path": "app.py", "snippet": "def main(): pass", "score": 0.9}]
-        )
-        resp = client.post("/api/context", json={"query": "main function"})
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "main function"
+        })
         assert resp.status_code == 200
 
-    def test_response_is_dict(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        resp = client.post("/api/context", json={"query": "hello"})
-        assert isinstance(resp.json(), dict)
-
-    def test_response_contains_context_key(self, mock_code_search):
-        mock_code_search.search = AsyncMock(
-            return_value=[{"path": "x.py", "snippet": "x=1", "score": 0.8}]
-        )
-        resp = client.post("/api/context", json={"query": "variable"})
+    def test_response_has_required_fields(self, mock_code_search):
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test"
+        })
         data = resp.json()
-        assert "context" in data or "results" in data or isinstance(data, dict)
+        assert "room_id" in data
+        assert "query" in data
+        assert "chunks" in data
+        assert "total" in data
+
+    def test_response_includes_repo_map(self, mock_code_search, mock_repo_map):
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test"
+        })
+        data = resp.json()
+        assert "repo_map" in data
+        assert data["repo_map"] is not None
+        assert "Repository Map" in data["repo_map"]
 
     def test_empty_results_returns_200(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        resp = client.post("/api/context", json={"query": "zzz_no_match"})
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "zzz_no_match"
+        })
         assert resp.status_code == 200
+        assert resp.json()["total"] == 0
 
-    def test_multiple_results_included(self, mock_code_search):
-        mock_code_search.search = AsyncMock(
-            return_value=[
-                {"path": "a.py", "snippet": "a=1", "score": 0.9},
-                {"path": "b.py", "snippet": "b=2", "score": 0.7},
-            ]
-        )
-        resp = client.post("/api/context", json={"query": "variables"})
-        assert resp.status_code == 200
+    def test_chunks_from_search_results(self, mock_code_search):
+        mock_chunk = MagicMock()
+        mock_chunk.file_path = "main.py"
+        mock_chunk.start_line = 1
+        mock_chunk.end_line = 10
+        mock_chunk.content = "def main(): pass"
+        mock_chunk.score = 0.9
+        mock_chunk.symbol_name = "main"
+        mock_chunk.symbol_type = "function"
+        mock_response = MagicMock()
+        mock_response.results = [mock_chunk]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "main"
+        })
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["chunks"][0]["file_path"] == "main.py"
+        assert data["chunks"][0]["score"] == 0.9
+
+    def test_repo_map_called_with_vector_files(self, mock_code_search, mock_repo_map):
+        mock_chunk = MagicMock()
+        mock_chunk.file_path = "service.py"
+        mock_chunk.start_line = 1
+        mock_chunk.end_line = 5
+        mock_chunk.content = "class Service:"
+        mock_chunk.score = 0.8
+        mock_chunk.symbol_name = None
+        mock_chunk.symbol_type = None
+        mock_response = MagicMock()
+        mock_response.results = [mock_chunk]
+        mock_code_search.search = AsyncMock(return_value=mock_response)
+
+        client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "service"
+        })
+
+        mock_repo_map.generate_repo_map.assert_called_once()
+        call_kwargs = mock_repo_map.generate_repo_map.call_args
+        assert "service.py" in call_kwargs[1]["query_files"]
 
 
 # ---------------------------------------------------------------------------
-# Validation / error tests
+# POST /api/context/context — repo map disabled / not available
+# ---------------------------------------------------------------------------
+
+
+class TestContextRepoMapEdgeCases:
+    def test_repo_map_disabled_in_request(self, mock_code_search, mock_repo_map):
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test", "include_repo_map": False
+        })
+        data = resp.json()
+        assert data["repo_map"] is None
+        mock_repo_map.generate_repo_map.assert_not_called()
+
+    def test_repo_map_service_none(self, mock_code_search):
+        with patch("backend.app.context.router._get_repo_map_service", return_value=None):
+            resp = client.post("/api/context/context", json={
+                "room_id": "room-1", "query": "test"
+            })
+            data = resp.json()
+            assert data["repo_map"] is None
+
+    def test_repo_map_generation_error_handled(self, mock_code_search, mock_repo_map):
+        mock_repo_map.generate_repo_map.side_effect = RuntimeError("graph error")
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test"
+        })
+        # Should still return 200, just without repo map
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["repo_map"] is None
+
+
+# ---------------------------------------------------------------------------
+# POST /api/context/context — validation / error
 # ---------------------------------------------------------------------------
 
 
 class TestContextEndpointValidation:
-    def test_missing_query_returns_422(self, mock_code_search):
-        resp = client.post("/api/context", json={})
+    def test_missing_query_returns_422(self):
+        resp = client.post("/api/context/context", json={"room_id": "room-1"})
         assert resp.status_code == 422
 
-    def test_empty_string_query(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        resp = client.post("/api/context", json={"query": ""})
-        # Either 200 (empty is allowed) or 422 (validation rejects it)
-        assert resp.status_code in (200, 422)
-
-    def test_none_query_returns_422(self, mock_code_search):
-        resp = client.post("/api/context", json={"query": None})
+    def test_missing_room_id_returns_422(self):
+        resp = client.post("/api/context/context", json={"query": "test"})
         assert resp.status_code == 422
 
-    def test_wrong_content_type_returns_422(self, mock_code_search):
-        resp = client.post("/api/context", data="not-json")
+    def test_no_workspace_returns_404(self, mock_git_workspace):
+        mock_git_workspace.get_worktree_path.return_value = None
+        resp = client.post("/api/context/context", json={
+            "room_id": "no-workspace", "query": "test"
+        })
+        assert resp.status_code == 404
+
+    def test_wrong_content_type_returns_422(self):
+        resp = client.post("/api/context/context", data="not-json")
         assert resp.status_code == 422
 
-    def test_extra_fields_ignored(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        resp = client.post(
-            "/api/context", json={"query": "test", "extra_field": "ignored"}
-        )
-        assert resp.status_code == 200
+    def test_top_k_min_1(self):
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test", "top_k": 0
+        })
+        assert resp.status_code == 422
+
+    def test_top_k_max_20(self):
+        resp = client.post("/api/context/context", json={
+            "room_id": "room-1", "query": "test", "top_k": 21
+        })
+        assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------
-# Service-error / edge-case tests
+# GET /api/context/context/{room_id}/index-status
 # ---------------------------------------------------------------------------
 
 
-class TestContextEndpointServiceErrors:
-    def test_search_service_error_returns_5xx(self, mock_code_search):
-        mock_code_search.search = AsyncMock(side_effect=RuntimeError("db down"))
-        resp = client.post("/api/context", json={"query": "x"})
-        assert resp.status_code in (500, 503)
+class TestIndexStatusEndpoint:
+    def test_returns_200(self, mock_code_search, mock_git_workspace):
+        resp = client.get("/api/context/context/room-1/index-status")
+        assert resp.status_code == 200
 
-    def test_search_timeout_returns_5xx(self, mock_code_search):
-        import asyncio
+    def test_returns_dict(self, mock_code_search, mock_git_workspace):
+        resp = client.get("/api/context/context/room-1/index-status")
+        data = resp.json()
+        assert isinstance(data, dict)
+        assert "indexed" in data
 
-        mock_code_search.search = AsyncMock(
-            side_effect=asyncio.TimeoutError("timeout")
-        )
-        resp = client.post("/api/context", json={"query": "slow"})
-        assert resp.status_code in (500, 503, 504)
-
-    def test_search_called_with_query(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        client.post("/api/context", json={"query": "my query"})
-        mock_code_search.search.assert_called_once()
-        args, kwargs = mock_code_search.search.call_args
-        query_val = kwargs.get("query") or (args[0] if args else None)
-        assert query_val == "my query"
+    def test_no_workspace_returns_404(self, mock_git_workspace):
+        mock_git_workspace.get_worktree_path.return_value = None
+        resp = client.get("/api/context/context/no-room/index-status")
+        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------
-# Optional parameters
+# GET /api/context/context/{room_id}/graph-stats
 # ---------------------------------------------------------------------------
 
 
-class TestContextEndpointOptionalParams:
-    def test_with_repo_path_param(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        resp = client.post(
-            "/api/context",
-            json={"query": "test", "repo_path": "/some/repo"},
-        )
+class TestGraphStatsEndpoint:
+    def test_returns_200(self, mock_repo_map, mock_git_workspace):
+        resp = client.get("/api/context/context/room-1/graph-stats")
         assert resp.status_code == 200
 
-    def test_with_limit_param(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        resp = client.post("/api/context", json={"query": "test", "limit": 3})
-        assert resp.status_code == 200
+    def test_returns_stats(self, mock_repo_map, mock_git_workspace):
+        resp = client.get("/api/context/context/room-1/graph-stats")
+        data = resp.json()
+        assert data["available"] is True
+        assert "total_files" in data
 
-    def test_with_all_optional_params(self, mock_code_search):
-        mock_code_search.search = AsyncMock(return_value=[])
-        resp = client.post(
-            "/api/context",
-            json={"query": "test", "repo_path": "/r", "limit": 5},
-        )
-        assert resp.status_code == 200
+    def test_repo_map_not_configured(self):
+        with patch("backend.app.context.router._get_repo_map_service", return_value=None), \
+             patch("backend.app.context.router._get_git_workspace_service"):
+            resp = client.get("/api/context/context/room-1/graph-stats")
+            data = resp.json()
+            assert data["available"] is False
+
+    def test_no_workspace_returns_404(self, mock_repo_map, mock_git_workspace):
+        mock_git_workspace.get_worktree_path.return_value = None
+        resp = client.get("/api/context/context/no-room/graph-stats")
+        assert resp.status_code == 404

@@ -4,10 +4,11 @@ Loads settings from two YAML files:
   * conductor.settings.yaml  — non-secret configuration
   * conductor.secrets.yaml   — secrets (never committed)
 
-New in this version:
-  * GitWorkspaceSettings — git worktree management
-  * CodeSearchSettings   — CocoIndex code search
-  * _inject_embedding_env_vars() helper
+Supported embedding backends: local, bedrock, openai, voyage, mistral.
+Default backend is ``bedrock`` with Cohere Embed v4.
+
+Secrets for Voyage and Mistral are loaded from conductor.secrets.yaml
+and injected into environment variables so downstream SDKs can use them.
 """
 from __future__ import annotations
 
@@ -53,6 +54,16 @@ class OpenAISecrets(BaseModel):
     api_key: Optional[str] = None
 
 
+class VoyageSecrets(BaseModel):
+    """Voyage AI credentials (voyage-code-3 etc.)."""
+    api_key: Optional[str] = None
+
+
+class MistralSecrets(BaseModel):
+    """Mistral AI credentials (codestral-embed-2505 etc.)."""
+    api_key: Optional[str] = None
+
+
 class DatabaseSecrets(BaseModel):
     url: Optional[str] = None
 
@@ -65,6 +76,8 @@ class JWTSecrets(BaseModel):
 class Secrets(BaseModel):
     aws:      AwsSecrets      = Field(default_factory=AwsSecrets)
     openai:   OpenAISecrets   = Field(default_factory=OpenAISecrets)
+    voyage:   VoyageSecrets   = Field(default_factory=VoyageSecrets)
+    mistral:  MistralSecrets  = Field(default_factory=MistralSecrets)
     database: DatabaseSecrets = Field(default_factory=DatabaseSecrets)
     jwt:      JWTSecrets      = Field(default_factory=JWTSecrets)
 
@@ -121,15 +134,46 @@ class GitWorkspaceSettings(BaseModel):
 
 
 class CodeSearchSettings(BaseModel):
-    """Configuration for CocoIndex Code Search."""
-    enabled:             bool                           = True
-    index_dir:           str                            = "./cocoindex_data"
-    embedding_backend:   Literal["local", "bedrock", "openai"] = "local"
-    local_model_name:    str                            = "all-MiniLM-L6-v2"
-    bedrock_model_id:    str                            = "amazon.titan-embed-text-v2:0"
-    openai_model_name:   str                            = "text-embedding-3-small"
-    chunk_size:          int                            = 512
-    top_k_results:       int                            = 5
+    """Configuration for CocoIndex Code Search.
+
+    Embedding backend choices:
+      * ``local``   – SentenceTransformers (free, no API key)
+      * ``bedrock`` – AWS Bedrock (default: Cohere Embed v4)
+      * ``openai``  – OpenAI Embeddings API
+      * ``voyage``  – Voyage AI (code-specialised)
+      * ``mistral`` – Mistral Embeddings (Codestral Embed)
+
+    The default is ``bedrock`` with ``cohere.embed-v4:0``.
+    Credentials are read from ``conductor.secrets.yaml`` and injected
+    into environment variables by :func:`_inject_embedding_env_vars`.
+    """
+    enabled:             bool = True
+    index_dir:           str  = "./cocoindex_data"
+    embedding_backend:   Literal["local", "bedrock", "openai", "voyage", "mistral"] = "bedrock"
+
+    # -- Local (SentenceTransformers) --
+    local_model_name:    str = "all-MiniLM-L6-v2"
+
+    # -- Bedrock --
+    bedrock_model_id:    str = "cohere.embed-v4:0"
+    bedrock_region:      str = "us-east-1"
+
+    # -- OpenAI --
+    openai_model_name:   str = "text-embedding-3-small"
+
+    # -- Voyage --
+    voyage_model_name:   str = "voyage-code-3"
+
+    # -- Mistral --
+    mistral_model_name:  str = "codestral-embed-2505"
+
+    # -- Chunking / search --
+    chunk_size:          int = 512
+    top_k_results:       int = 5
+
+    # -- RepoMap (graph-based context) --
+    repo_map_enabled:    bool = True
+    repo_map_top_n:      int  = 10  # Top N files by PageRank to include in map
 
 
 class AppSettings(BaseModel):
@@ -144,14 +188,23 @@ class AppSettings(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Environment variable injection for CocoIndex
+# Environment variable injection for embedding providers
 # ---------------------------------------------------------------------------
 
 
 def _inject_embedding_env_vars(settings: AppSettings) -> None:
-    """
-    Inject credentials from conductor.secrets.yaml into environment variables
-    so that CocoIndex can pick them up without knowing about our secrets file.
+    """Inject credentials from conductor.secrets.yaml into environment variables.
+
+    Each embedding SDK reads credentials from well-known env vars.
+    This function maps our unified secrets config to those env vars so
+    the SDKs work without extra configuration.
+
+    Mapping::
+
+        bedrock  → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
+        openai   → OPENAI_API_KEY
+        voyage   → VOYAGE_API_KEY
+        mistral  → MISTRAL_API_KEY
     """
     backend = settings.code_search.embedding_backend
     secrets = settings.secrets
@@ -161,14 +214,25 @@ def _inject_embedding_env_vars(settings: AppSettings) -> None:
             os.environ["AWS_ACCESS_KEY_ID"]     = secrets.aws.access_key_id
         if secrets.aws.secret_access_key:
             os.environ["AWS_SECRET_ACCESS_KEY"] = secrets.aws.secret_access_key
-        if secrets.aws.region:
-            os.environ["AWS_DEFAULT_REGION"]    = secrets.aws.region
-        logger.info("Injected AWS credentials into env for Bedrock embedding backend.")
+        region = settings.code_search.bedrock_region or secrets.aws.region
+        if region:
+            os.environ["AWS_DEFAULT_REGION"]    = region
+        logger.info("Injected AWS credentials for Bedrock embedding backend.")
 
     elif backend == "openai":
         if secrets.openai.api_key:
             os.environ["OPENAI_API_KEY"] = secrets.openai.api_key
-        logger.info("Injected OpenAI API key into env for OpenAI embedding backend.")
+        logger.info("Injected OpenAI API key for OpenAI embedding backend.")
+
+    elif backend == "voyage":
+        if secrets.voyage.api_key:
+            os.environ["VOYAGE_API_KEY"] = secrets.voyage.api_key
+        logger.info("Injected Voyage API key for Voyage embedding backend.")
+
+    elif backend == "mistral":
+        if secrets.mistral.api_key:
+            os.environ["MISTRAL_API_KEY"] = secrets.mistral.api_key
+        logger.info("Injected Mistral API key for Mistral embedding backend.")
 
     else:  # local
         logger.debug("Local embedding backend — no env var injection needed.")
@@ -189,10 +253,12 @@ def load_settings() -> AppSettings:
 
     app_settings = AppSettings(**settings_data)
     logger.info(
-        "Settings loaded (server=%s:%s, git_workspace.enabled=%s, code_search.enabled=%s)",
+        "Settings loaded (server=%s:%s, git_workspace.enabled=%s, code_search.enabled=%s, "
+        "embedding_backend=%s)",
         app_settings.server.host,
         app_settings.server.port,
         app_settings.git_workspace.enabled,
         app_settings.code_search.enabled,
+        app_settings.code_search.embedding_backend,
     )
     return app_settings

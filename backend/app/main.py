@@ -4,11 +4,14 @@ Lifespan initializes:
   * Database connection pool
   * Git Workspace Service (replaces Live Share)
   * CocoIndex Code Search Service (replaces home-built RAG)
+  * Embedding Provider (configurable: local / bedrock / openai / voyage / mistral)
+  * RepoMap Graph Service (Aider-style file dependency graph + PageRank)
 
 Removed in this version:
   * FAISS index loading
   * Bedrock Embeddings initialisation
   * Old RAG module imports
+
 """
 from __future__ import annotations
 
@@ -53,6 +56,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await code_search_service.initialize(settings.code_search)
         logger.info("CocoIndex Code Search initialized.")
     app.state.code_search_service = code_search_service
+
+    # ---- RepoMap Graph Service ----
+    repo_map_service = None
+    if settings.code_search.repo_map_enabled:
+        try:
+            from .repo_graph.service import RepoMapService
+            repo_map_service = RepoMapService(
+                top_n=settings.code_search.repo_map_top_n,
+            )
+            logger.info("RepoMap graph service initialized (top_n=%d).",
+                         settings.code_search.repo_map_top_n)
+        except ImportError as exc:
+            logger.warning(
+                "RepoMap dependencies not available (%s). "
+                "Install tree-sitter + networkx to enable.", exc
+            )
+    app.state.repo_map_service = repo_map_service
 
     logger.info("Conducator startup complete.")
     yield

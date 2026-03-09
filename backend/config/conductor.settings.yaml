@@ -39,7 +39,7 @@ live_share:
   host_timeout_seconds: 300
 
 # =============================================================================
-# Git Workspace Settings (NEW)
+# Git Workspace Settings
 # =============================================================================
 git_workspace:
   enabled: true
@@ -50,14 +50,42 @@ git_workspace:
   cleanup_on_room_close: true              # Remove worktree dir when room ends
 
 # =============================================================================
-# Code Search Settings (NEW)
+# Code Search Settings
 # =============================================================================
+# Embedding backend options:
+#   "local"   — SentenceTransformers, free, no API key needed
+#   "bedrock" — AWS Bedrock (default: Cohere Embed v4, $0.12/1M tokens)
+#   "openai"  — OpenAI Embeddings API
+#   "voyage"  — Voyage AI (code-specialised, voyage-code-3)
+#   "mistral" — Mistral Embeddings (Codestral Embed)
+#
+# Default is "bedrock" with Cohere Embed v4. To switch providers, change
+# embedding_backend and ensure credentials are in conductor.secrets.yaml.
 code_search:
   enabled: true
   index_dir: "./cocoindex_data"            # Where sqlite-vec databases are stored
-  embedding_backend: "local"               # "local" | "bedrock" | "openai"
-  local_model_name: "all-MiniLM-L6-v2"    # SentenceTransformers model for local backend
-  bedrock_model_id: "amazon.titan-embed-text-v2:0"   # If embedding_backend=bedrock
-  openai_model_name: "text-embedding-3-small"         # If embedding_backend=openai
+  embedding_backend: "bedrock"             # "local" | "bedrock" | "openai" | "voyage" | "mistral"
+
+  # -- Local (SentenceTransformers) --
+  local_model_name: "all-MiniLM-L6-v2"    # Free, 384-d, ~80 MB on disk
+
+  # -- AWS Bedrock --
+  bedrock_model_id: "cohere.embed-v4:0"    # Cohere Embed v4 (1024-d, 128K ctx, $0.12/1M)
+  bedrock_region: "us-east-1"              # Also supports: amazon.titan-embed-text-v2:0
+
+  # -- OpenAI --
+  openai_model_name: "text-embedding-3-small"  # 1536-d, $0.02/1M tokens
+
+  # -- Voyage AI --
+  voyage_model_name: "voyage-code-3"       # Code-specialised, 1024-d, $0.06/1M tokens
+
+  # -- Mistral --
+  mistral_model_name: "codestral-embed-2505"  # Code embedding, 1024-d
+
+  # -- Chunking / Search --
   chunk_size: 512                          # Max tokens per AST chunk
   top_k_results: 5                         # Default number of search results
+
+  # -- RepoMap (graph-based context) --
+  repo_map_enabled: true                   # Enable tree-sitter + PageRank repo map
+  repo_map_top_n: 10                       # Top N files to include in context map
