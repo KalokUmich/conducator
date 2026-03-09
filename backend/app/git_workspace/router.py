@@ -38,12 +38,12 @@ router = APIRouter(prefix="/api/git-workspace", tags=["git-workspace"])
 def get_git_service(  # pragma: no cover
     # This will be overridden in tests via app.dependency_overrides
 ) -> GitWorkspaceService:
-    from backend.app.main import app  # lazy import to avoid circular dependency
+    from app.main import app  # lazy import to avoid circular dependency
     return app.state.git_workspace_service
 
 
 def get_delegate_broker() -> DelegateBroker:  # pragma: no cover
-    from backend.app.main import app
+    from app.main import app
     return app.state.delegate_broker
 
 

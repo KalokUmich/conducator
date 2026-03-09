@@ -70,22 +70,22 @@ class ContextResponse(BaseModel):
 
 
 def _get_code_search_service():
-    from backend.app.main import app
+    from app.main import app
     return app.state.code_search_service
 
 
 def _get_git_workspace_service():
-    from backend.app.main import app
+    from app.main import app
     return app.state.git_workspace_service
 
 
 def _get_repo_map_service():
-    from backend.app.main import app
+    from app.main import app
     return getattr(app.state, "repo_map_service", None)
 
 
 def _get_rerank_provider():
-    from backend.app.main import app
+    from app.main import app
     return getattr(app.state, "rerank_provider", None)
 
 
@@ -131,7 +131,7 @@ async def get_context(
     # If reranking, fetch more candidates so the reranker has good coverage
     if should_rerank:
         # Fetch a larger candidate set for reranking
-        from backend.app.config import load_settings
+        from app.config import load_settings
         try:
             settings = load_settings()
             fetch_k = settings.code_search.rerank_candidates

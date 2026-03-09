@@ -13,11 +13,31 @@
  *  • getSnapshot() immutability
  */
 
+import { describe, it } from 'node:test';
+import * as assert from 'node:assert/strict';
+
 import {
     ConductorStateMachine,
     ConductorState,
     ConductorEvent,
 } from '../services/conductorStateMachine';
+
+// ---------------------------------------------------------------------------
+// Minimal Jest-compatible expect shim (delegates to node:assert)
+// ---------------------------------------------------------------------------
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function expect(actual: any) {
+    return {
+        toBe:         (expected: unknown) => assert.strictEqual(actual, expected),
+        toEqual:      (expected: unknown) => assert.deepEqual(actual, expected),
+        toHaveLength: (n: number)         => assert.equal((actual as unknown[]).length, n),
+        toContain:    (s: unknown)        => assert.ok((actual as string).includes(s as string)),
+        toThrow:      ()                  => assert.throws(actual as () => void),
+        not: {
+            toThrow:  ()                  => assert.doesNotThrow(actual as () => void),
+        },
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers

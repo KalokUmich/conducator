@@ -56,7 +56,7 @@ _stub("networkx", DiGraph=MagicMock, pagerank=MagicMock)
 # Real imports
 # ---------------------------------------------------------------------------
 
-from backend.app.code_search.rerank_provider import (  # noqa: E402
+from app.code_search.rerank_provider import (  # noqa: E402
     RerankProvider,
     RerankResult,
     NoopRerankProvider,
@@ -712,7 +712,7 @@ class TestEdgeCases:
 
 class TestConfigIntegration:
     def test_code_search_settings_has_rerank_fields(self):
-        from backend.app.config import CodeSearchSettings
+        from app.config import CodeSearchSettings
         s = CodeSearchSettings()
         assert s.rerank_backend == "none"
         assert s.rerank_top_n == 5
@@ -722,31 +722,31 @@ class TestConfigIntegration:
         assert s.cross_encoder_model_name == "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     def test_code_search_settings_rerank_backend_literal(self):
-        from backend.app.config import CodeSearchSettings
+        from app.config import CodeSearchSettings
         # Valid values
         for backend in ["none", "cohere", "bedrock", "cross_encoder"]:
             s = CodeSearchSettings(rerank_backend=backend)
             assert s.rerank_backend == backend
 
     def test_code_search_settings_invalid_rerank_backend(self):
-        from backend.app.config import CodeSearchSettings
+        from app.config import CodeSearchSettings
         from pydantic import ValidationError
         with pytest.raises(ValidationError):
             CodeSearchSettings(rerank_backend="invalid")
 
     def test_secrets_has_cohere(self):
-        from backend.app.config import Secrets, CohereSecrets
+        from app.config import Secrets, CohereSecrets
         s = Secrets()
         assert isinstance(s.cohere, CohereSecrets)
         assert s.cohere.api_key is None
 
     def test_secrets_cohere_with_key(self):
-        from backend.app.config import Secrets
+        from app.config import Secrets
         s = Secrets(cohere={"api_key": "test-key"})
         assert s.cohere.api_key == "test-key"
 
     def test_app_settings_includes_rerank(self):
-        from backend.app.config import AppSettings
+        from app.config import AppSettings
         s = AppSettings()
         assert hasattr(s.code_search, "rerank_backend")
         assert hasattr(s.code_search, "rerank_top_n")
@@ -760,7 +760,7 @@ class TestConfigIntegration:
 
 class TestEnvVarInjection:
     def test_cohere_rerank_injects_co_api_key(self, monkeypatch):
-        from backend.app.config import AppSettings, _inject_embedding_env_vars
+        from app.config import AppSettings, _inject_embedding_env_vars
         monkeypatch.delenv("CO_API_KEY", raising=False)
 
         s = AppSettings(
@@ -773,7 +773,7 @@ class TestEnvVarInjection:
         monkeypatch.delenv("CO_API_KEY", raising=False)
 
     def test_bedrock_rerank_injects_aws_creds(self, monkeypatch):
-        from backend.app.config import AppSettings, _inject_embedding_env_vars
+        from app.config import AppSettings, _inject_embedding_env_vars
         monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
 
@@ -789,7 +789,7 @@ class TestEnvVarInjection:
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
 
     def test_none_rerank_no_injection(self, monkeypatch):
-        from backend.app.config import AppSettings, _inject_embedding_env_vars
+        from app.config import AppSettings, _inject_embedding_env_vars
         monkeypatch.delenv("CO_API_KEY", raising=False)
 
         s = AppSettings(

@@ -367,7 +367,7 @@ describe('ConductorFileSystemProvider', () => {
         it('fires onDidChangeFile with Deleted type', async () => {
             mockFetch(ok('', 204));
             const uri = makeUri('ws-1', 'gone.ts');
-            const events: Array<vscode.FileChangeEvent[]> = [];
+            const events: Array<Array<{ type: number; uri: unknown }>> = [];
             provider.onDidChangeFile(e => events.push(e));
             await provider.delete(uri as never, { recursive: false });
             expect(events.flat().some(e => e.type === vscode.FileChangeType.Deleted)).toBe(true);
@@ -412,7 +412,7 @@ describe('ConductorFileSystemProvider', () => {
             mockFetch(ok(''));
             const oldUri = makeUri('ws-1', 'a.ts');
             const newUri = makeUri('ws-1', 'b.ts');
-            const events: vscode.FileChangeEvent[] = [];
+            const events: Array<{ type: number; uri: unknown }> = [];
             provider.onDidChangeFile(e => events.push(...e));
             await provider.rename(oldUri as never, newUri as never, { overwrite: true });
             const types = events.map(e => e.type);
@@ -450,7 +450,7 @@ describe('ConductorFileSystemProvider', () => {
         it('fires Created change event', async () => {
             mockFetch(ok('', 201));
             const uri = makeUri('ws-1', 'brand-new');
-            const events: vscode.FileChangeEvent[] = [];
+            const events: Array<{ type: number; uri: unknown }> = [];
             provider.onDidChangeFile(e => events.push(...e));
             await provider.createDirectory(uri as never);
             expect(events.some(e => e.type === vscode.FileChangeType.Created)).toBe(true);

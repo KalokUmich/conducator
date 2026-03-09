@@ -38,7 +38,7 @@ _stub("sqlite_vec")
 # Real imports
 # ---------------------------------------------------------------------------
 
-from backend.app.config import (  # noqa: E402
+from app.config import (  # noqa: E402
     AppSettings,
     CodeSearchSettings,
     GitWorkspaceSettings,
@@ -369,7 +369,7 @@ class TestLoadSettings:
         def mock_find(filename):
             return tmp_path / filename  # Points to non-existent files
 
-        with patch("backend.app.config._find_config_file", side_effect=mock_find):
+        with patch("app.config._find_config_file", side_effect=mock_find):
             settings = load_settings()
             assert isinstance(settings, AppSettings)
 
@@ -389,7 +389,7 @@ class TestLoadSettings:
                 return settings_file
             return secrets_file
 
-        with patch("backend.app.config._find_config_file", side_effect=mock_find):
+        with patch("app.config._find_config_file", side_effect=mock_find):
             settings = load_settings()
             assert settings.code_search.embedding_backend == "local"
             assert settings.code_search.local_model_name == "custom-model"

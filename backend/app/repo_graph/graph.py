@@ -161,10 +161,19 @@ def _scan_workspace(ws: Path, exclude: Set[str]) -> Dict[str, FileSymbols]:
             continue
         rel = str(path.relative_to(ws))
 
-        # Check exclude patterns
+        # Check exclude patterns against relative path components.
+        # pathlib.Path.match("**/name/**") is unreliable in Python ≤ 3.12, so
+        # we strip the glob wildcards and check the parent directory names directly.
+        rel_parts = path.relative_to(ws).parts  # includes filename as last element
         skip = False
         for pattern in exclude:
-            if path.match(pattern):
+            clean = pattern.strip("*/")  # "**/node_modules/**" → "node_modules"
+            if "/" not in clean and clean:
+                # Simple directory name — check any parent component
+                if clean in rel_parts[:-1]:
+                    skip = True
+                    break
+            elif path.match(pattern):
                 skip = True
                 break
         if skip:

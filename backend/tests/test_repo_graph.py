@@ -68,9 +68,19 @@ class MockDiGraph:
     def __len__(self):
         return len(self._nodes)
 
+    def __contains__(self, item):
+        return item in self._nodes
 
-# We need real networkx for PageRank, so let's install a minimal mock
-_nx = _stub("networkx")
+    def __iter__(self):
+        return iter(self._nodes)
+
+
+# We need real networkx for PageRank, so let's install a minimal mock.
+# _stub() uses setdefault and returns the *new* module object even when a prior
+# stub already exists in sys.modules.  To ensure our attrs land on the module
+# that graph.py actually uses, we always work via sys.modules directly.
+_stub("networkx")  # ensure "networkx" key exists in sys.modules
+_nx = sys.modules["networkx"]  # get the canonical module object
 _nx.DiGraph = MockDiGraph
 
 
@@ -103,7 +113,7 @@ _stub("sqlite_vec")
 # Real imports
 # ---------------------------------------------------------------------------
 
-from backend.app.repo_graph.parser import (  # noqa: E402
+from app.repo_graph.parser import (  # noqa: E402
     SymbolDef,
     SymbolRef,
     FileSymbols,
@@ -112,14 +122,14 @@ from backend.app.repo_graph.parser import (  # noqa: E402
     extract_references,
     _extract_with_regex,
 )
-from backend.app.repo_graph.graph import (  # noqa: E402
+from app.repo_graph.graph import (  # noqa: E402
     FileNode,
     GraphEdge,
     DependencyGraph,
     build_dependency_graph,
     rank_files,
 )
-from backend.app.repo_graph.service import RepoMapService  # noqa: E402
+from app.repo_graph.service import RepoMapService  # noqa: E402
 
 
 # ===================================================================

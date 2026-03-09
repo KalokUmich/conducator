@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/code-search", tags=["code-search"])
 
 
 def get_code_search_service() -> CodeSearchService:  # pragma: no cover
-    from backend.app.main import app
+    from app.main import app
     return app.state.code_search_service
 
 

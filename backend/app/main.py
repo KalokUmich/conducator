@@ -22,6 +22,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 
 from .config import AppSettings, _inject_embedding_env_vars, load_settings
 from .git_workspace.service import GitWorkspaceService
@@ -125,11 +126,44 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .git_workspace.router import router as git_workspace_router
     from .code_search.router   import router as code_search_router
     from .context.router       import router as context_router
-    # (Other existing routers — rooms, auth, users — unchanged)
+    from .ai_provider.router   import router as ai_provider_router
+    from .audit.router         import router as audit_router
+    from .policy.router        import router as policy_router
+    from .chat.router          import router as chat_router
+    from .chat.settings_router import router as chat_settings_router
+    from .agent.router         import router as agent_router
 
     app.include_router(git_workspace_router)
     app.include_router(code_search_router)
     app.include_router(context_router)
+    app.include_router(ai_provider_router)
+    app.include_router(audit_router)
+    app.include_router(policy_router)
+    app.include_router(chat_router)
+    app.include_router(chat_settings_router)
+    app.include_router(agent_router)
+
+    # --- Health check ---
+    @app.get("/health", include_in_schema=True)
+    async def health() -> dict:
+        """Simple liveness probe."""
+        return {"status": "ok"}
+
+    # --- Prometheus-compatible metrics scrape endpoint ---
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> PlainTextResponse:
+        """Minimal Prometheus metrics endpoint.
+
+        Returns a single ``conducator_up`` gauge so that Prometheus / Victoria
+        Metrics scrapers receive a 200 instead of a 404.  Install
+        ``prometheus-fastapi-instrumentator`` if you need real request metrics.
+        """
+        body = (
+            "# HELP conducator_up Whether the Conducator backend is running\n"
+            "# TYPE conducator_up gauge\n"
+            "conducator_up 1\n"
+        )
+        return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     return app
 

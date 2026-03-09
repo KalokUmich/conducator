@@ -47,8 +47,15 @@ _stub("cohere")
 # Application setup
 # ---------------------------------------------------------------------------
 
-from backend.app.context.router import router  # noqa: E402
-from backend.app.code_search.rerank_provider import (  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from app.context.router import (  # noqa: E402
+    router,
+    _get_code_search_service,
+    _get_git_workspace_service,
+    _get_repo_map_service,
+    _get_rerank_provider,
+)
+from app.code_search.rerank_provider import (  # noqa: E402
     NoopRerankProvider,
     RerankResult,
 )
@@ -56,6 +63,20 @@ from backend.app.code_search.rerank_provider import (  # noqa: E402
 app = FastAPI()
 app.include_router(router)
 client = TestClient(app)
+
+
+@contextmanager
+def _dep(dep_fn, value):
+    """Temporarily override a single FastAPI dependency for one block."""
+    prev = app.dependency_overrides.get(dep_fn)
+    app.dependency_overrides[dep_fn] = lambda: value
+    try:
+        yield
+    finally:
+        if prev is not None:
+            app.dependency_overrides[dep_fn] = prev
+        else:
+            app.dependency_overrides.pop(dep_fn, None)
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +162,12 @@ def mock_rerank_active():
 
 @pytest.fixture(autouse=True)
 def _inject_services(mock_code_search, mock_git_workspace, mock_repo_map, mock_rerank_noop):
-    with patch("backend.app.context.router._get_code_search_service", return_value=mock_code_search), \
-         patch("backend.app.context.router._get_git_workspace_service", return_value=mock_git_workspace), \
-         patch("backend.app.context.router._get_repo_map_service", return_value=mock_repo_map), \
-         patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_noop):
-        yield
+    app.dependency_overrides[_get_code_search_service] = lambda: mock_code_search
+    app.dependency_overrides[_get_git_workspace_service] = lambda: mock_git_workspace
+    app.dependency_overrides[_get_repo_map_service] = lambda: mock_repo_map
+    app.dependency_overrides[_get_rerank_provider] = lambda: mock_rerank_noop
+    yield
+    app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +257,7 @@ class TestContextReranking:
         ]
         mock_code_search.search = AsyncMock(return_value=mock_response)
 
-        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+        with _dep(_get_rerank_provider, mock_rerank_active):
             resp = client.post("/api/context/context", json={
                 "room_id": "room-1", "query": "test"
             })
@@ -247,7 +269,7 @@ class TestContextReranking:
         mock_response.results = [_make_chunk()]
         mock_code_search.search = AsyncMock(return_value=mock_response)
 
-        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+        with _dep(_get_rerank_provider, mock_rerank_active):
             resp = client.post("/api/context/context", json={
                 "room_id": "room-1",
                 "query": "test",
@@ -261,7 +283,7 @@ class TestContextReranking:
         mock_response.results = [_make_chunk()]
         mock_code_search.search = AsyncMock(return_value=mock_response)
 
-        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+        with _dep(_get_rerank_provider, mock_rerank_active):
             resp = client.post("/api/context/context", json={
                 "room_id": "room-1",
                 "query": "test",
@@ -277,7 +299,7 @@ class TestContextReranking:
         ]
         mock_code_search.search = AsyncMock(return_value=mock_response)
 
-        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+        with _dep(_get_rerank_provider, mock_rerank_active):
             resp = client.post("/api/context/context", json={
                 "room_id": "room-1", "query": "test"
             })
@@ -296,7 +318,7 @@ class TestContextReranking:
         assert data["chunks"][0]["rerank_score"] is None
 
     def test_rerank_none_provider_means_no_reranking(self, mock_code_search):
-        with patch("backend.app.context.router._get_rerank_provider", return_value=None):
+        with _dep(_get_rerank_provider, None):
             resp = client.post("/api/context/context", json={
                 "room_id": "room-1", "query": "test"
             })
@@ -317,7 +339,7 @@ class TestContextReranking:
 
         broken_reranker.rerank = broken_rerank
 
-        with patch("backend.app.context.router._get_rerank_provider", return_value=broken_reranker):
+        with _dep(_get_rerank_provider, broken_reranker):
             resp = client.post("/api/context/context", json={
                 "room_id": "room-1", "query": "test"
             })
@@ -342,7 +364,7 @@ class TestContextRepoMapEdgeCases:
         mock_repo_map.generate_repo_map.assert_not_called()
 
     def test_repo_map_service_none(self, mock_code_search):
-        with patch("backend.app.context.router._get_repo_map_service", return_value=None):
+        with _dep(_get_repo_map_service, None):
             resp = client.post("/api/context/context", json={
                 "room_id": "room-1", "query": "test"
             })
@@ -437,8 +459,7 @@ class TestGraphStatsEndpoint:
         assert "total_files" in data
 
     def test_repo_map_not_configured(self):
-        with patch("backend.app.context.router._get_repo_map_service", return_value=None), \
-             patch("backend.app.context.router._get_git_workspace_service"):
+        with _dep(_get_repo_map_service, None), _dep(_get_git_workspace_service, MagicMock()):
             resp = client.get("/api/context/context/room-1/graph-stats")
             data = resp.json()
             assert data["available"] is False
@@ -466,13 +487,13 @@ class TestRerankStatusEndpoint:
         assert data["provider"] == "none"
 
     def test_none_provider_shows_unavailable(self):
-        with patch("backend.app.context.router._get_rerank_provider", return_value=None):
+        with _dep(_get_rerank_provider, None):
             resp = client.get("/api/context/context/room-1/rerank-status")
             data = resp.json()
             assert data["available"] is False
 
     def test_active_provider_shows_status(self, mock_rerank_active):
-        with patch("backend.app.context.router._get_rerank_provider", return_value=mock_rerank_active):
+        with _dep(_get_rerank_provider, mock_rerank_active):
             resp = client.get("/api/context/context/room-1/rerank-status")
             data = resp.json()
             assert data["available"] is True

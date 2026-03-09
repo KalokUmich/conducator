@@ -53,7 +53,7 @@ _stub("networkx", DiGraph=MagicMock, pagerank=MagicMock)
 # Real imports
 # ---------------------------------------------------------------------------
 
-from backend.app.code_search.embedding_provider import (  # noqa: E402
+from app.code_search.embedding_provider import (  # noqa: E402
     EmbeddingProvider,
     LocalEmbeddingProvider,
     BedrockEmbeddingProvider,
@@ -171,7 +171,7 @@ class TestLocalEmbeddingProviderEmbed:
         mock_model = MagicMock()
         mock_model.encode.return_value = np.random.rand(1, 384).astype(np.float32)
         mock_st.return_value = mock_model
-        with patch("backend.app.code_search.embedding_provider.LocalEmbeddingProvider._ensure_loaded") as mock_load:
+        with patch("app.code_search.embedding_provider.LocalEmbeddingProvider._ensure_loaded") as mock_load:
             # Just verify _ensure_loaded is called
             provider._model = mock_model
             provider._dims = 384
