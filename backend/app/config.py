@@ -69,6 +69,7 @@ def _load_yaml(path: Optional[Path]) -> Dict[str, Any]:
 class AwsSecrets(BaseModel):
     access_key_id:     Optional[str] = None
     secret_access_key: Optional[str] = None
+    session_token:     Optional[str] = None  # STS temporary credentials
     region:            Optional[str] = "us-east-1"
 
 
@@ -100,14 +101,33 @@ class JWTSecrets(BaseModel):
     algorithm:  str = "HS256"
 
 
+class EmbeddingSecrets(BaseModel):
+    """Credentials for LiteLLM embedding + reranking providers.
+
+    These are injected into environment variables consumed by LiteLLM / CocoIndex::
+
+        aws     → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+                  AWS_SESSION_TOKEN, AWS_DEFAULT_REGION
+        openai  → OPENAI_API_KEY
+        voyage  → VOYAGE_API_KEY
+        mistral → MISTRAL_API_KEY
+        cohere  → CO_API_KEY  (Cohere embed + reranking)
+
+    Configured under the ``embedding:`` key in conductor.secrets.yaml.
+    The model / provider is chosen in conductor.settings.yaml:
+        code_search.embedding_model: "bedrock/cohere.embed-v4:0"
+    """
+    aws:     AwsSecrets     = Field(default_factory=AwsSecrets)
+    openai:  OpenAISecrets  = Field(default_factory=OpenAISecrets)
+    voyage:  VoyageSecrets  = Field(default_factory=VoyageSecrets)
+    mistral: MistralSecrets = Field(default_factory=MistralSecrets)
+    cohere:  CohereSecrets  = Field(default_factory=CohereSecrets)
+
+
 class Secrets(BaseModel):
-    aws:      AwsSecrets      = Field(default_factory=AwsSecrets)
-    openai:   OpenAISecrets   = Field(default_factory=OpenAISecrets)
-    voyage:   VoyageSecrets   = Field(default_factory=VoyageSecrets)
-    mistral:  MistralSecrets  = Field(default_factory=MistralSecrets)
-    cohere:   CohereSecrets   = Field(default_factory=CohereSecrets)
-    database: DatabaseSecrets = Field(default_factory=DatabaseSecrets)
-    jwt:      JWTSecrets      = Field(default_factory=JWTSecrets)
+    embedding: EmbeddingSecrets = Field(default_factory=EmbeddingSecrets)
+    database:  DatabaseSecrets  = Field(default_factory=DatabaseSecrets)
+    jwt:       JWTSecrets       = Field(default_factory=JWTSecrets)
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +142,10 @@ class ServerSettings(BaseModel):
     reload:       bool = False
     log_level:    str  = "info"
     allowed_origins: List[str] = Field(default_factory=lambda: ["*"])
+    # Public URL for external access (ngrok, cloudflare tunnel, etc.).
+    # When set, this is returned by GET /public-url and used by the extension
+    # to build invite links instead of http://localhost:8000.
+    public_url:   str  = ""
 
 
 class DatabaseSettings(BaseModel):
@@ -191,7 +215,7 @@ class CodeSearchSettings(BaseModel):
     index_dir:           str  = "./cocoindex_data"
 
     # -- Embedding (LiteLLM model string) --
-    embedding_model:     str = "bedrock/cohere.embed-v4:0"
+    embedding_model:     str = "bedrock/eu.cohere.embed-v4:0"
     embedding_dimensions: Optional[int] = None  # Auto-detected for known models
 
     # -- Storage backend --
@@ -251,48 +275,59 @@ def _inject_embedding_env_vars(settings: AppSettings) -> None:
 
     Mapping::
 
-        AWS       → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
-        OpenAI    → OPENAI_API_KEY
-        Voyage    → VOYAGE_API_KEY
-        Mistral   → MISTRAL_API_KEY
-        Cohere    → CO_API_KEY
-        Postgres  → COCOINDEX_DATABASE_URL
+        embedding.aws     → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+                            AWS_SESSION_TOKEN, AWS_DEFAULT_REGION
+        embedding.openai  → OPENAI_API_KEY
+        embedding.voyage  → VOYAGE_API_KEY
+        embedding.mistral → MISTRAL_API_KEY
+        embedding.cohere  → CO_API_KEY
+        Postgres          → COCOINDEX_DATABASE_URL
     """
-    secrets = settings.secrets
+    emb = settings.secrets.embedding
 
     # --- Always inject all available credentials ---
     # This allows model switching without re-injecting env vars.
 
-    # AWS (Bedrock embedding, reranking)
-    if secrets.aws.access_key_id:
-        os.environ.setdefault("AWS_ACCESS_KEY_ID", secrets.aws.access_key_id)
-    if secrets.aws.secret_access_key:
-        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", secrets.aws.secret_access_key)
-    if secrets.aws.region:
-        os.environ.setdefault("AWS_DEFAULT_REGION", secrets.aws.region)
+    # AWS (Bedrock embedding + reranking)
+    if emb.aws.access_key_id:
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", emb.aws.access_key_id)
+    if emb.aws.secret_access_key:
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", emb.aws.secret_access_key)
+    if emb.aws.session_token:
+        os.environ.setdefault("AWS_SESSION_TOKEN", emb.aws.session_token)
+    if emb.aws.region:
+        os.environ.setdefault("AWS_DEFAULT_REGION", emb.aws.region)
+        os.environ.setdefault("AWS_REGION_NAME", emb.aws.region)
 
     # OpenAI
-    if secrets.openai.api_key:
-        os.environ.setdefault("OPENAI_API_KEY", secrets.openai.api_key)
+    if emb.openai.api_key:
+        os.environ.setdefault("OPENAI_API_KEY", emb.openai.api_key)
 
     # Voyage AI
-    if secrets.voyage.api_key:
-        os.environ.setdefault("VOYAGE_API_KEY", secrets.voyage.api_key)
+    if emb.voyage.api_key:
+        os.environ.setdefault("VOYAGE_API_KEY", emb.voyage.api_key)
 
     # Mistral AI
-    if secrets.mistral.api_key:
-        os.environ.setdefault("MISTRAL_API_KEY", secrets.mistral.api_key)
+    if emb.mistral.api_key:
+        os.environ.setdefault("MISTRAL_API_KEY", emb.mistral.api_key)
 
     # Cohere (embedding + reranking)
-    if secrets.cohere.api_key:
-        os.environ.setdefault("CO_API_KEY", secrets.cohere.api_key)
+    if emb.cohere.api_key:
+        os.environ.setdefault("CO_API_KEY", emb.cohere.api_key)
 
     # Postgres (CocoIndex incremental processing backend)
+    # Priority: code_search.postgres_url (settings) > secrets.database.url (secrets)
     if settings.code_search.storage_backend == "postgres":
-        pg_url = settings.code_search.postgres_url
+        pg_url = settings.code_search.postgres_url or secrets.database.url
         if pg_url:
             os.environ.setdefault("COCOINDEX_DATABASE_URL", pg_url)
             logger.info("Injected COCOINDEX_DATABASE_URL for Postgres backend.")
+        else:
+            logger.warning(
+                "storage_backend=postgres but no postgres URL found. "
+                "Set code_search.postgres_url in conductor.settings.yaml "
+                "or database.url in conductor.secrets.yaml."
+            )
 
     # CocoIndex embedding model env var
     model = settings.code_search.embedding_model

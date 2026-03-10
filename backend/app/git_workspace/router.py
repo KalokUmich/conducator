@@ -4,6 +4,7 @@ All endpoints are under the /api/git-workspace prefix (registered in main.py).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import List
 
@@ -14,6 +15,10 @@ from .schemas import (
     DelegateAuthRequest,
     DelegateAuthResponse,
     GitWorkspaceHealth,
+    ListRemoteBranchesRequest,
+    ListRemoteBranchesResponse,
+    SetupAndIndexRequest,
+    SetupAndIndexResult,
     WorkspaceCommitRequest,
     WorkspaceCommitResult,
     WorkspaceCreateRequest,
@@ -23,6 +28,7 @@ from .schemas import (
     WorkspacePushResult,
     WorkspaceSyncRequest,
     WorkspaceSyncResult,
+    WorktreeStatus,
 )
 from .service import GitWorkspaceService
 from .delegate_broker import DelegateBroker
@@ -78,6 +84,88 @@ async def health(
         active_rooms=len(workspaces),
         git_version=git_version,
     )
+
+
+@router.post("/branches/remote", response_model=ListRemoteBranchesResponse)
+async def list_remote_branches(
+    req: ListRemoteBranchesRequest,
+    svc: GitWorkspaceService = Depends(get_git_service),
+) -> ListRemoteBranchesResponse:
+    """List branches on a remote git repository."""
+    try:
+        branches, default = await svc.list_remote_branches(req.repo_url, req.credentials)
+        return ListRemoteBranchesResponse(branches=branches, default_branch=default)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/workspaces/setup-and-index", response_model=SetupAndIndexResult)
+async def setup_and_index(
+    req: SetupAndIndexRequest,
+    svc: GitWorkspaceService = Depends(get_git_service),
+) -> SetupAndIndexResult:
+    """Kick off workspace creation and return immediately.
+
+    The clone runs in the background.  The client should poll
+    ``GET /workspaces/{room_id}`` for ``status`` and ``clone_progress``.
+    Once ``status == "ready"`` the client can optionally call
+    ``POST /workspaces/{room_id}/index`` to trigger code-search indexing.
+    """
+    create_req = WorkspaceCreateRequest(
+        room_id=req.room_id,
+        repo_url=req.repo_url,
+        base_branch=req.source_branch,
+        credentials=req.credentials,
+    )
+    try:
+        workspace_info = await svc.create_workspace(create_req)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # Return immediately — let the frontend poll for progress.
+    return SetupAndIndexResult(
+        room_id=req.room_id,
+        workspace=workspace_info,
+        message="Workspace clone started. Poll GET /api/git-workspace/workspaces/{room_id} for progress.",
+    )
+
+
+@router.post("/workspaces/{room_id}/index", response_model=SetupAndIndexResult)
+async def index_workspace(
+    room_id: str,
+    svc: GitWorkspaceService = Depends(get_git_service),
+) -> SetupAndIndexResult:
+    """Trigger code-search indexing for an already-ready workspace."""
+    info = svc.get_workspace(room_id)
+    if info is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workspace not found")
+    if info.status != WorktreeStatus.READY:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Workspace not ready (status={info.status})")
+
+    try:
+        from app.main import app as _app
+        code_search_svc = _app.state.code_search_service
+        index_result = await code_search_svc.build_index(
+            workspace_path=info.worktree_path,
+            force_rebuild=False,
+        )
+        return SetupAndIndexResult(
+            room_id=room_id,
+            workspace=info,
+            index_success=index_result.success,
+            files_indexed=index_result.files_indexed,
+            chunks_indexed=index_result.chunks_indexed,
+            index_duration_ms=index_result.duration_ms,
+            message=index_result.message,
+        )
+    except Exception as exc:
+        logger.error("Indexing failed for room %s: %s", room_id, exc)
+        return SetupAndIndexResult(
+            room_id=room_id,
+            workspace=info,
+            index_success=False,
+            message=f"Indexing failed: {exc}",
+        )
 
 
 @router.post("/workspaces", response_model=WorkspaceInfo, status_code=status.HTTP_201_CREATED)

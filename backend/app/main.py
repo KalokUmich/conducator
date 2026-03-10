@@ -8,6 +8,7 @@ Lifespan initializes:
   * RepoMap Graph Service (Aider-style file dependency graph + PageRank)
   * Rerank Provider (configurable: none / cohere / bedrock / cross_encoder)
   * Optional Postgres backend for incremental processing
+  * Ngrok tunnel (when enabled) for external access from VS Code webview
 
 Removed in this version:
   * FAISS index loading
@@ -22,15 +23,23 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .config import AppSettings, _inject_embedding_env_vars, load_settings
+from .config import (
+    AppSettings,
+    _find_config_file,
+    _inject_embedding_env_vars,
+    _load_yaml,
+    load_settings,
+)
 from .git_workspace.service import GitWorkspaceService
 from .git_workspace.delegate_broker import DelegateBroker
 from .code_search.service import CodeSearchService
 from .code_search.rerank_provider import create_rerank_provider
+from .ngrok_service import get_public_url, start_ngrok, stop_ngrok
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +101,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
     app.state.rerank_provider = rerank_provider
 
+    # ---- Ngrok tunnel ----
+    # Read ngrok config from raw YAML (not modelled in AppSettings).
+    # Required for VS Code Remote-WSL: the webview runs in the Windows
+    # Electron process and cannot reach WSL's localhost directly.
+    _settings_raw = _load_yaml(_find_config_file("conductor.settings.yaml"))
+    _secrets_raw  = _load_yaml(_find_config_file("conductor.secrets.yaml"))
+    ngrok_cfg = _settings_raw.get("ngrok", {})
+    ngrok_sec = _secrets_raw.get("ngrok", {})
+
+    if ngrok_cfg.get("enabled", False):
+        logger.info("Ngrok is enabled, starting tunnel...")
+        ngrok_url = start_ngrok(
+            port=settings.server.port,
+            authtoken=ngrok_sec.get("authtoken", ""),
+            region=ngrok_cfg.get("region", "us"),
+        )
+        if ngrok_url:
+            logger.info("Ngrok tunnel active: %s", ngrok_url)
+        else:
+            logger.warning(
+                "Failed to start ngrok tunnel. "
+                "Falling back to localhost:%s", settings.server.port
+            )
+    else:
+        logger.info(
+            "Ngrok disabled. Server running on http://%s:%s",
+            settings.server.host, settings.server.port,
+        )
+
     logger.info("Conducator startup complete.")
     yield
     # ---- Shutdown ----
+    stop_ngrok()
     await git_service.shutdown()
     await code_search_service.shutdown()
     logger.info("Conducator shutdown complete.")
@@ -124,6 +163,74 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         allow_headers     = ["*"],
     )
 
+    # --- Private Network Access (PNA) middleware ---
+    # Chrome 105+ blocks WebSocket/fetch from vscode-webview:// origins to
+    # localhost unless the server returns Access-Control-Allow-Private-Network: true.
+    #
+    # IMPORTANT: We use a pure ASGI middleware (not BaseHTTPMiddleware) because
+    # BaseHTTPMiddleware buffers the response body, which is incompatible with the
+    # HTTP 101 Switching Protocols response that WebSocket upgrade requires.
+    # Using BaseHTTPMiddleware would silently kill every WebSocket connection with
+    # close code 1006 before the request ever reaches the FastAPI handler.
+    class PrivateNetworkAccessMiddleware:
+        """Pure ASGI middleware — safe for both HTTP and WebSocket connections."""
+
+        def __init__(self, app: ASGIApp) -> None:
+            self.app = app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "http":
+                headers = dict(scope.get("headers", []))
+                method = scope.get("method", "")
+                pna_requested = headers.get(b"access-control-request-private-network", b"").decode()
+
+                if method == "OPTIONS" and pna_requested == "true":
+                    # Respond to PNA preflight immediately — do NOT call the app
+                    origin = headers.get(b"origin", b"*").decode()
+                    await send({
+                        "type": "http.response.start",
+                        "status": 204,
+                        "headers": [
+                            (b"access-control-allow-origin", origin.encode()),
+                            (b"access-control-allow-private-network", b"true"),
+                            (b"access-control-allow-methods", b"*"),
+                            (b"access-control-allow-headers", b"*"),
+                            (b"access-control-max-age", b"7200"),
+                        ],
+                    })
+                    await send({"type": "http.response.body", "body": b""})
+                    return
+
+                # Regular HTTP: inject PNA header into every response
+                async def send_with_pna(message: dict) -> None:
+                    if message["type"] == "http.response.start":
+                        message = dict(message)
+                        message["headers"] = list(message.get("headers", [])) + [
+                            (b"access-control-allow-private-network", b"true"),
+                        ]
+                    await send(message)
+
+                await self.app(scope, receive, send_with_pna)
+
+            elif scope["type"] == "websocket":
+                # WebSocket: inject PNA header into the 101 accept response so
+                # Chrome's PNA check passes, then let the connection proceed normally.
+                async def send_with_pna(message: dict) -> None:
+                    if message["type"] == "websocket.accept":
+                        message = dict(message)
+                        extra = list(message.get("headers") or [])
+                        extra.append((b"access-control-allow-private-network", b"true"))
+                        message["headers"] = extra
+                    await send(message)
+
+                await self.app(scope, receive, send_with_pna)
+
+            else:
+                # lifespan, etc. — pass through unchanged
+                await self.app(scope, receive, send)
+
+    app.add_middleware(PrivateNetworkAccessMiddleware)
+
     # --- Routers ---
     from .git_workspace.router import router as git_workspace_router
     from .code_search.router   import router as code_search_router
@@ -134,6 +241,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .chat.router          import router as chat_router
     from .chat.settings_router import router as chat_settings_router
     from .agent.router         import router as agent_router
+    from .auth.router          import router as auth_router
+    from .embeddings.router    import router as embeddings_router
+    from .rag.router           import router as rag_router
+    from .files.router         import router as files_router
+    from .todos.router         import router as todos_router
+    from .workspace_files.router import router as workspace_files_router
 
     app.include_router(git_workspace_router)
     app.include_router(code_search_router)
@@ -144,12 +257,33 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(chat_router)
     app.include_router(chat_settings_router)
     app.include_router(agent_router)
+    app.include_router(auth_router)
+    app.include_router(embeddings_router)
+    app.include_router(rag_router)
+    app.include_router(files_router)
+    app.include_router(todos_router)
+    app.include_router(workspace_files_router)
 
     # --- Health check ---
     @app.get("/health", include_in_schema=True)
     async def health() -> dict:
         """Simple liveness probe."""
         return {"status": "ok"}
+
+    # --- Public URL ---
+    _settings_for_public_url = settings or load_settings()
+
+    @app.get("/public-url", include_in_schema=True)
+    async def public_url() -> dict:
+        """Return the public URL so the extension can build correct invite
+        links.  Priority: live ngrok tunnel > configured public_url in YAML."""
+        # Prefer the live ngrok tunnel URL (set by start_ngrok in lifespan)
+        live_url = get_public_url()
+        if live_url:
+            return {"public_url": live_url}
+        # Fall back to the static value from conductor.settings.yaml
+        url = (_settings_for_public_url.server.public_url or "").strip()
+        return {"public_url": url}
 
     # --- Prometheus-compatible metrics scrape endpoint ---
     @app.get("/metrics", include_in_schema=False)

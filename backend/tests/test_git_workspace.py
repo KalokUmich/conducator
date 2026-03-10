@@ -236,6 +236,8 @@ class TestServiceGetWorktreePath:
 
 
 from app.git_workspace.schemas import (  # noqa: E402 (already imported above)
+    ListRemoteBranchesResponse,
+    SetupAndIndexResult,
     WorkspaceCommitResult,
     WorkspacePushResult,
     WorkspaceSyncResult,
@@ -263,6 +265,9 @@ def mock_manager():
     )
     mgr.store_credentials = AsyncMock(return_value=None)
     mgr.revoke_credentials = AsyncMock(return_value=None)
+    mgr.list_remote_branches = AsyncMock(
+        return_value=(["develop", "main", "staging"], "main")
+    )
     return mgr
 
 
@@ -396,3 +401,116 @@ class TestHealthEndpoint:
         data = resp.json()
         assert "status" in data
         assert "active_rooms" in data
+
+
+# ---------------------------------------------------------------------------
+# List Remote Branches endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestListRemoteBranchesEndpoint:
+    def test_list_branches_returns_200(self, mock_manager):
+        resp = client.post(
+            "/api/git-workspace/branches/remote",
+            json={"repo_url": "https://github.com/x/y.git"},
+        )
+        assert resp.status_code == 200
+
+    def test_list_branches_returns_branches(self, mock_manager):
+        resp = client.post(
+            "/api/git-workspace/branches/remote",
+            json={"repo_url": "https://github.com/x/y.git"},
+        )
+        data = resp.json()
+        assert "branches" in data
+        assert isinstance(data["branches"], list)
+        assert "main" in data["branches"]
+
+    def test_list_branches_returns_default_branch(self, mock_manager):
+        resp = client.post(
+            "/api/git-workspace/branches/remote",
+            json={"repo_url": "https://github.com/x/y.git"},
+        )
+        data = resp.json()
+        assert data["default_branch"] == "main"
+
+    def test_list_branches_with_credentials(self, mock_manager):
+        resp = client.post(
+            "/api/git-workspace/branches/remote",
+            json={
+                "repo_url": "https://github.com/x/y.git",
+                "credentials": {"token": "ghp_test123"},
+            },
+        )
+        assert resp.status_code == 200
+        mock_manager.list_remote_branches.assert_called_once()
+
+    def test_list_branches_missing_repo_url(self, mock_manager):
+        resp = client.post("/api/git-workspace/branches/remote", json={})
+        assert resp.status_code == 422
+
+    def test_list_branches_service_error(self, mock_manager):
+        mock_manager.list_remote_branches = AsyncMock(
+            side_effect=RuntimeError("git ls-remote failed")
+        )
+        resp = client.post(
+            "/api/git-workspace/branches/remote",
+            json={"repo_url": "https://github.com/x/y.git"},
+        )
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Service — list_remote_branches unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestServiceListRemoteBranches:
+    @pytest.mark.asyncio
+    async def test_list_remote_branches_parses_output(self):
+        mgr = GitWorkspaceManager()
+        ls_remote_output = (
+            "ref: refs/heads/main\tHEAD\n"
+            "abc123\trefs/heads/develop\n"
+            "def456\trefs/heads/main\n"
+            "ghi789\trefs/heads/staging\n"
+        )
+        with patch.object(mgr, "_run_git", new_callable=AsyncMock, return_value=ls_remote_output):
+            branches, default = await mgr.list_remote_branches("https://github.com/x/y.git")
+        assert branches == ["develop", "main", "staging"]
+        assert default == "main"
+
+    @pytest.mark.asyncio
+    async def test_list_remote_branches_no_symref(self):
+        mgr = GitWorkspaceManager()
+        ls_remote_output = (
+            "abc123\trefs/heads/feature-a\n"
+            "def456\trefs/heads/main\n"
+        )
+        with patch.object(mgr, "_run_git", new_callable=AsyncMock, return_value=ls_remote_output):
+            branches, default = await mgr.list_remote_branches("https://github.com/x/y.git")
+        assert branches == ["feature-a", "main"]
+        assert default is None
+
+    @pytest.mark.asyncio
+    async def test_list_remote_branches_empty(self):
+        mgr = GitWorkspaceManager()
+        with patch.object(mgr, "_run_git", new_callable=AsyncMock, return_value=""):
+            branches, default = await mgr.list_remote_branches("https://github.com/x/y.git")
+        assert branches == []
+        assert default is None
+
+    @pytest.mark.asyncio
+    async def test_list_remote_branches_with_credentials(self):
+        from app.git_workspace.schemas import CredentialPayload
+        mgr = GitWorkspaceManager()
+        creds = CredentialPayload(token="ghp_test")
+        with patch.object(mgr, "_run_git", new_callable=AsyncMock, return_value="abc\trefs/heads/main\n") as mock_git:
+            branches, default = await mgr.list_remote_branches("https://github.com/x/y.git", creds)
+        assert branches == ["main"]
+        # Verify env was passed with credential vars
+        call_kwargs = mock_git.call_args
+        env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env")
+        assert env is not None
+        assert "GIT_ASKPASS" in env
+        assert env["GIT_CREDENTIAL_TOKEN"] == "ghp_test"

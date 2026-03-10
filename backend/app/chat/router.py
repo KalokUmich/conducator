@@ -292,7 +292,8 @@ async def websocket_chat_endpoint(
         room_id: The room ID to join.
         since: Optional timestamp for message recovery on reconnect.
     """
-    logger.info(f"[WS] New connection to room: {room_id}, since={since}")
+    client_host = websocket.client.host if websocket.client else "unknown"
+    logger.info(f"[WS] New connection to room: {room_id}, since={since}, client={client_host}")
 
     # Enforce max_participants from config (0 = no limit)
     max_participants = get_config().session.max_participants
@@ -305,7 +306,11 @@ async def websocket_chat_endpoint(
         return
 
     # SECURITY: Backend assigns userId and role on connection
-    assigned_user_id, assigned_role, history = await manager.connect(websocket, room_id)
+    try:
+        assigned_user_id, assigned_role, history = await manager.connect(websocket, room_id)
+    except Exception as exc:
+        logger.exception(f"[WS] manager.connect() raised an exception for room {room_id}: {exc}")
+        raise
     logger.info(
         f"[WS] Connection accepted. Assigned userId={assigned_user_id}, role={assigned_role}. "
         f"Room {room_id} now has {manager.get_room_size(room_id)} connections"
@@ -691,4 +696,12 @@ async def websocket_chat_endpoint(
                 "type": "history_cleared",
                 "reason": "host_session_ended",
             }, room_id)
+
+    except Exception as exc:
+        logger.exception(
+            f"[WS] Unhandled exception in websocket_chat_endpoint for room {room_id}, "
+            f"userId={assigned_user_id if 'assigned_user_id' in dir() else 'unassigned'}: {exc}"
+        )
+        manager.disconnect(websocket, room_id)
+        raise
 

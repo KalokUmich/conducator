@@ -159,8 +159,10 @@ class TestCodeSearchServiceInitialize:
         settings.postgres_url = None
         settings.incremental = False
 
-        # Prevent cocoindex import error
-        with patch.dict(sys.modules, {"cocoindex": MagicMock()}):
+        # Prevent cocoindex_code import error (initialize() imports cocoindex_code,
+        # not the base cocoindex package, to check for availability)
+        _mods = {"cocoindex": MagicMock(), "cocoindex_code": MagicMock()}
+        with patch.dict(sys.modules, _mods):
             await svc.initialize(settings)
 
         assert svc._embedding_model == "voyage/voyage-code-3"
@@ -177,7 +179,10 @@ class TestCodeSearchServiceInitialize:
         settings.postgres_url = "postgresql://user:pass@localhost:5432/cocoindex"
         settings.incremental = True
 
-        with patch.dict(sys.modules, {"cocoindex": MagicMock()}):
+        _mods = {"cocoindex": MagicMock(), "cocoindex_code": MagicMock()}
+        with patch.dict(sys.modules, _mods):
+            # Ensure COCOINDEX_DATABASE_URL is unset before the call
+            os.environ.pop("COCOINDEX_DATABASE_URL", None)
             await svc.initialize(settings)
 
         assert svc._storage_backend == "postgres"
@@ -196,7 +201,8 @@ class TestCodeSearchServiceInitialize:
         settings.postgres_url = None
         settings.incremental = False
 
-        with patch.dict(sys.modules, {"cocoindex": MagicMock()}):
+        _mods = {"cocoindex": MagicMock(), "cocoindex_code": MagicMock()}
+        with patch.dict(sys.modules, _mods):
             await svc.initialize(settings)
 
         assert svc._initialized is True

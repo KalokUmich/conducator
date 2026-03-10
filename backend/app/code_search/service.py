@@ -6,21 +6,40 @@ Wraps cocoindex-code to provide:
   * Per-workspace index management
   * Incremental processing (only re-index changed files)
 
-Storage backends:
-  * **sqlite** (default) — embedded, no setup required
-  * **postgres** — incremental processing, concurrent access, production-ready
+Architecture
+------------
+Indexing uses ``cocoindex-code`` as a **subprocess** (one per workspace).
+This sidesteps the module-level singleton problem: cocoindex-code reads its
+config from env vars at import time, so each subprocess can have a different
+``COCOINDEX_CODE_ROOT_PATH`` without interfering with others.
 
-Embedding is handled via LiteLLM (100+ providers) or local SentenceTransformers.
-The embedding model string is passed to cocoindex-code via the
-``COCOINDEX_CODE_EMBEDDING_MODEL`` environment variable so both our
-EmbeddingProvider and cocoindex-code use the same model.
+Search bypasses the subprocess entirely: we embed the query ourselves using
+our ``EmbeddingProvider`` and query the sqlite-vec database that
+cocoindex-code writes to (``{workspace}/.cocoindex_code/target_sqlite.db``).
 
+Storage backends
+----------------
+* **sqlite** (default) — embedded, no setup required.
+  Both the vector index and cocoindex's state DB live inside the workspace
+  under ``.cocoindex_code/``.
+* **postgres** — enables incremental re-indexing. Setting
+  ``COCOINDEX_DATABASE_URL`` in the worker subprocess causes cocoindex to
+  store its *state-tracking* (lineage) in Postgres instead of the local
+  SQLite file. The **vector index** still lives in sqlite-vec — that is how
+  cocoindex-code is designed. This means only changed files are re-processed
+  on subsequent ``build_index`` calls.
 """
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
 import logging
 import os
+import sqlite3
+import struct
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -28,6 +47,107 @@ from typing import Dict, List, Optional
 from .embedding_provider import EmbeddingProvider, create_embedding_provider
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# sqlite-vec helper functions
+# ---------------------------------------------------------------------------
+# cocoindex-code always stores the vector index at:
+#   {workspace}/.cocoindex_code/target_sqlite.db
+#
+# Schema (Vec0 virtual table):
+#   code_chunks_vec(id, file_path, language, content,
+#                   start_line, end_line, embedding)
+#
+# sqlite-vec uses *binary* BLOB embeddings (little-endian float32 array).
+# ---------------------------------------------------------------------------
+
+
+def _sqlite_count(db_path: str) -> tuple[int, int]:
+    """Return (files_count, chunks_count) from the sqlite-vec DB."""
+    try:
+        import sqlite_vec  # type: ignore  # noqa: F401
+        conn = sqlite3.connect(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        chunks = conn.execute("SELECT COUNT(*) FROM code_chunks_vec").fetchone()[0]
+        files  = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM code_chunks_vec"
+        ).fetchone()[0]
+        conn.close()
+        return files, chunks
+    except Exception:
+        return 0, 0
+
+
+def _l2_to_score(distance: float) -> float:
+    """Convert L2 distance to cosine-similarity-like score (exact for unit vecs)."""
+    return 1.0 - distance * distance / 2.0
+
+
+def _sqlite_knn_search(
+    db_path: str,
+    query_vec,        # np.ndarray[float32]
+    k: int,
+    file_filter: Optional[str],
+) -> List[Dict]:
+    """Query the sqlite-vec KNN index and return raw row dicts.
+
+    Vec0 virtual tables CANNOT filter on auxiliary columns (like file_path)
+    inside a MATCH query — that triggers a "query too complex" error.
+    When a file_filter is given we fall back to a full-scan with
+    ``vec_distance_L2``, exactly like cocoindex-code's own ``query.py`` does.
+    """
+    import sqlite_vec  # type: ignore  # noqa: F401
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    # sqlite-vec expects raw bytes (float32, little-endian)
+    vec_bytes = query_vec.astype("float32").tobytes()
+
+    if file_filter:
+        # Full scan with SQL-level distance + GLOB filter on file_path.
+        # Vec0 index can't filter auxiliary columns, so we use vec_distance_L2.
+        rows = conn.execute(
+            """
+            SELECT file_path, language, content, start_line, end_line,
+                   vec_distance_L2(embedding, ?) as distance
+            FROM code_chunks_vec
+            WHERE file_path GLOB ?
+            ORDER BY distance
+            LIMIT ?
+            """,
+            (vec_bytes, file_filter, k),
+        ).fetchall()
+    else:
+        # Fast KNN path via Vec0 index — no auxiliary-column filtering.
+        rows = conn.execute(
+            """
+            SELECT file_path, language, content, start_line, end_line, distance
+            FROM code_chunks_vec
+            WHERE embedding MATCH ? AND k = ?
+            ORDER BY distance
+            """,
+            (vec_bytes, k),
+        ).fetchall()
+
+    conn.close()
+
+    return [
+        {
+            "file_path":  row[0],
+            "language":   row[1],
+            "content":    row[2],
+            "start_line": row[3],
+            "end_line":   row[4],
+            "score":      _l2_to_score(row[5]),
+        }
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +186,7 @@ class CodeSearchService:
 
     def __init__(self) -> None:
         self._index_dir: Path = Path("./cocoindex_data")
-        self._embedding_model: str = "bedrock/cohere.embed-v4:0"
+        self._embedding_model: str = "bedrock/eu.cohere.embed-v4:0"
         self._top_k_default: int = 5
         self._indices: Dict[str, _IndexRecord] = {}  # workspace_path → record
         self._initialized: bool = False
@@ -106,17 +226,23 @@ class CodeSearchService:
 
         # Storage backend
         self._storage_backend = getattr(settings, "storage_backend", "sqlite")
-        self._postgres_url = getattr(settings, "postgres_url", None)
+        # postgres_url: prefer settings field, fall back to env var injected by
+        # _inject_embedding_env_vars (which reads from secrets.database.url)
+        self._postgres_url = (
+            getattr(settings, "postgres_url", None)
+            or os.environ.get("COCOINDEX_DATABASE_URL")
+        )
         self._incremental = getattr(settings, "incremental", False)
 
-        # Set env var so cocoindex-code uses the same embedding model
+        # Set env var so cocoindex-code subprocess uses the same embedding model
         os.environ["COCOINDEX_CODE_EMBEDDING_MODEL"] = self._embedding_model
 
-        # Set Postgres URL for CocoIndex if configured
+        # Postgres: set COCOINDEX_DATABASE_URL so the worker subprocess uses it
+        # for state-tracking (enables incremental processing).
         if self._storage_backend == "postgres" and self._postgres_url:
             os.environ["COCOINDEX_DATABASE_URL"] = self._postgres_url
 
-        # Create embedding provider
+        # Create embedding provider (used for search queries)
         try:
             self._embedding_provider = create_embedding_provider(settings)
             logger.info(
@@ -127,25 +253,26 @@ class CodeSearchService:
         except Exception as exc:
             logger.warning(
                 "Failed to create embedding provider (%s): %s — "
-                "CodeSearchService will be degraded.",
+                "code search will be degraded.",
                 self._embedding_model,
                 exc,
             )
 
+        # Mark cocoindex-code as available if the package is installed
         try:
-            import cocoindex  # type: ignore
-            self._cocoindex = cocoindex
+            import cocoindex_code  # type: ignore  # noqa: F401
+            self._cocoindex = True  # sentinel: package is available
             logger.info(
-                "CocoIndex loaded (model=%s, storage=%s, index_dir=%s, incremental=%s)",
+                "cocoindex-code available (model=%s, storage=%s, incremental=%s)",
                 self._embedding_model,
                 self._storage_backend,
-                self._index_dir,
                 self._incremental,
             )
         except ImportError:
+            self._cocoindex = None
             logger.warning(
-                "cocoindex package not found — CodeSearchService will be degraded. "
-                "Install with: pip install cocoindex-code"
+                "cocoindex-code package not found — code search degraded. "
+                "Install with: pip install cocoindex-code sqlite-vec"
             )
 
         self._initialized = True
@@ -180,8 +307,15 @@ class CodeSearchService:
     ):
         """Build or update the code index for *workspace_path*.
 
-        When incremental processing is enabled (Postgres backend), only
-        changed files are re-indexed.  ``force_rebuild`` bypasses this.
+        Runs ``_indexer_worker.py`` as a subprocess so that every workspace
+        gets its own isolated environment (cocoindex-code reads config from
+        env vars at import time — a single-process approach can't switch
+        workspaces without restarting).
+
+        When Postgres is configured, cocoindex uses it for state tracking,
+        enabling incremental re-indexing (only changed files are re-processed).
+        The vector index itself always lives in the workspace's own
+        ``{workspace}/.cocoindex_code/target_sqlite.db``.
         """
         from .schemas import IndexBuildResult
 
@@ -192,59 +326,104 @@ class CodeSearchService:
                 files_indexed=0,
                 chunks_indexed=0,
                 duration_ms=0.0,
-                message="cocoindex package not available",
+                message="cocoindex-code package not available",
             )
 
         start = time.monotonic()
         index_id = self._index_id_for(workspace_path)
 
+        # Build env for the worker subprocess (inherits current env, then overrides)
+        worker_env = os.environ.copy()
+        worker_env["COCOINDEX_CODE_ROOT_PATH"]       = workspace_path
+        worker_env["COCOINDEX_CODE_EMBEDDING_MODEL"] = self._embedding_model
+        if force_rebuild:
+            worker_env["_COCOINDEX_DROP_FIRST"] = "1"
+        else:
+            worker_env.pop("_COCOINDEX_DROP_FIRST", None)
+
+        if self._storage_backend == "postgres" and self._postgres_url:
+            worker_env["COCOINDEX_DATABASE_URL"] = self._postgres_url
+        else:
+            # Remove any Postgres URL so the worker falls back to local SQLite state
+            worker_env.pop("COCOINDEX_DATABASE_URL", None)
+
+        worker_script = Path(__file__).parent / "_indexer_worker.py"
+
+        logger.info(
+            "Launching indexer worker: embedding_model=%r, python=%s, workspace=%s",
+            worker_env.get("COCOINDEX_CODE_EMBEDDING_MODEL"),
+            sys.executable,
+            workspace_path,
+        )
+
         try:
-            build_kwargs = {
-                "source_dir": workspace_path,
-                "embedding": self._embedding_model,
-                "file_filter": file_filter,
-                "force_rebuild": force_rebuild,
-            }
-
-            if self._storage_backend == "postgres" and self._postgres_url:
-                # Postgres backend: cocoindex uses COCOINDEX_DATABASE_URL env
-                # and manages its own storage tables
-                build_kwargs["incremental"] = self._incremental and not force_rebuild
-            else:
-                # SQLite backend: pass index_db path
-                index_db = str(self._index_dir / f"{index_id}.db")
-                build_kwargs["index_db"] = index_db
-
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._cocoindex.build(**build_kwargs),
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(worker_script),
+                env=worker_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            stdout_bytes, stderr_bytes = await proc.communicate()
             elapsed = (time.monotonic() - start) * 1000
 
-            record = _IndexRecord(workspace_path=workspace_path, index_id=index_id)
-            record.files_count = getattr(result, "files_indexed", 0)
-            record.chunks_count = getattr(result, "chunks_indexed", 0)
-            record.is_incremental = (
+            if proc.returncode != 0:
+                raw_stderr = stderr_bytes.decode(errors="replace").strip()
+                raw_stdout = stdout_bytes.decode(errors="replace").strip()
+                logger.error(
+                    "Index worker exited %d for %s\n  STDERR: %s\n  STDOUT: %s",
+                    proc.returncode, workspace_path, raw_stderr, raw_stdout,
+                )
+                err_msg = raw_stderr
+                # Try to extract JSON error message
+                try:
+                    err_data = json.loads(raw_stderr)
+                    err_msg = err_data.get("error", raw_stderr)
+                except Exception:
+                    pass
+                return IndexBuildResult(
+                    workspace_path=workspace_path,
+                    success=False,
+                    files_indexed=0,
+                    chunks_indexed=0,
+                    duration_ms=elapsed,
+                    message=err_msg,
+                )
+
+            # Parse worker JSON output
+            out_text = stdout_bytes.decode(errors="replace").strip()
+            try:
+                out_data = json.loads(out_text)
+            except Exception:
+                out_data = {}
+
+            files_count  = out_data.get("files", 0)
+            chunks_count = out_data.get("chunks", 0)
+            is_incremental = (
                 self._incremental
                 and self._storage_backend == "postgres"
                 and not force_rebuild
             )
-            import datetime
-            record.last_updated = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            record = _IndexRecord(workspace_path=workspace_path, index_id=index_id)
+            record.files_count    = files_count
+            record.chunks_count   = chunks_count
+            record.is_incremental = is_incremental
+            record.last_updated   = datetime.datetime.now(datetime.timezone.utc).isoformat()
             self._indices[workspace_path] = record
 
             return IndexBuildResult(
                 workspace_path=workspace_path,
                 success=True,
-                files_indexed=record.files_count,
-                chunks_indexed=record.chunks_count,
+                files_indexed=files_count,
+                chunks_indexed=chunks_count,
                 duration_ms=elapsed,
                 message=(
                     "Incremental update completed"
-                    if record.is_incremental
+                    if is_incremental
                     else "Index built successfully"
                 ),
             )
+
         except Exception as exc:  # pylint: disable=broad-except
             elapsed = (time.monotonic() - start) * 1000
             logger.error("Index build failed for %s: %s", workspace_path, exc)
@@ -258,26 +437,42 @@ class CodeSearchService:
             )
 
     def get_index_status(self, workspace_path: str):
-        """Return current index status for *workspace_path*."""
+        """Return current index status for *workspace_path*.
+
+        Also checks the sqlite-vec DB on disk so the status reflects reality
+        even if ``build_index`` was not called in this process lifetime.
+        """
         from .schemas import IndexStatusResponse
 
+        # The vector DB is always written inside the workspace by cocoindex-code
+        db_path = Path(workspace_path) / ".cocoindex_code" / "target_sqlite.db"
+        on_disk = db_path.exists()
+
         record = self._indices.get(workspace_path)
-        if record is None:
+        if record is None and not on_disk:
             return IndexStatusResponse(
                 workspace_path=workspace_path,
                 indexed=False,
                 files_count=0,
                 chunks_count=0,
             )
+
+        # Read live counts from DB if record is stale / missing
+        if on_disk and (record is None or record.files_count == 0):
+            files, chunks = _sqlite_count(str(db_path))
+        else:
+            files  = record.files_count  if record else 0
+            chunks = record.chunks_count if record else 0
+
         return IndexStatusResponse(
             workspace_path=workspace_path,
-            indexed=True,
-            files_count=record.files_count,
-            chunks_count=record.chunks_count,
-            last_updated=record.last_updated,
-            index_id=record.index_id,
+            indexed=on_disk,
+            files_count=files,
+            chunks_count=chunks,
+            last_updated=record.last_updated if record else None,
+            index_id=record.index_id if record else self._index_id_for(workspace_path),
             storage_backend=self._storage_backend,
-            is_incremental=record.is_incremental,
+            is_incremental=record.is_incremental if record else False,
         )
 
     # ------------------------------------------------------------------
@@ -291,51 +486,53 @@ class CodeSearchService:
         top_k:          Optional[int] = None,
         file_filter:    Optional[str] = None,
     ):
-        """Run a semantic code search over the indexed workspace."""
+        """Run a semantic code search over the indexed workspace.
+
+        Embeds the query with our own ``EmbeddingProvider`` then directly
+        queries the sqlite-vec database that cocoindex-code writes to
+        (``{workspace}/.cocoindex_code/target_sqlite.db``).
+        This avoids any subprocess overhead for read-only operations.
+        """
         from .schemas import CodeSearchResponse, CodeChunk
 
         k = top_k if top_k is not None else self._top_k_default
 
-        if self._cocoindex is None:
-            return CodeSearchResponse(
-                query=query, results=[], total=0
+        if self._embedding_provider is None:
+            logger.warning("No embedding provider — code search returning empty results")
+            return CodeSearchResponse(query=query, results=[], total=0)
+
+        db_path = Path(workspace_path) / ".cocoindex_code" / "target_sqlite.db"
+        if not db_path.exists():
+            logger.warning(
+                "Index DB not found for workspace %s — run build_index first",
+                workspace_path,
             )
+            return CodeSearchResponse(query=query, results=[], total=0)
 
         record   = self._indices.get(workspace_path)
         index_id = record.index_id if record else self._index_id_for(workspace_path)
 
         try:
-            search_kwargs = {
-                "query": query,
-                "top_k": k,
-                "file_filter": file_filter,
-            }
+            # 1. Embed the query
+            query_vec = await self._embedding_provider.embed_query(query)
 
-            if self._storage_backend == "postgres" and self._postgres_url:
-                # Postgres backend: cocoindex queries via database
-                pass  # COCOINDEX_DATABASE_URL env is already set
-            else:
-                # SQLite backend
-                index_db = str(self._index_dir / f"{index_id}.db")
-                search_kwargs["index_db"] = index_db
-
-            raw_results = await asyncio.get_event_loop().run_in_executor(
+            # 2. Query sqlite-vec (run in thread-pool to avoid blocking event loop)
+            loop = asyncio.get_event_loop()
+            rows = await loop.run_in_executor(
                 None,
-                lambda: self._cocoindex.search(**search_kwargs),
+                lambda: _sqlite_knn_search(str(db_path), query_vec, k, file_filter),
             )
 
             chunks = [
                 CodeChunk(
-                    file_path   = r.file_path,
-                    start_line  = r.start_line,
-                    end_line    = r.end_line,
-                    content     = r.content,
-                    score       = r.score,
-                    language    = getattr(r, "language", None),
-                    symbol_name = getattr(r, "symbol_name", None),
-                    symbol_type = getattr(r, "symbol_type", None),
+                    file_path  = row["file_path"],
+                    start_line = row["start_line"],
+                    end_line   = row["end_line"],
+                    content    = row["content"],
+                    score      = row["score"],
+                    language   = row.get("language"),
                 )
-                for r in raw_results
+                for row in rows
             ]
             return CodeSearchResponse(
                 query=query, results=chunks, total=len(chunks), index_id=index_id

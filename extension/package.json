@@ -37,6 +37,10 @@
       {
         "command": "ai-collab.openPanel",
         "title": "AI Collab: Open Panel"
+      },
+      {
+        "command": "conductor.searchWorkspace",
+        "title": "Conductor: Search Remote Workspace"
       }
     ],
     "configuration": {

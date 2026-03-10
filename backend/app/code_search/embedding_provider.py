@@ -58,6 +58,9 @@ _KNOWN_DIMS: Dict[str, int] = {
     "bedrock/cohere.embed-english-v3":                   1024,
     "bedrock/cohere.embed-multilingual-v3":              1024,
     "bedrock/cohere.embed-v4:0":                         1024,
+    "bedrock/eu.cohere.embed-v4:0":                      1536,
+    "bedrock/us.cohere.embed-v4:0":                      1536,
+    "bedrock/global.cohere.embed-v4:0":                  1536,
     "bedrock/amazon.titan-embed-text-v1":                1536,
     "bedrock/amazon.titan-embed-text-v2:0":              1024,
     # OpenAI

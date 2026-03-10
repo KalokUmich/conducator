@@ -81,6 +81,17 @@ class WorkspaceCreateRequest(BaseModel):
     )
 
 
+class CloneProgress(BaseModel):
+    """Real-time progress of a git clone operation."""
+
+    phase: str = ""              # "counting", "compressing", "receiving", "resolving"
+    percent: int = 0             # 0–100
+    current: int = 0             # objects / deltas processed so far
+    total: int = 0               # total objects / deltas
+    bytes_received: str = ""     # e.g. "123.45 MiB"
+    throughput: str = ""         # e.g. "5.67 MiB/s"
+
+
 class WorkspaceInfo(BaseModel):
     """Public state of a workspace, safe to return over the API."""
 
@@ -92,6 +103,7 @@ class WorkspaceInfo(BaseModel):
     created_at:   datetime
     last_synced:  Optional[datetime] = None
     error_detail: Optional[str]      = None
+    clone_progress: Optional[CloneProgress] = None
 
 
 class WorkspaceSyncRequest(BaseModel):
@@ -170,6 +182,46 @@ class FileChange(BaseModel):
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
+
+
+class ListRemoteBranchesRequest(BaseModel):
+    """Request to list branches on a remote repository."""
+
+    repo_url: str
+    credentials: Optional[CredentialPayload] = None
+
+
+class ListRemoteBranchesResponse(BaseModel):
+    """Response containing remote branch names."""
+
+    branches: List[str]
+    default_branch: Optional[str] = None
+
+
+class SetupAndIndexRequest(BaseModel):
+    """Combined request: create workspace + trigger code search indexing."""
+
+    room_id: str = Field(..., description="Unique room identifier.")
+    repo_url: str = Field(..., description="Remote git repository URL.")
+    source_branch: str = Field(default="main", description="Remote branch to base the worktree on.")
+    working_branch: Optional[str] = Field(default=None, description="Custom branch name. Defaults to session/{room_id}.")
+    credentials: Optional[CredentialPayload] = Field(
+        default=None,
+        description="Required for private repos.",
+    )
+    auto_index: bool = Field(default=True, description="Trigger code search indexing after workspace is ready.")
+
+
+class SetupAndIndexResult(BaseModel):
+    """Result of the combined setup-and-index operation."""
+
+    room_id: str
+    workspace: Optional[WorkspaceInfo] = None
+    index_success: Optional[bool] = None
+    files_indexed: int = 0
+    chunks_indexed: int = 0
+    index_duration_ms: float = 0.0
+    message: str
 
 
 class GitWorkspaceHealth(BaseModel):

@@ -69,10 +69,15 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
     /** Outstanding watch disposables, keyed by URI string. */
     private readonly _watches = new Map<string, vscode.Disposable>();
 
-    private readonly _baseUrl: string;
+    private readonly _getBaseUrl: () => string;
 
-    constructor(backendBaseUrl: string) {
-        this._baseUrl = backendBaseUrl.replace(/\/$/, '');
+    constructor(backendBaseUrl: string | (() => string)) {
+        if (typeof backendBaseUrl === 'function') {
+            this._getBaseUrl = () => backendBaseUrl().replace(/\/$/, '');
+        } else {
+            const fixed = backendBaseUrl.replace(/\/$/, '');
+            this._getBaseUrl = () => fixed;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -123,7 +128,7 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
      */
     async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
         const { workspaceId, filePath } = this._parseUri(uri);
-        const url = `${this._baseUrl}/workspace/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(filePath)}/stat`;
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}/stat`;
 
         let res: Response;
         try {
@@ -174,7 +179,7 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
         }
 
         const { workspaceId, filePath } = this._parseUri(uri);
-        const url = `${this._baseUrl}/workspace/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(filePath)}`;
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}`;
 
         let res: Response;
         try {
@@ -211,7 +216,7 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
      */
     async readFile(uri: vscode.Uri): Promise<Uint8Array> {
         const { workspaceId, filePath } = this._parseUri(uri);
-        const url = `${this._baseUrl}/workspace/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(filePath)}/content`;
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}/content`;
 
         let res: Response;
         try {
@@ -249,7 +254,7 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
         options: { create: boolean; overwrite: boolean }
     ): Promise<void> {
         const { workspaceId, filePath } = this._parseUri(uri);
-        const url = `${this._baseUrl}/workspace/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(filePath)}/content`;
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}/content`;
 
         let res: Response;
         try {
@@ -292,7 +297,7 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
     ): Promise<void> {
         const { workspaceId, filePath } = this._parseUri(uri);
         const url =
-            `${this._baseUrl}/workspace/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(filePath)}` +
+            `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}` +
             `?recursive=${options.recursive}`;
 
         let res: Response;
@@ -337,7 +342,7 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
         const { workspaceId, filePath: oldPath } = this._parseUri(oldUri);
         const { filePath: newPath } = this._parseUri(newUri);
 
-        const url = `${this._baseUrl}/workspace/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(oldPath)}/rename`;
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(oldPath)}/rename`;
 
         let res: Response;
         try {
@@ -378,7 +383,7 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
      */
     async createDirectory(uri: vscode.Uri): Promise<void> {
         const { workspaceId, filePath } = this._parseUri(uri);
-        const url = `${this._baseUrl}/workspace/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(filePath)}`;
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}`;
 
         let res: Response;
         try {
@@ -433,6 +438,14 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
         // uri.path starts with '/' – strip it.
         const filePath = uri.path.replace(/^\//, '');
         return { workspaceId, filePath };
+    }
+
+    /**
+     * Encode a file path for use in a URL, encoding each segment individually
+     * so that '/' separators are preserved for FastAPI's {path:path} parameter.
+     */
+    private _encodePath(filePath: string): string {
+        return filePath.split('/').map(encodeURIComponent).join('/');
     }
 
     /**

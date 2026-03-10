@@ -24,8 +24,9 @@ server:
     - "vscode-webview://*"
 
   # Public URL for external access (set by ngrok or other tunnel service)
-  # Leave empty to use localhost
-  public_url: ""
+  # When ngrok is enabled, the live tunnel URL takes priority over this value.
+  # Leave empty to use localhost (only works when NOT in VS Code Remote-WSL).
+  public_url: "https://preoriginal-bromidically-elliana.ngrok-free.dev"
 
 # =============================================================================
 # Ngrok Settings (non-secrets)
@@ -224,7 +225,7 @@ code_search:
   index_dir: "./cocoindex_data"
 
   # Embedding model (LiteLLM format — see examples above)
-  embedding_model: "bedrock/cohere.embed-v4:0"
+  embedding_model: "bedrock/amazon.titan-embed-text-v2:0"
 
   # Storage backend for vector index
   storage_backend: "sqlite"                # "sqlite" | "postgres"

@@ -35,6 +35,8 @@ networkx
 # AST parsing for symbol extraction (Python, JS, TS, Go, Rust, etc.)
 tree-sitter-languages
 
-# --- Postgres backend (optional, for incremental processing) ---
-# Uncomment if using storage_backend: "postgres"
-# psycopg2-binary
+# --- Postgres backend (for incremental processing) ---
+# Used by cocoindex to store state-tracking (lineage) in Postgres.
+# The vector index itself stays in sqlite-vec; Postgres enables
+# incremental re-indexing (only changed files are re-processed).
+psycopg2-binary

@@ -1,0 +1,42 @@
+# Conductor — Local Development Services
+# ========================================
+# Provides a local Postgres instance for cocoindex incremental state tracking.
+#
+# Usage:
+#   docker compose up -d postgres   # start only Postgres
+#   docker compose down             # stop all services
+#   docker compose down -v          # stop and delete data volumes
+#
+# After starting, set in config/conductor.secrets.yaml:
+#   database:
+#     url: "postgresql://conductor:conductor@localhost:5432/conductor"
+#
+# And in config/conductor.settings.yaml:
+#   code_search:
+#     storage_backend: "postgres"
+#     incremental: true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: conductor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: conductor
+      POSTGRES_USER: conductor
+      POSTGRES_PASSWORD: conductor
+    ports:
+      - "5432:5432"
+    volumes:
+      - conductor_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conductor -d conductor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  conductor_pgdata:
+    name: conductor_pgdata
+

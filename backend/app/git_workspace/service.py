@@ -10,15 +10,17 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .credential_store import CredentialStore
 from .schemas import (
+    CloneProgress,
     CredentialPayload,
     FileSyncEvent,
     FileChange,
@@ -48,6 +50,7 @@ class _WorktreeRecord:
     __slots__ = (
         "room_id", "repo_url", "branch", "worktree_path",
         "status", "created_at", "last_synced", "error_detail",
+        "clone_progress",
     )
 
     def __init__(
@@ -65,17 +68,19 @@ class _WorktreeRecord:
         self.created_at    = datetime.now(timezone.utc)
         self.last_synced:  Optional[datetime] = None
         self.error_detail: Optional[str]      = None
+        self.clone_progress: Optional[CloneProgress] = None
 
     def to_info(self) -> WorkspaceInfo:
         return WorkspaceInfo(
-            room_id       = self.room_id,
-            repo_url      = self.repo_url,
-            branch        = self.branch,
-            worktree_path = str(self.worktree_path),
-            status        = self.status,
-            created_at    = self.created_at,
-            last_synced   = self.last_synced,
-            error_detail  = self.error_detail,
+            room_id        = self.room_id,
+            repo_url       = self.repo_url,
+            branch         = self.branch,
+            worktree_path  = str(self.worktree_path),
+            status         = self.status,
+            created_at     = self.created_at,
+            last_synced    = self.last_synced,
+            error_detail   = self.error_detail,
+            clone_progress = self.clone_progress,
         )
 
 
@@ -136,7 +141,7 @@ class GitWorkspaceService:
 
     async def initialize(self, settings) -> None:  # settings: GitWorkspaceSettings
         """Call once from app lifespan on startup."""
-        self._workspaces_dir  = Path(settings.workspaces_dir)
+        self._workspaces_dir  = Path(settings.workspaces_dir).resolve()
         self._max_worktrees   = settings.max_worktrees_per_repo
         self._cleanup_on_close = settings.cleanup_on_room_close
         self._workspaces_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +172,41 @@ class GitWorkspaceService:
 
     async def revoke_credentials(self, room_id: str) -> None:
         await self._credential_store.delete(room_id)
+
+    # ------------------------------------------------------------------
+    # Remote branch listing
+    # ------------------------------------------------------------------
+
+    async def list_remote_branches(
+        self, repo_url: str, credentials: Optional[CredentialPayload] = None,
+    ) -> tuple[list[str], Optional[str]]:
+        """List branches from a remote repo using ``git ls-remote``."""
+        env = os.environ.copy()
+        if credentials:
+            askpass_path = _make_askpass_script()
+            env.update({
+                "GIT_ASKPASS": askpass_path,
+                "GIT_CREDENTIAL_USERNAME": credentials.username or "git",
+                "GIT_CREDENTIAL_TOKEN": credentials.token,
+                "GIT_TERMINAL_PROMPT": "0",
+            })
+
+        output = await self._run_git(
+            ["ls-remote", "--heads", "--symref", repo_url], env=env,
+        )
+
+        branches: list[str] = []
+        default_branch: Optional[str] = None
+        for line in output.splitlines():
+            if line.startswith("ref: refs/heads/"):
+                # Symref line: "ref: refs/heads/main\tHEAD"
+                default_branch = line.split("ref: refs/heads/")[1].split("\t")[0]
+            elif "refs/heads/" in line:
+                branch = line.split("refs/heads/")[-1].strip()
+                if branch:
+                    branches.append(branch)
+
+        return sorted(branches), default_branch
 
     # ------------------------------------------------------------------
     # Workspace creation
@@ -225,21 +265,30 @@ class GitWorkspaceService:
             if not bare_dir.exists():
                 logger.info("Cloning %s → %s (bare)", req.repo_url, bare_dir)
                 record.status = WorktreeStatus.SYNCING
-                await self._run_git(
-                    ["clone", "--bare", req.repo_url, str(bare_dir)],
+                record.clone_progress = CloneProgress(phase="connecting")
+
+                def _on_progress(p: CloneProgress) -> None:
+                    record.clone_progress = p
+
+                await self._run_git_with_progress(
+                    ["clone", "--bare", "--progress", req.repo_url, str(bare_dir)],
+                    on_progress=_on_progress,
                     env=env,
                 )
+                record.clone_progress = None  # done
             else:
                 logger.debug("Bare repo already exists at %s", bare_dir)
 
             # --- 2. Create the worktree on a new branch ---
+            # Use absolute path so git doesn't interpret it relative to bare_dir.
+            abs_worktree = str(record.worktree_path.resolve())
             logger.info("Creating worktree for room %s (branch=%s)", req.room_id, record.branch)
             await self._run_git(
                 [
                     "-C", str(bare_dir),
                     "worktree", "add",
                     "-b", record.branch,
-                    str(record.worktree_path),
+                    abs_worktree,
                     req.base_branch,
                 ],
                 env=env,
@@ -430,6 +479,114 @@ class GitWorkspaceService:
             }
         )
         return base_env
+
+    # ------------------------------------------------------------------
+    # Git progress parsing
+    # ------------------------------------------------------------------
+
+    # Matches lines with a percentage, like:
+    #   Receiving objects:  45% (5555/12345), 123.45 MiB | 5.67 MiB/s
+    #   Resolving deltas: 100% (9876/9876), done.
+    _GIT_PROGRESS_RE = re.compile(
+        r"(?P<phase>Enumerating|Counting|Compressing|Receiving|Resolving)[^:]*:"
+        r"\s*(?P<pct>\d+)%"
+        r"\s*\((?P<cur>\d+)/(?P<tot>\d+)\)"
+        r"(?:,\s*(?P<bytes>[\d.]+\s*[A-Za-z]+))?"
+        r"(?:\s*\|\s*(?P<speed>[\d.]+\s*[A-Za-z/]+))?",
+    )
+
+    # Matches "Enumerating objects: 12345" (no percentage)
+    _GIT_ENUM_RE = re.compile(
+        r"(?P<phase>Enumerating)[^:]*:\s*(?P<count>\d+)",
+    )
+
+    @staticmethod
+    def _parse_git_progress(line: str) -> Optional[CloneProgress]:
+        """Parse a single git stderr progress line into a CloneProgress."""
+        m = GitWorkspaceService._GIT_PROGRESS_RE.search(line)
+        if m:
+            phase_map = {
+                "Enumerating": "counting",
+                "Counting": "counting",
+                "Compressing": "compressing",
+                "Receiving": "receiving",
+                "Resolving": "resolving",
+            }
+            return CloneProgress(
+                phase=phase_map.get(m.group("phase"), m.group("phase").lower()),
+                percent=int(m.group("pct")),
+                current=int(m.group("cur")),
+                total=int(m.group("tot")),
+                bytes_received=m.group("bytes") or "",
+                throughput=m.group("speed") or "",
+            )
+        # Fallback: enumerating line without percentage
+        m2 = GitWorkspaceService._GIT_ENUM_RE.search(line)
+        if m2:
+            return CloneProgress(
+                phase="counting",
+                percent=0,
+                current=int(m2.group("count")),
+                total=0,
+            )
+        return None
+
+    @staticmethod
+    async def _run_git_with_progress(
+        args: List[str],
+        on_progress: Callable[[CloneProgress], None],
+        cwd:  Optional[Path] = None,
+        env:  Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Run a git command, streaming stderr progress to *on_progress*."""
+        cmd = ["git"] + args
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
+
+        # Read stderr incrementally.  Git progress uses \r for in-place
+        # updates, so we split on both \r and \n.
+        collected_stderr: list[bytes] = []
+        assert proc.stderr is not None
+        buf = b""
+        while True:
+            chunk = await proc.stderr.read(512)
+            if not chunk:
+                break
+            collected_stderr.append(chunk)
+            buf += chunk
+            # Split on \r or \n to get individual progress lines
+            while b"\r" in buf or b"\n" in buf:
+                idx_r = buf.find(b"\r")
+                idx_n = buf.find(b"\n")
+                if idx_r == -1:
+                    idx = idx_n
+                elif idx_n == -1:
+                    idx = idx_r
+                else:
+                    idx = min(idx_r, idx_n)
+                line = buf[:idx].decode(errors="replace").strip()
+                buf = buf[idx + 1:]
+                if line:
+                    prog = GitWorkspaceService._parse_git_progress(line)
+                    if prog:
+                        on_progress(prog)
+
+        stdout_b = await proc.stdout.read() if proc.stdout else b""
+        await proc.wait()
+
+        stderr_full = b"".join(collected_stderr).decode(errors="replace").strip()
+        stdout = stdout_b.decode(errors="replace").strip()
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"git {args[0]} failed (exit {proc.returncode}): {stderr_full or stdout}"
+            )
+        return stdout
 
     @staticmethod
     async def _run_git(

@@ -20,6 +20,7 @@ import * as vsls from 'vsls/vscode';
 import { execSync } from 'child_process';
 
 import { checkBackendHealth } from './services/backendHealthCheck';
+import { diagnoseBackendConnection } from './services/connectionDiagnostics';
 import { ConductorController } from './services/conductorController';
 import {
     ConductorState,
@@ -46,6 +47,7 @@ import { EmbeddingQueue } from './services/embeddingQueue';
 import { runExplainPipeline } from './services/explainWithContextPipeline';
 import { indexWorkspace, reindexSingleFile, cancelCurrentIndex } from './services/workspaceIndexer';
 import { RagClient, RagFileChange } from './services/ragClient';
+import { ConductorFileSystemProvider } from './services/conductorFileSystemProvider';
 
 /** Output channel for logging invite links to the user. */
 let outputChannel: vscode.OutputChannel;
@@ -67,6 +69,9 @@ let embeddingConfig: EmbeddingConfig | null = null;
 
 /** RagClient for backend-centric codebase indexing and search. */
 let ragClient: RagClient | null = null;
+
+/** ConductorFileSystemProvider instance — registered once in activate(). */
+let conductorFsProvider: ConductorFileSystemProvider | null = null;
 
 /** GlobalState key for persisting FSM state across reloads. */
 const FSM_STATE_KEY = 'conductor.fsmState';
@@ -153,7 +158,7 @@ export function activate(context: vscode.ExtensionContext): void {
             console.log(`[AI Collab] Using ngrok URL: ${ngrokUrl}`);
             vscode.window.showInformationMessage(`🌐 Ngrok detected: ${ngrokUrl}`);
         } else {
-            console.log('[AI Collab] Ngrok not detected, using localhost');
+            console.log('[AI Collab] No local ngrok tunnel detected. Using configured backend URL / localhost fallback.');
         }
     });
 
@@ -199,6 +204,79 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.registerWebviewViewProvider('aiCollabView', provider, {
             webviewOptions: {
                 retainContextWhenHidden: true  // Keep WebView state when hidden
+            }
+        })
+    );
+
+    // Register conductor:// virtual file-system provider
+    conductorFsProvider = new ConductorFileSystemProvider(() => getBackendUrl());
+    context.subscriptions.push(
+        vscode.workspace.registerFileSystemProvider('conductor', conductorFsProvider, {
+            isCaseSensitive: true,
+            isReadonly: false,
+        })
+    );
+
+    // Register conductor:// search command (VS Code's built-in search doesn't
+    // work on virtual file systems without the proposed TextSearchProvider API)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('conductor.searchWorkspace', async () => {
+            const query = await vscode.window.showInputBox({
+                prompt: 'Search remote workspace',
+                placeHolder: 'Enter search pattern...',
+            });
+            if (!query) { return; }
+
+            // Find which conductor:// workspace is active
+            const conductorFolder = vscode.workspace.workspaceFolders?.find(
+                f => f.uri.scheme === 'conductor',
+            );
+            const roomId = conductorFolder?.uri.authority;
+            if (!roomId) {
+                vscode.window.showWarningMessage('No Conductor workspace is open.');
+                return;
+            }
+
+            try {
+                const resp = await fetch(`${getBackendUrl()}/workspace/${encodeURIComponent(roomId)}/search`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pattern: query, max_results: 50 }),
+                });
+                if (!resp.ok) {
+                    vscode.window.showErrorMessage('Search failed');
+                    return;
+                }
+                const data = await resp.json() as any;
+                const matches: Array<{ path: string; line: number; text: string }> = data.matches ?? [];
+
+                if (matches.length === 0) {
+                    vscode.window.showInformationMessage('No results found.');
+                    return;
+                }
+
+                const picks = matches.map(m => ({
+                    label: `$(file) ${m.path}:${m.line}`,
+                    description: m.text.trim().slice(0, 120),
+                    m,
+                }));
+
+                const selected = await vscode.window.showQuickPick(picks, {
+                    placeHolder: `${matches.length} results for "${query}"`,
+                    matchOnDescription: true,
+                });
+                if (selected) {
+                    const uri = vscode.Uri.parse(`conductor://${roomId}/${selected.m.path}`);
+                    const doc = await vscode.workspace.openTextDocument(uri);
+                    await vscode.window.showTextDocument(doc, {
+                        selection: new vscode.Range(
+                            selected.m.line - 1, 0,
+                            selected.m.line - 1, 0,
+                        ),
+                    });
+                }
+            } catch (e) {
+                vscode.window.showErrorMessage(`Search error: ${e instanceof Error ? e.message : String(e)}`);
             }
         })
     );
@@ -459,6 +537,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     console.log('[Conductor] Received getAiStatus message from WebView');
                     this._handleGetAiStatus();
                     return;
+                case 'diagnoseBackendConnection':
+                    await this._handleDiagnoseBackendConnection(message);
+                    return;
                 case 'setAiModel':
                     console.log('[Conductor] Received setAiModel message from WebView:', message.modelId);
                     this._handleSetAiModel(message.modelId);
@@ -534,6 +615,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     return;
                 case 'rebuildIndex':
                     await this._handleRebuildIndex();
+                    return;
+                case 'fetchRemoteBranches':
+                    await this._handleFetchRemoteBranches(message);
+                    return;
+                case 'setupWorkspaceAndIndex':
+                    await this._handleSetupWorkspaceAndIndex(message);
+                    return;
+                case 'openConductorWorkspace':
+                    this._handleOpenConductorWorkspace(message.roomId);
                     return;
                 case 'explainCodeFromSnippet':
                     await this._handleExplainCodeFromSnippet(message);
@@ -716,13 +806,13 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         .map(tab => (tab.input instanceof vscode.TabInputText) ? tab.input.uri.fsPath : null)
                         .filter((p): p is string => p !== null);
 
-                    // Start backend RAG reindex in parallel (non-blocking, best-effort).
-                    // This runs independently of the V1 local indexer below.
-                    ragClient = new RagClient(getBackendUrl());
-                    this._sendWorkspaceToRag(wsRoot, roomId).catch(err => {
-                        if (err instanceof Error && err.name === 'AbortError') return;
-                        console.warn('[Conductor][StartSession] RAG reindex failed:', err);
-                    });
+                    // [DISABLED] Start backend RAG reindex in parallel (non-blocking, best-effort).
+                    // Temporarily disabled for debugging — trigger manually via Rebuild Index button.
+                    // ragClient = new RagClient(getBackendUrl());
+                    // this._sendWorkspaceToRag(wsRoot, roomId).catch(err => {
+                    //     if (err instanceof Error && err.name === 'AbortError') return;
+                    //     console.warn('[Conductor][StartSession] RAG reindex failed:', err);
+                    // });
 
                     // Run two-phase indexing.  Phase 1 always runs (fast mtime diff).
                     // Phase 2 processes only stale files; embedding only when config available.
@@ -1480,6 +1570,38 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 data: { error: `Cannot connect to backend: ${msg}` }
             });
         }
+    }
+
+    private async _handleDiagnoseBackendConnection(message: {
+        requestId?: number;
+        backendUrl?: string;
+        hasConnectedBefore?: boolean;
+        reconnectAttempts?: number;
+        maxReconnectAttempts?: number;
+    }): Promise<void> {
+        const backendUrl = typeof message.backendUrl === 'string' && message.backendUrl.length > 0
+            ? message.backendUrl
+            : getBackendUrl();
+        const reconnectAttempts = Number.isFinite(message.reconnectAttempts)
+            ? Number(message.reconnectAttempts)
+            : 0;
+        const maxReconnectAttempts = Number.isFinite(message.maxReconnectAttempts)
+            ? Math.max(1, Number(message.maxReconnectAttempts))
+            : 10;
+        const backendHealthy = await checkBackendHealth(backendUrl, { timeoutMs: 2500 });
+        const diagnosis = diagnoseBackendConnection({
+            backendUrl,
+            backendHealthy,
+            hasConnectedBefore: Boolean(message.hasConnectedBefore),
+            reconnectAttempts,
+            maxReconnectAttempts,
+        });
+
+        this._view?.webview.postMessage({
+            command: 'backendConnectionDiagnosis',
+            requestId: message.requestId,
+            diagnosis,
+        });
     }
 
     /**
@@ -3510,6 +3632,199 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private async _handleFetchRemoteBranches(message: any): Promise<void> {
+        try {
+            const backendUrl = getBackendUrl();
+            const resp = await fetch(`${backendUrl}/api/git-workspace/branches/remote`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    repo_url: message.repoUrl,
+                    credentials: message.token ? { token: message.token } : null,
+                }),
+            });
+            const data = await resp.json() as any;
+            if (!resp.ok) {
+                throw new Error(data.detail || `HTTP ${resp.status}`);
+            }
+            this._view?.webview.postMessage({
+                command: 'remoteBranchesLoaded',
+                branches: data.branches,
+                defaultBranch: data.default_branch,
+            });
+        } catch (e) {
+            this._view?.webview.postMessage({
+                command: 'remoteBranchesLoaded',
+                branches: [],
+                error: e instanceof Error ? e.message : String(e),
+            });
+        }
+    }
+
+    private async _handleSetupWorkspaceAndIndex(message: any): Promise<void> {
+        try {
+            const backendUrl = getBackendUrl();
+            const roomId = getSessionService().getRoomId();
+
+            // --- 1. Kick off clone (returns immediately) ---
+            this._view?.webview.postMessage({
+                command: 'setupAndIndexProgress',
+                phase: 'cloning',
+                detail: 'Starting clone...',
+            });
+
+            const resp = await fetch(`${backendUrl}/api/git-workspace/workspaces/setup-and-index`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    room_id: roomId,
+                    repo_url: message.repoUrl,
+                    source_branch: message.sourceBranch,
+                    working_branch: message.workingBranch || null,
+                    credentials: message.token ? { token: message.token } : null,
+                    auto_index: false, // we'll index explicitly after ready
+                }),
+            });
+
+            if (!resp.ok) {
+                const err = await resp.text();
+                throw new Error(`Setup failed (${resp.status}): ${err}`);
+            }
+
+            // --- 2. Poll for clone progress until ready ---
+            const workspace = await this._pollWorkspaceReady(backendUrl, roomId);
+
+            if (!workspace || workspace.status !== 'ready') {
+                const detail = workspace?.error_detail || workspace?.status || 'unknown';
+                this._view?.webview.postMessage({
+                    command: 'setupAndIndexComplete',
+                    success: false,
+                    message: `Workspace setup failed: ${detail}`,
+                    workspace,
+                });
+                return;
+            }
+
+            // --- 3. Trigger indexing ---
+            this._view?.webview.postMessage({
+                command: 'setupAndIndexProgress',
+                phase: 'indexing',
+                detail: 'Indexing code for search...',
+                percent: 100,
+            });
+
+            let indexResult: any = {};
+            try {
+                const idxResp = await fetch(`${backendUrl}/api/git-workspace/workspaces/${encodeURIComponent(roomId)}/index`, {
+                    method: 'POST',
+                });
+                if (idxResp.ok) {
+                    indexResult = await idxResp.json();
+                }
+            } catch (e) {
+                console.warn('[Conductor] Indexing request failed:', e);
+            }
+
+            // --- 4. Notify webview (don't auto-mount — it reloads the window) ---
+            this._view?.webview.postMessage({
+                command: 'setupAndIndexComplete',
+                success: indexResult.index_success ?? true,
+                filesIndexed: indexResult.files_indexed ?? 0,
+                chunksIndexed: indexResult.chunks_indexed ?? 0,
+                durationMs: indexResult.index_duration_ms ?? 0,
+                message: indexResult.message || 'Workspace ready',
+                workspace,
+                roomId,
+            });
+        } catch (e) {
+            this._view?.webview.postMessage({
+                command: 'setupAndIndexComplete',
+                success: false,
+                message: e instanceof Error ? e.message : String(e),
+            });
+        }
+    }
+
+    /**
+     * Poll workspace status every 2s, forwarding clone progress to the
+     * webview overlay.  Returns when status is 'ready' or 'error',
+     * or after ~15 minutes.
+     */
+    private async _pollWorkspaceReady(
+        backendUrl: string,
+        roomId: string,
+    ): Promise<any | null> {
+        const maxAttempts = 450;  // 450 × 2s = ~15 min
+        const intervalMs = 2000;
+
+        for (let i = 0; i < maxAttempts; i++) {
+            await new Promise(r => setTimeout(r, intervalMs));
+            try {
+                const r = await fetch(`${backendUrl}/api/git-workspace/workspaces/${encodeURIComponent(roomId)}`);
+                if (!r.ok) { continue; }
+                const info = await r.json() as any;
+
+                // Forward clone progress to the webview
+                const cp = info.clone_progress;
+                if (cp) {
+                    let detail = this._formatCloneProgress(cp);
+                    this._view?.webview.postMessage({
+                        command: 'setupAndIndexProgress',
+                        phase: 'cloning',
+                        detail,
+                        percent: cp.percent ?? 0,
+                        current: cp.current ?? 0,
+                        total: cp.total ?? 0,
+                    });
+                } else if (info.status === 'syncing' || info.status === 'pending') {
+                    // Clone started but no progress yet (connecting)
+                    this._view?.webview.postMessage({
+                        command: 'setupAndIndexProgress',
+                        phase: 'cloning',
+                        detail: 'Connecting to remote...',
+                    });
+                }
+
+                if (info.status === 'ready' || info.status === 'error') {
+                    return info;
+                }
+            } catch {
+                // Network error — keep trying
+            }
+        }
+        return null;
+    }
+
+    private _formatCloneProgress(cp: any): string {
+        const phaseLabels: Record<string, string> = {
+            connecting: 'Connecting to remote...',
+            counting: 'Counting objects...',
+            compressing: 'Compressing objects...',
+            receiving: 'Downloading objects...',
+            resolving: 'Resolving deltas...',
+        };
+        let detail = phaseLabels[cp.phase] || cp.phase;
+        if (cp.bytes_received) {
+            detail += ` ${cp.bytes_received}`;
+        }
+        if (cp.throughput) {
+            detail += ` (${cp.throughput})`;
+        }
+        return detail;
+    }
+
+    /**
+     * Open the conductor:// workspace in a new VS Code window so the
+     * current window (with the chat session) is not disturbed.
+     */
+    private _handleOpenConductorWorkspace(roomId: string): void {
+        const conductorUri = vscode.Uri.parse(`conductor://${roomId}/`);
+        console.log(`[Conductor] Opening conductor://${roomId}/ in new window`);
+        vscode.commands.executeCommand('vscode.openFolder', conductorUri, {
+            forceNewWindow: true,
+        });
+    }
+
     private async _handleScanWorkspaceTodos(): Promise<void> {
         try {
             const todos = await scanWorkspaceTodos();
@@ -3544,7 +3859,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         // We need to allow ws: and wss: for both localhost and ngrok URLs
         const backendUrl = getSessionService().getBackendUrl();
         const wsUrl = backendUrl.replace('http', 'ws');
-        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'unsafe-inline'; connect-src ${backendUrl} ${wsUrl} ws://localhost:* wss://localhost:* ws://*.ngrok-free.dev wss://*.ngrok-free.dev ws://*.ngrok.io wss://*.ngrok.io;">`;
+        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'unsafe-inline'; connect-src ${backendUrl} ${wsUrl} ws://localhost:* wss://localhost:* ws://*.ngrok-free.dev wss://*.ngrok-free.dev ws://*.ngrok-free.app wss://*.ngrok-free.app ws://*.ngrok.io wss://*.ngrok.io ws://*.ngrok.app wss://*.ngrok.app;">`;
 
         // Inject initial permissions data (including sessionRole based on FSM state)
         const permissions = getPermissionsService().getPermissionsForWebView();

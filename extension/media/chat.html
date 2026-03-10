@@ -857,7 +857,32 @@
                 </div>
             </div>
 
-            <!-- Rebuild workspace index button (shown when session is active) -->
+            <!-- Setup workspace + index button (shown when session is active, before workspace exists) -->
+            <div id="setup-index-row" class="hidden px-3 pt-1 flex items-center justify-between">
+                <span class="text-[0.6rem] text-gray-500">Workspace</span>
+                <button id="btn-setup-index" class="flex items-center gap-1 text-[0.6rem] text-violet-400/80 hover:text-violet-300 transition-colors" title="Clone repo, create branch, and index code">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/>
+                        <path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z"/>
+                        <path d="M17 5c0 1.657-3.134 3-7 3S3 6.657 3 5s3.134-3 7-3 7 1.343 7 3z"/>
+                    </svg>
+                    Setup & Index
+                </button>
+            </div>
+
+            <!-- Open remote workspace in new VS Code window (shown after setup completes) -->
+            <div id="open-workspace-row" class="hidden px-3 pt-1 flex items-center justify-between">
+                <span class="text-[0.6rem] text-gray-500">Remote code</span>
+                <button id="btn-open-workspace" class="flex items-center gap-1 text-[0.6rem] text-emerald-400/80 hover:text-emerald-300 transition-colors" title="Open the cloned workspace in a new VS Code window">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z"/>
+                        <path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z"/>
+                    </svg>
+                    Open Workspace
+                </button>
+            </div>
+
+            <!-- Rebuild workspace index button (shown when session is active, after workspace exists) -->
             <div id="rebuild-index-row" class="hidden px-3 pt-1 flex items-center justify-between">
                 <span class="text-[0.6rem] text-gray-500">Context index</span>
                 <button id="btn-rebuild-index" class="flex items-center gap-1 text-[0.6rem] text-amber-400/80 hover:text-amber-300 transition-colors" title="Delete and rebuild workspace index">
@@ -1061,6 +1086,64 @@
                 <div class="flex gap-2 justify-end">
                     <button id="btn-rebuild-cancel" class="btn-secondary text-xs px-3 py-1.5">Cancel</button>
                     <button id="btn-rebuild-confirm" class="text-xs px-3 py-1.5 rounded-lg font-medium text-white transition-colors" style="background:rgba(217,119,6,0.7);">Rebuild</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Setup & Index Modal -->
+        <div id="setup-index-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <div class="bg-gray-900 border border-gray-700 rounded-xl p-4 w-[90%] max-w-sm shadow-2xl flex flex-col gap-3">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm font-medium text-gray-200">Setup Workspace & Index</span>
+                    <button id="btn-close-setup-modal" class="text-gray-500 hover:text-white p-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <!-- Repo URL -->
+                <div class="flex flex-col gap-1">
+                    <label class="text-[0.6rem] text-gray-500 uppercase tracking-wider">Repository URL</label>
+                    <input id="setup-repo-url" type="text" placeholder="https://github.com/org/repo.git"
+                        class="w-full text-xs px-3 py-2 rounded-lg bg-gray-800/80 border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-violet-500/50 transition-colors" />
+                </div>
+
+                <!-- PAT Token -->
+                <div class="flex flex-col gap-1">
+                    <label class="text-[0.6rem] text-gray-500 uppercase tracking-wider">Personal Access Token</label>
+                    <input id="setup-pat-token" type="password" placeholder="ghp_... (for private repos)"
+                        class="w-full text-xs px-3 py-2 rounded-lg bg-gray-800/80 border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-violet-500/50 transition-colors" />
+                </div>
+
+                <!-- Fetch Branches button -->
+                <button id="btn-fetch-branches" class="text-xs px-3 py-1.5 rounded-lg font-medium text-violet-300 transition-colors" style="background:rgba(139,92,246,0.15);border:1px solid rgba(139,92,246,0.25);">
+                    Fetch Branches
+                </button>
+
+                <!-- Source Branch dropdown -->
+                <div class="flex flex-col gap-1">
+                    <label class="text-[0.6rem] text-gray-500 uppercase tracking-wider">Source Branch</label>
+                    <select id="setup-source-branch" disabled
+                        class="w-full text-xs px-3 py-2 rounded-lg bg-gray-800/80 border border-gray-700 text-gray-200 focus:outline-none focus:border-violet-500/50 transition-colors disabled:opacity-50">
+                        <option value="">-- fetch branches first --</option>
+                    </select>
+                </div>
+
+                <!-- Working Branch name -->
+                <div class="flex flex-col gap-1">
+                    <label class="text-[0.6rem] text-gray-500 uppercase tracking-wider">Working Branch (optional)</label>
+                    <input id="setup-working-branch" type="text" placeholder="session/{room_id} (default)"
+                        class="w-full text-xs px-3 py-2 rounded-lg bg-gray-800/80 border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-violet-500/50 transition-colors" />
+                </div>
+
+                <!-- Error display -->
+                <div id="setup-error" class="hidden text-xs text-red-400 leading-relaxed"></div>
+
+                <!-- Action buttons -->
+                <div class="flex gap-2 justify-end">
+                    <button id="btn-setup-cancel" class="btn-secondary text-xs px-3 py-1.5">Cancel</button>
+                    <button id="btn-setup-confirm" disabled class="text-xs px-3 py-1.5 rounded-lg font-medium text-white transition-colors disabled:opacity-40" style="background:rgba(139,92,246,0.7);">Setup & Index</button>
                 </div>
             </div>
         </div>
@@ -1720,6 +1803,8 @@
         const MAX_RECONNECT_ATTEMPTS = 10;
         const BASE_RECONNECT_DELAY_MS = 1000;
         const MAX_RECONNECT_DELAY_MS = 30000;
+        let hasConnectedToChat = false;
+        let latestConnectionDiagnosisRequestId = 0;
 
         // Message recovery & deduplication
         let lastMessageTimestamp = 0;
@@ -2288,8 +2373,9 @@
             const prevState = conductorState;
             conductorState = state;
 
-            // Track if roomId changed (need to reconnect WebSocket)
+            // Track if roomId or backendUrl changed (need to reconnect WebSocket)
             const prevRoomId = session.roomId;
+            const prevBackendUrl = session.backendUrl;
 
             // Update session data if provided (e.g. after startHosting or joinSucceeded)
             if (newSession) {
@@ -2301,6 +2387,7 @@
             }
 
             const roomIdChanged = newSession && newSession.roomId && newSession.roomId !== prevRoomId;
+            const backendUrlChanged = newSession && newSession.backendUrl && newSession.backendUrl !== prevBackendUrl;
 
             // --- 1. Hide every panel ----------------------------------------
             panelIdle.classList.add('hidden');
@@ -2368,14 +2455,20 @@
                 seenMessageIds.clear();
                 lastMessageTimestamp = 0;
                 reconnectAttempts = 0;
+                hasConnectedToChat = false;
+                latestConnectionDiagnosisRequestId = 0;
                 // Connect
                 connectWebSocket();
             } else if (!nowInChat && wasInChat) {
                 // Leaving chat state — disconnect
                 disconnectWebSocket();
-            } else if (nowInChat && wasInChat && roomIdChanged) {
-                // Staying in chat but roomId changed — reconnect to new room
-                console.log('[WebView] roomId changed, reconnecting WebSocket');
+            } else if (nowInChat && wasInChat && (roomIdChanged || backendUrlChanged)) {
+                // Staying in chat but roomId or backendUrl changed — reconnect
+                const reason = roomIdChanged ? 'roomId changed' : 'backendUrl changed';
+                console.log('[WebView]', reason, '— reconnecting WebSocket to', session.backendUrl);
+                reconnectAttempts = 0;
+                hasConnectedToChat = false;
+                latestConnectionDiagnosisRequestId = 0;
                 disconnectWebSocket();
                 connectWebSocket();
             }
@@ -2385,7 +2478,8 @@
                 showSSOSignedInState(ssoIdentity, ssoProvider);
             }
 
-            console.log('[WebView] render:', prevState, '→', state, roomIdChanged ? '(roomId changed)' : '');
+            const changeReason = roomIdChanged ? '(roomId changed)' : backendUrlChanged ? '(backendUrl changed)' : '';
+            console.log('[WebView] render:', prevState, '→', state, changeReason);
         }
 
         /**
@@ -2397,6 +2491,7 @@
                 ws.close();
                 ws = null;
             }
+            latestConnectionDiagnosisRequestId++;
         }
 
         /**
@@ -2655,6 +2750,15 @@
                     _scanBranchInfo = null;
                     document.getElementById('scan-branch-banner')?.classList.add('hidden');
                     break;
+                case 'remoteBranchesLoaded':
+                    handleRemoteBranchesLoaded(message);
+                    break;
+                case 'setupAndIndexProgress':
+                    handleSetupAndIndexProgress(message);
+                    break;
+                case 'setupAndIndexComplete':
+                    handleSetupAndIndexComplete(message);
+                    break;
                 case 'explainCodeFromSnippetDone':
                     // Reset all in-flight snippet explain buttons
                     document.querySelectorAll('.snippet-explain-btn[data-loading="true"]').forEach(btn => {
@@ -2704,14 +2808,21 @@
                         ssoProvider = message.ssoProvider || ssoProvider;
                     }
                     render(message.state, message.session);
-                    // Show rebuild-index row only when a session is active
+                    // Show setup/rebuild rows only when a session is active
                     if (message.state === 'Hosting' || message.state === 'Joined') {
+                        if (!_workspaceSetupDone) {
+                            document.getElementById('setup-index-row')?.classList.remove('hidden');
+                        }
                         document.getElementById('rebuild-index-row')?.classList.remove('hidden');
                     } else {
+                        document.getElementById('setup-index-row')?.classList.add('hidden');
                         document.getElementById('rebuild-index-row')?.classList.add('hidden');
+                        document.getElementById('open-workspace-row')?.classList.add('hidden');
                         // Hide scanning overlay when session ends
                         document.getElementById('scanning-overlay')?.classList.add('hidden');
                         document.getElementById('index-progress-bar')?.classList.add('hidden');
+                        // Reset workspace setup state
+                        _workspaceSetupDone = false;
                     }
                     break;
                 case 'uploadFileResult':
@@ -2728,6 +2839,9 @@
                     // Received AI status from extension (proxied from backend)
                     console.log('[WebView] Received aiStatus:', message.data);
                     handleAiStatusResponse(message.data);
+                    break;
+                case 'backendConnectionDiagnosis':
+                    handleBackendConnectionDiagnosis(message);
                     break;
                 case 'setAiModelResult':
                     // Received result of setting AI model
@@ -4676,6 +4790,7 @@
          */
         function updateConnectionStatus(status, isError = false) {
             if (connectionStatus) {
+                connectionStatus.style.display = '';
                 const colorClass = isError ? 'text-red-400 border-red-700' : 'text-gray-400 border-gray-700';
                 connectionStatus.innerHTML = `
                     <div class="bg-gray-800/50 ${colorClass} text-xs px-3 py-1.5 rounded-full border">
@@ -4741,6 +4856,32 @@
             }));
         }
 
+        function requestBackendConnectionDiagnosis() {
+            latestConnectionDiagnosisRequestId += 1;
+            const requestId = latestConnectionDiagnosisRequestId;
+
+            vscode.postMessage({
+                command: 'diagnoseBackendConnection',
+                requestId,
+                backendUrl: session.backendUrl,
+                hasConnectedBefore: hasConnectedToChat,
+                reconnectAttempts,
+                maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
+            });
+        }
+
+        function handleBackendConnectionDiagnosis(message) {
+            if (!message || message.requestId !== latestConnectionDiagnosisRequestId) {
+                return;
+            }
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                return;
+            }
+
+            updateConnectionStatus(message.diagnosis.status, !!message.diagnosis.isError);
+        }
+
         /**
          * Connect to WebSocket chat server.
          * Supports message recovery on reconnect via `since` parameter.
@@ -4758,13 +4899,19 @@
                 wsUrl += `?since=${lastMessageTimestamp}`;
                 console.log('[WebView] Reconnecting with message recovery since:', lastMessageTimestamp);
             }
-            console.log('[WebView] Connecting to:', wsUrl);
-            updateConnectionStatus(reconnectAttempts > 0 ? 'Reconnecting...' : 'Connecting...');
+            console.log('[WebView] Connecting to:', wsUrl, '| backendUrl:', session.backendUrl, '| roomId:', session.roomId, '| userId:', session.userId);
+            updateConnectionStatus(reconnectAttempts > 0 ? `Reconnecting… (${wsUrl})` : `Connecting… (${wsUrl})`);
 
+            latestConnectionDiagnosisRequestId += 1;
             ws = new WebSocket(wsUrl);
+            const currentSocket = ws;
 
             ws.onopen = () => {
+                if (currentSocket !== ws) {
+                    return;
+                }
                 console.log('[WebView] WebSocket connected');
+                hasConnectedToChat = true;
                 reconnectAttempts = 0;
                 updateConnectionStatus('✅ Connected');
                 // Hide status after a moment
@@ -4774,6 +4921,9 @@
             };
 
             ws.onmessage = (event) => {
+                if (currentSocket !== ws) {
+                    return;
+                }
                 try {
                     const data = JSON.parse(event.data);
                     console.log('[WebView] Received:', data);
@@ -4782,6 +4932,7 @@
                     // The backend assigns userId and role on connection - client MUST use these
                     if (data.type === 'connected') {
                         console.log('[WebView] SECURITY: Backend assigned credentials:', data);
+                        hasConnectedToChat = true;
                         // Store backend-assigned userId and role
                         session.userId = data.userId;
                         session.sessionRole = data.role;
@@ -4935,12 +5086,34 @@
             };
 
             ws.onclose = (event) => {
-                console.log('[WebView] WebSocket closed:', event.code, event.reason);
+                if (currentSocket !== ws) {
+                    return;
+                }
+                ws = null;
+                const closeDetail = `code=${event.code}${event.reason ? ' reason=' + event.reason : ''}`;
+                console.log('[WebView] WebSocket closed:', closeDetail, '| wasConnected:', hasConnectedToChat, '| url:', wsUrl);
                 // Don't reconnect if session was ended by host
                 if (sessionEnded) {
                     updateConnectionStatus('Session ended', false);
                     return;
                 }
+
+                if (!hasConnectedToChat) {
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        const delay = getReconnectDelay();
+                        console.log(`[WebView] Initial chat connection failed; retrying in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                        updateConnectionStatus(`Connecting failed (${closeDetail}). Retrying (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) → ${wsUrl}`, true);
+                        if (reconnectAttempts === 1) {
+                            requestBackendConnectionDiagnosis();
+                        }
+                        setTimeout(connectWebSocket, delay);
+                    } else {
+                        requestBackendConnectionDiagnosis();
+                    }
+                    return;
+                }
+
                 if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                     reconnectAttempts++;
                     const delay = getReconnectDelay();
@@ -4948,13 +5121,20 @@
                     updateConnectionStatus(`Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
                     setTimeout(connectWebSocket, delay);
                 } else {
-                    updateConnectionStatus('❌ Connection lost', true);
+                    requestBackendConnectionDiagnosis();
                 }
             };
 
             ws.onerror = (error) => {
-                console.error('[WebView] WebSocket error:', error);
-                updateConnectionStatus('❌ Connection error', true);
+                if (currentSocket !== ws) {
+                    return;
+                }
+                console.error('[WebView] WebSocket error:', error, '| url:', wsUrl, '| backendUrl:', session.backendUrl, '| roomId:', session.roomId);
+                if (!hasConnectedToChat) {
+                    updateConnectionStatus(`WS error – check console. URL: ${wsUrl}`, true);
+                } else {
+                    updateConnectionStatus('Connection interrupted. Reconnecting...', false);
+                }
             };
         }
 
@@ -5418,6 +5598,9 @@
 
         let _workspaceTodosExpanded = false;
 
+        /** Tracks whether workspace has been set up (hides setup button, shows rebuild). */
+        let _workspaceSetupDone = false;
+
         /** Pending branch-change info — shown in the scanning overlay banner. */
         let _scanBranchInfo = null;
         /** Safety-net timer to auto-dismiss the scanning overlay. */
@@ -5598,6 +5781,167 @@
                 showToast('Workspace index rebuilt successfully', 'success');
             } else {
                 showToast('Index rebuild failed: ' + (message.error || 'unknown error'), 'error');
+            }
+        }
+
+        // ============================================================
+        // Setup & Index Button, Modal & Handlers
+        // ============================================================
+
+        const setupIndexRow       = document.getElementById('setup-index-row');
+        const btnSetupIndex       = document.getElementById('btn-setup-index');
+        const setupIndexModal     = document.getElementById('setup-index-modal');
+        const btnCloseSetupModal  = document.getElementById('btn-close-setup-modal');
+        const btnSetupCancel      = document.getElementById('btn-setup-cancel');
+        const btnSetupConfirm     = document.getElementById('btn-setup-confirm');
+        const btnFetchBranches    = document.getElementById('btn-fetch-branches');
+        const setupRepoUrl        = document.getElementById('setup-repo-url');
+        const setupPatToken       = document.getElementById('setup-pat-token');
+        const setupSourceBranch   = document.getElementById('setup-source-branch');
+        const setupWorkingBranch  = document.getElementById('setup-working-branch');
+        const setupError          = document.getElementById('setup-error');
+
+        btnSetupIndex.addEventListener('click', () => {
+            setupError.classList.add('hidden');
+            setupIndexModal.classList.remove('hidden');
+        });
+
+        // "Open Workspace" button — opens the conductor:// workspace in a new VS Code window
+        document.getElementById('btn-open-workspace')?.addEventListener('click', () => {
+            const btn = document.getElementById('btn-open-workspace');
+            const roomId = btn?.dataset?.roomId;
+            if (roomId) {
+                vscode.postMessage({ command: 'openConductorWorkspace', roomId });
+            }
+        });
+
+        function closeSetupModal() {
+            setupIndexModal.classList.add('hidden');
+        }
+        btnCloseSetupModal.addEventListener('click', closeSetupModal);
+        btnSetupCancel.addEventListener('click', closeSetupModal);
+
+        btnFetchBranches.addEventListener('click', () => {
+            const repoUrl = setupRepoUrl.value.trim();
+            if (!repoUrl) {
+                setupError.textContent = 'Please enter a repository URL.';
+                setupError.classList.remove('hidden');
+                return;
+            }
+            setupError.classList.add('hidden');
+            btnFetchBranches.disabled = true;
+            btnFetchBranches.textContent = 'Fetching...';
+            vscode.postMessage({
+                command: 'fetchRemoteBranches',
+                repoUrl: repoUrl,
+                token: setupPatToken.value.trim() || null,
+            });
+        });
+
+        function handleRemoteBranchesLoaded(message) {
+            btnFetchBranches.disabled = false;
+            btnFetchBranches.textContent = 'Fetch Branches';
+
+            if (message.error) {
+                setupError.textContent = 'Failed to fetch branches: ' + message.error;
+                setupError.classList.remove('hidden');
+                return;
+            }
+
+            const branches = message.branches || [];
+            setupSourceBranch.innerHTML = '';
+            if (branches.length === 0) {
+                setupSourceBranch.innerHTML = '<option value="">No branches found</option>';
+                setupSourceBranch.disabled = true;
+                btnSetupConfirm.disabled = true;
+                return;
+            }
+
+            branches.forEach(b => {
+                const opt = document.createElement('option');
+                opt.value = b;
+                opt.textContent = b;
+                if (message.defaultBranch && b === message.defaultBranch) {
+                    opt.selected = true;
+                }
+                setupSourceBranch.appendChild(opt);
+            });
+            setupSourceBranch.disabled = false;
+            btnSetupConfirm.disabled = false;
+        }
+
+        btnSetupConfirm.addEventListener('click', () => {
+            const repoUrl = setupRepoUrl.value.trim();
+            const sourceBranch = setupSourceBranch.value;
+            if (!repoUrl || !sourceBranch) {
+                setupError.textContent = 'Repository URL and source branch are required.';
+                setupError.classList.remove('hidden');
+                return;
+            }
+            closeSetupModal();
+
+            // Disable button while in progress
+            btnSetupIndex.disabled = true;
+            btnSetupIndex.innerHTML = `<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg> Setting up\u2026`;
+
+            vscode.postMessage({
+                command: 'setupWorkspaceAndIndex',
+                repoUrl: repoUrl,
+                sourceBranch: sourceBranch,
+                workingBranch: setupWorkingBranch.value.trim() || null,
+                token: setupPatToken.value.trim() || null,
+            });
+        });
+
+        function handleSetupAndIndexProgress(message) {
+            // Show the scanning overlay with the progress message
+            const overlay = document.getElementById('scanning-overlay');
+            const phase   = document.getElementById('scan-overlay-phase');
+            const detail  = document.getElementById('scan-overlay-detail');
+            const fill    = document.getElementById('scan-overlay-fill');
+            const pctText = document.getElementById('scan-overlay-pct');
+            if (overlay) overlay.classList.remove('hidden');
+            if (phase) phase.textContent = 'Setting up workspace';
+            if (detail) detail.textContent = message.detail || 'Cloning repository...';
+
+            // Update progress bar if percent is provided
+            const pct = message.percent ?? 0;
+            if (fill) fill.style.width = pct + '%';
+            if (pctText) {
+                if (pct > 0 && message.total) {
+                    pctText.textContent = pct + '% (' + message.current + '/' + message.total + ')';
+                } else if (pct > 0) {
+                    pctText.textContent = pct + '%';
+                } else {
+                    pctText.textContent = '';
+                }
+            }
+        }
+
+        function handleSetupAndIndexComplete(message) {
+            // Hide scanning overlay
+            document.getElementById('scanning-overlay')?.classList.add('hidden');
+
+            // Restore button
+            btnSetupIndex.disabled = false;
+            btnSetupIndex.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor"><path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/><path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z"/><path d="M17 5c0 1.657-3.134 3-7 3S3 6.657 3 5s3.134-3 7-3 7 1.343 7 3z"/></svg> Setup & Index`;
+
+            if (message.success) {
+                _workspaceSetupDone = true;
+                setupIndexRow.classList.add('hidden');
+                showToast(`Workspace ready: ${message.filesIndexed} files, ${message.chunksIndexed} chunks indexed`, 'success');
+
+                // Show "Open Workspace" button
+                if (message.roomId) {
+                    const openWsRow = document.getElementById('open-workspace-row');
+                    const openWsBtn = document.getElementById('btn-open-workspace');
+                    if (openWsRow) openWsRow.classList.remove('hidden');
+                    if (openWsBtn) {
+                        openWsBtn.dataset.roomId = message.roomId;
+                    }
+                }
+            } else {
+                showToast('Setup failed: ' + (message.message || 'unknown error'), 'error');
             }
         }
 

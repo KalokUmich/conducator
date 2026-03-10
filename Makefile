@@ -1,13 +1,18 @@
 # Conductor Project Makefile
 # ===========================
 
-.PHONY: all setup setup-backend setup-extension venv install run-backend run-backend-prod run-backend-port test test-backend test-extension compile compile-ts compile-css package clean help
+.PHONY: all setup setup-backend setup-extension venv ensure-backend-deps install run-backend run-backend-prod run-backend-port test test-backend test-extension compile compile-ts compile-css package clean help pg-start pg-stop pg-rm pg-clean
 
 # Python virtual environment
 VENV_DIR := .venv
-PYTHON := $(VENV_DIR)/bin/python
-PIP := $(VENV_DIR)/bin/pip
-PYTEST := $(VENV_DIR)/bin/pytest
+
+# Local Postgres dev container (used when storage_backend = "postgres")
+PG_CONTAINER := conductor-postgres
+PG_SETTINGS  := config/conductor.settings.yaml
+PYTHON := $(CURDIR)/$(VENV_DIR)/bin/python
+PIP := $(CURDIR)/$(VENV_DIR)/bin/pip
+PYTEST := $(CURDIR)/$(VENV_DIR)/bin/pytest
+UVICORN := $(PYTHON) -m uvicorn
 
 # Default target
 all: setup
@@ -23,7 +28,7 @@ setup: venv setup-backend setup-extension
 ## Setup backend (venv + dependencies)
 setup-backend: venv
 	@echo "📦 Installing backend dependencies..."
-	$(PIP) install -r backend/requirements.txt
+	$(PYTHON) -m pip install -r backend/requirements.txt
 	@echo "✅ Backend setup complete!"
 
 ## Setup extension (npm install)
@@ -48,11 +53,28 @@ venv:
 	else \
 		echo "✅ Virtual environment already exists at $(VENV_DIR)"; \
 	fi
+	@# Repair stale interpreter symlinks when python moved (for example /usr/local/bin -> /usr/bin)
+	@if [ -L "$(PYTHON)" ] && [ ! -e "$(PYTHON)" ]; then \
+		echo "⚠️  Virtual environment interpreter symlink is stale. Repairing..."; \
+		ln -sf "$$(command -v python3)" "$(PYTHON)"; \
+	fi
 	@# Verify venv is usable
-	@if [ ! -f "$(PIP)" ]; then \
-		echo "❌ Virtual environment is broken. Removing and please try again."; \
+	@if [ ! -x "$(PYTHON)" ] || ! "$(PYTHON)" -V >/dev/null 2>&1 || ! "$(PYTHON)" -m pip --version >/dev/null 2>&1; then \
+		echo "❌ Virtual environment is broken. Recreating $(VENV_DIR)..."; \
 		rm -rf $(VENV_DIR); \
-		exit 1; \
+		python3 -m venv $(VENV_DIR) || { \
+			echo "❌ Failed to recreate venv. Try: sudo apt install python3-venv"; \
+			exit 1; \
+		}; \
+		echo "✅ Virtual environment recreated at $(VENV_DIR)"; \
+	fi
+
+## Ensure backend dependencies are installed in the venv
+ensure-backend-deps: venv
+	@if ! "$(PYTHON)" -c "import fastapi, pytest, uvicorn" >/dev/null 2>&1; then \
+		echo "📦 Backend dependencies missing — installing..."; \
+		$(PYTHON) -m pip install -r backend/requirements.txt; \
+		echo "✅ Backend dependencies ready"; \
 	fi
 
 # ===========================
@@ -74,23 +96,28 @@ WS_PING_TIMEOUT := 20.0
 WS_OPTIONS := --ws-ping-interval $(WS_PING_INTERVAL) --ws-ping-timeout $(WS_PING_TIMEOUT)
 
 ## Start backend server (development mode with auto-reload)
-run-backend: venv
+## Auto-starts the local Postgres container when storage_backend = "postgres"
+run-backend: ensure-backend-deps
+	@if grep -qE 'storage_backend[[:space:]]*:[[:space:]]*"?postgres"?' $(PG_SETTINGS) 2>/dev/null; then \
+		echo "📊 Postgres storage_backend detected — ensuring container is running..."; \
+		$(MAKE) pg-start; \
+	fi
 	@echo "🚀 Starting backend server..."
 	@echo "   Swagger UI: http://localhost:8000/docs"
 	@echo "   ReDoc: http://localhost:8000/redoc"
 	@echo "   WebSocket: ws://localhost:8000/ws/chat/{room_id}"
 	@echo "   WebSocket Ping: $(WS_PING_INTERVAL)s interval, $(WS_PING_TIMEOUT)s timeout"
-	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 $(WS_OPTIONS)
+	cd backend && $(UVICORN) app.main:app --reload --reload-dir app --host 0.0.0.0 --port 8000 $(WS_OPTIONS)
 
 ## Start backend server (production mode)
-run-backend-prod: venv
+run-backend-prod: ensure-backend-deps
 	@echo "🚀 Starting backend server (production)..."
-	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 $(WS_OPTIONS)
+	cd backend && $(UVICORN) app.main:app --host 0.0.0.0 --port 8000 --workers 4 $(WS_OPTIONS)
 
 ## Start backend with custom port (usage: make run-backend-port PORT=8001)
-run-backend-port: venv
+run-backend-port: ensure-backend-deps
 	@echo "🚀 Starting backend server on port $(PORT)..."
-	cd backend && $(CURDIR)/$(VENV_DIR)/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port $(PORT) $(WS_OPTIONS)
+	cd backend && $(UVICORN) app.main:app --reload --reload-dir app --host 0.0.0.0 --port $(PORT) $(WS_OPTIONS)
 
 # ===========================
 # Testing
@@ -101,9 +128,9 @@ test: test-backend test-extension
 	@echo "✅ All tests passed!"
 
 ## Run backend tests
-test-backend: venv
+test-backend: ensure-backend-deps
 	@echo "🧪 Running backend tests..."
-	cd backend && $(CURDIR)/$(PYTEST) tests/ -v
+	cd backend && $(PYTHON) -m pytest tests/ -v
 
 ## Run extension tests (if any)
 test-extension:
@@ -157,6 +184,45 @@ clean:
 	@echo "✅ Clean complete!"
 
 # ===========================
+# Local Postgres (Docker)
+# ===========================
+
+## Ensure the local Postgres dev container is running (creates it if missing)
+pg-start:
+	@if docker ps --filter "name=^$(PG_CONTAINER)$$" --format "{{.Names}}" 2>/dev/null | grep -q "$(PG_CONTAINER)"; then \
+		echo "✅ Postgres already running ($(PG_CONTAINER))"; \
+	else \
+		echo "🐘 Starting local Postgres container..."; \
+		docker compose up -d postgres; \
+		echo "⏳ Waiting for Postgres to be ready..."; \
+		for i in $$(seq 1 30); do \
+			if docker exec $(PG_CONTAINER) pg_isready -U conductor -q 2>/dev/null; then \
+				echo "✅ Postgres is ready!"; \
+				echo "   Connection URL: postgresql://conductor:conductor@localhost:5432/conductor"; \
+				break; \
+			fi; \
+			sleep 1; \
+		done; \
+	fi
+
+## Stop the local Postgres dev container (data is preserved)
+pg-stop:
+	@docker stop $(PG_CONTAINER) 2>/dev/null \
+		&& echo "⏹️  Postgres stopped ($(PG_CONTAINER))" \
+		|| echo "⚠️  Postgres was not running"
+
+## Remove the local Postgres container (data volume is preserved)
+pg-rm:
+	@docker rm -f $(PG_CONTAINER) 2>/dev/null \
+		&& echo "🗑️  Postgres container removed" \
+		|| echo "⚠️  No container to remove"
+
+## Remove the Postgres container AND its data volume (full reset)
+pg-clean:
+	@docker rm -f $(PG_CONTAINER) 2>/dev/null || true
+	@docker volume rm conductor_pgdata 2>/dev/null && echo "🗑️  Postgres container and data volume removed" || echo "⚠️  Volume not found"
+
+# ===========================
 # Help
 # ===========================
 
@@ -187,7 +253,15 @@ help:
 	@echo "  make compile-css      - Build Tailwind CSS only"
 	@echo "  make package          - Package extension as .vsix (compiles first)"
 	@echo ""
+	@echo "Local Postgres (Docker):"
+	@echo "  make pg-start         - Start local Postgres container (creates if missing)"
+	@echo "  make pg-stop          - Stop Postgres container (data preserved)"
+	@echo "  make pg-rm            - Remove Postgres container (volume preserved)"
+	@echo "  make pg-clean         - Remove container AND data volume (full reset)"
+	@echo ""
 	@echo "Other:"
 	@echo "  make clean            - Remove all generated files"
 	@echo "  make help             - Show this help message"
-
+	@echo ""
+	@echo "Postgres connection (local dev):"
+	@echo "  URL: postgresql://conductor:conductor@localhost:5432/conductor"
