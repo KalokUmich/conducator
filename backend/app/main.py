@@ -230,7 +230,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .chat.settings_router import router as chat_settings_router
     from .agent.router         import router as agent_router
     from .auth.router          import router as auth_router
-    from .embeddings.router    import router as embeddings_router
     from .rag.router           import router as rag_router
     from .files.router         import router as files_router
     from .todos.router         import router as todos_router
@@ -247,7 +246,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(chat_settings_router)
     app.include_router(agent_router)
     app.include_router(auth_router)
-    app.include_router(embeddings_router)
     app.include_router(rag_router)
     app.include_router(files_router)
     app.include_router(todos_router)

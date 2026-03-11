@@ -9,7 +9,9 @@ import fnmatch
 import logging
 import os
 import re
+import json as _json
 import subprocess
+import time as _time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -244,18 +246,116 @@ def list_files(
     )
 
 
-def find_symbol(
-    workspace: str,
-    name: str,
-    kind: Optional[str] = None,
-    _graph_cache: Optional[Dict] = None,
-) -> ToolResult:
-    """Find symbol definitions using tree-sitter AST parsing."""
-    from app.repo_graph.parser import extract_definitions, detect_language
+_symbol_index_cache: Dict[str, tuple] = {}  # workspace → (index, git_head)
+_CONDUCTOR_DIR = ".conductor"
+_SYMBOL_INDEX_FILE = "symbol_index.json"
 
+
+def _get_git_head(workspace: str) -> Optional[str]:
+    """Return the current HEAD commit hash, or None if not a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _serialize_definitions(index: Dict[str, list]) -> Dict[str, list]:
+    """Convert definition objects to JSON-serializable dicts."""
+    out: Dict[str, list] = {}
+    for rel, defs in index.items():
+        out[rel] = [
+            {"name": d.name, "kind": d.kind,
+             "start_line": d.start_line, "end_line": d.end_line,
+             "signature": getattr(d, "signature", "")}
+            for d in defs
+        ]
+    return out
+
+
+def _deserialize_definitions(raw: Dict[str, list]) -> Dict[str, list]:
+    """Convert JSON dicts back to SimpleNamespace objects (duck-typed)."""
+    from types import SimpleNamespace
+    out: Dict[str, list] = {}
+    for rel, defs in raw.items():
+        out[rel] = [SimpleNamespace(**d) for d in defs]
+    return out
+
+
+def _disk_cache_path(workspace: str) -> Path:
+    return Path(workspace) / _CONDUCTOR_DIR / _SYMBOL_INDEX_FILE
+
+
+def _load_disk_cache(workspace: str) -> Optional[tuple]:
+    """Load symbol index from disk. Returns (index, git_head) or None."""
+    path = _disk_cache_path(workspace)
+    if not path.exists():
+        return None
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        head = data.get("git_head")
+        raw_index = data.get("index")
+        if head and raw_index is not None:
+            return _deserialize_definitions(raw_index), head
+    except (OSError, _json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _save_disk_cache(workspace: str, index: Dict[str, list], git_head: str) -> None:
+    """Persist symbol index to disk."""
+    path = _disk_cache_path(workspace)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"git_head": git_head, "index": _serialize_definitions(index)}
+        path.write_text(_json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass  # non-fatal — in-memory cache still works
+
+
+def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
+    """Build or return a cached symbol index for the workspace.
+
+    The index maps relative file paths to their list of symbol definitions.
+    Cache invalidation is based on the git HEAD commit — the index is
+    rebuilt only when the commit changes. Three tiers:
+
+    1. **In-memory** — instant, keyed by (workspace, git_head).
+    2. **Disk** — ``{workspace}/.conductor/symbol_index.json``, survives
+       server restarts.
+    3. **Full scan** — AST walk, written to memory + disk.
+    """
+    try:
+        from app.repo_graph.parser import extract_definitions, detect_language
+    except ImportError:
+        return None
+
+    current_head = _get_git_head(workspace)
+
+    # 1. In-memory hit
+    entry = _symbol_index_cache.get(workspace)
+    if entry is not None:
+        index, cached_head = entry
+        if cached_head == current_head:
+            return index
+
+    # 2. Disk hit
+    if current_head is not None:
+        disk_entry = _load_disk_cache(workspace)
+        if disk_entry is not None:
+            disk_index, disk_head = disk_entry
+            if disk_head == current_head:
+                _symbol_index_cache[workspace] = (disk_index, current_head)
+                return disk_index
+
+    # 3. Full scan
     ws = Path(workspace).resolve()
-    results: List[Dict] = []
-    name_lower = name.lower()
+    index: Dict[str, list] = {}
 
     for dirpath, dirnames, filenames in os.walk(ws):
         rel_dir = Path(dirpath).relative_to(ws)
@@ -270,28 +370,70 @@ def find_symbol(
                 continue
             if fp.stat().st_size > _MAX_FILE_SIZE:
                 continue
-
             try:
                 source = fp.read_bytes()
             except OSError:
                 continue
-
             rel = str(fp.relative_to(ws))
             symbols = extract_definitions(str(fp), source)
+            if symbols.definitions:
+                index[rel] = symbols.definitions
 
-            for defn in symbols.definitions:
-                if name_lower not in defn.name.lower():
-                    continue
-                if kind and defn.kind != kind:
-                    continue
-                results.append(SymbolLocation(
-                    name=defn.name,
-                    kind=defn.kind,
-                    file_path=rel,
-                    start_line=defn.start_line,
-                    end_line=defn.end_line,
-                    signature=defn.signature,
-                ).model_dump())
+    cache_head = current_head or ""
+    _symbol_index_cache[workspace] = (index, cache_head)
+    if current_head:
+        _save_disk_cache(workspace, index, current_head)
+    return index
+
+
+def invalidate_symbol_cache(workspace: Optional[str] = None) -> None:
+    """Clear symbol index cache (in-memory + disk)."""
+    if workspace:
+        _symbol_index_cache.pop(workspace, None)
+        try:
+            _disk_cache_path(workspace).unlink(missing_ok=True)
+        except OSError:
+            pass
+    else:
+        for ws in list(_symbol_index_cache.keys()):
+            try:
+                _disk_cache_path(ws).unlink(missing_ok=True)
+            except OSError:
+                pass
+        _symbol_index_cache.clear()
+
+
+def find_symbol(
+    workspace: str,
+    name: str,
+    kind: Optional[str] = None,
+    _graph_cache: Optional[Dict] = None,
+) -> ToolResult:
+    """Find symbol definitions using a cached symbol index."""
+    index = _get_symbol_index(workspace)
+    if index is None:
+        return ToolResult(
+            tool_name="find_symbol", success=False,
+            error="Symbol index not available (missing tree-sitter).",
+        )
+
+    results: List[Dict] = []
+    name_lower = name.lower()
+
+    for rel, definitions in index.items():
+        for defn in definitions:
+            if name_lower not in defn.name.lower():
+                continue
+            if kind and defn.kind != kind:
+                continue
+            results.append(SymbolLocation(
+                name=defn.name,
+                kind=defn.kind,
+                file_path=rel,
+                start_line=defn.start_line,
+                end_line=defn.end_line,
+                signature=defn.signature,
+            ).model_dump())
 
     return ToolResult(tool_name="find_symbol", data=results)
 

@@ -40,12 +40,9 @@ import { buildContextPlan, ReadFileOp }                       from './contextPla
 import { assembleXmlPrompt, FileSnippet, ProjectMetadataInput } from './xmlPromptAssembler';
 import { collectProjectMetadata, ProjectMetadata }             from './projectMetadataCollector';
 import { extractSymbols }                                     from './symbolExtractor';
-import { VectorIndex, SearchResult }                          from './vectorIndex';
-import { EmbeddingClient }                                    from './embeddingClient';
 import { ConductorDb }                                        from './conductorDb';
 import {
     WorkspaceConfig, DEFAULT_WORKSPACE_CONFIG,
-    EmbeddingConfig, DEFAULT_EMBEDDING_CONFIG,
 } from './workspaceStorage';
 
 // ---------------------------------------------------------------------------
@@ -84,13 +81,6 @@ export interface PipelineInput {
      * Falls back to `DEFAULT_WORKSPACE_CONFIG` for any missing field.
      */
     workspaceConfig?: WorkspaceConfig;
-    /**
-     * Embedding configuration fetched from `GET /embeddings/config` on the
-     * backend, which reads `conductor.settings.yaml`.
-     * This is the single source of truth for model ID and vector dimension.
-     * Falls back to `DEFAULT_EMBEDDING_CONFIG` when the backend is unreachable.
-     */
-    embeddingConfig?: EmbeddingConfig;
 }
 
 export interface PipelineOutput {
@@ -128,15 +118,11 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     console.log(`${LOG} file=${input.relativePath} lines=${input.startLine}-${input.endLine} lang=${input.language}`);
     console.log(`${LOG} conductorDb=${input.conductorDb ? 'SET' : 'NULL'}`);
     console.log(`${LOG} workspaceConfig=${input.workspaceConfig ? JSON.stringify(input.workspaceConfig) : 'NONE (using defaults)'}`);
-    console.log(`${LOG} embeddingConfig=${input.embeddingConfig ? JSON.stringify(input.embeddingConfig) : 'NONE (using defaults)'}`);
     console.log(`${LOG} workspaceFolders=${input.workspaceFolders.length} backendUrl=${input.backendUrl}`);
 
     // Resolve workspace tuning (ranking caps, topK) from .conductor/config.json.
     const cfg = { ...DEFAULT_WORKSPACE_CONFIG, ...(input.workspaceConfig ?? {}) };
-    // Resolve embedding model/dim from conductor.settings.yaml via backend API.
-    const emb = { ...DEFAULT_EMBEDDING_CONFIG, ...(input.embeddingConfig ?? {}) };
     console.log(`${LOG} Resolved cfg: maxRelated=${cfg.maxRelated} maxContextFiles=${cfg.maxContextFiles} semanticTopK=${cfg.semanticTopK}`);
-    console.log(`${LOG} Resolved emb: model=${emb.model} dim=${emb.dim} provider=${emb.provider}`);
 
     // -------------------------------------------------------------------------
     // Stage 2 — LSP context
@@ -225,7 +211,6 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     // This replaces the old single-query semantic search and type-name-only
     // extraction with the targeted multi-query approach used by Augment Code.
     // -------------------------------------------------------------------------
-    let semanticResults: SearchResult[] = [];
     const typeDefinitionSnippets: Array<{ path: string; content: string }> = [];
     {
         const t0 = performance.now();
@@ -242,19 +227,11 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
             // Step 2: Resolve all dependencies in parallel (3 rounds).
             const resolved = await _resolveAllDependencies(
                 depNodes, input.conductorDb, input.workspaceFolders, vscode,
-                input.backendUrl, emb.model, cfg.semanticTopK,
             );
 
             // Step 3: Collect results into the format downstream stages expect.
             for (const [, result] of resolved) {
-                if (result.resolvedVia === 'file_read' || result.resolvedVia === 'symbol_db') {
-                    typeDefinitionSnippets.push({ path: result.path, content: result.content });
-                } else if (result.resolvedVia === 'semantic') {
-                    semanticResults.push({
-                        symbol_id: result.path + '::' + result.dep.name,
-                        score:     0.8,
-                    });
-                }
+                typeDefinitionSnippets.push({ path: result.path, content: result.content });
                 // Add resolved paths to import neighbors for ranker graph-boost.
                 if (result.path && !importNeighbors.includes(result.path)) {
                     importNeighbors.push(result.path);
@@ -263,17 +240,10 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
 
             console.log(
                 `${LOG} [2.7] Resolved: ${resolved.size}/${depNodes.length} deps, ` +
-                `${typeDefinitionSnippets.length} snippets, ${semanticResults.length} semantic`,
+                `${typeDefinitionSnippets.length} snippets`,
             );
         } catch (err) {
             console.log(`${LOG} Stage 2.7 (dependency resolution) failed (non-fatal):`, err);
-            // Emergency fallback: single broad semantic search.
-            try {
-                semanticResults = await _getSemanticResults(
-                    input.code, input.backendUrl, input.conductorDb,
-                    emb.model, cfg.semanticTopK,
-                );
-            } catch { /* non-fatal */ }
         }
         timings['deps'] = performance.now() - t0;
         console.log(`${LOG} Stage 2.7 (dependency resolution): ${timings['deps'].toFixed(1)}ms`);
@@ -287,7 +257,7 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
         currentFile:     input.relativePath,
         lsp:             lspResult,
         importNeighbors,
-        semanticResults,
+        semanticResults: [],
     };
     const rankOpts: RankOptions = {
         maxReferences: cfg.maxRelated,
@@ -398,41 +368,6 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
 // ---------------------------------------------------------------------------
 
 /**
- * Semantic search using the local vector index and the backend embedding API.
- * Returns [] (without throwing) when the semantic layer is unavailable.
- */
-async function _getSemanticResults(
-    code:           string,
-    backendUrl:     string,
-    db:             ConductorDb | null,
-    embeddingModel: string,
-    topK:           number,
-): Promise<SearchResult[]> {
-    if (!db) {
-        console.log(`${LOG} [Semantic] Skipped — conductorDb is null`);
-        return [];
-    }
-
-    const rows = db.getAllVectorsByModel(embeddingModel);
-    console.log(`${LOG} [Semantic] Vectors in DB for model "${embeddingModel}": ${rows.length}`);
-    if (rows.length === 0) {
-        console.log(`${LOG} [Semantic] Skipped — no vectors indexed yet`);
-        return [];
-    }
-
-    const idx = new VectorIndex();
-    idx.loadRows(rows);
-
-    console.log(`${LOG} [Semantic] Calling embedding API at ${backendUrl}/embeddings ...`);
-    const client  = new EmbeddingClient(backendUrl);
-    const vectors = await client.embed([code]);
-    const q       = new Float32Array(vectors[0]);
-    const results = idx.search(q, topK);
-    console.log(`${LOG} [Semantic] Search returned ${results.length} result(s)`);
-    return results;
-}
-
-/**
  * Best-effort resolution of import statements to workspace-relative file paths.
  *
  * Handles:
@@ -449,14 +384,14 @@ async function _getSemanticResults(
 interface DependencyNode {
     name: string;
     kind: 'type' | 'service' | 'function' | 'method_call' | 'constant';
-    /** Natural-language query for semantic / codebase search. */
+    /** Natural-language query for codebase search. */
     query: string;
     /** For method_call deps: the receiver class name (e.g. "AsyncPolicyService"). */
     receiver?: string;
     /** Known file path from imports or DB pre-check. */
     knownPath?: string;
     /** Resolution strategy chosen during planning. */
-    strategy: 'read_file' | 'symbol_lookup' | 'semantic_search';
+    strategy: 'read_file' | 'symbol_lookup';
 }
 
 /** A successfully resolved dependency with its content. */
@@ -464,7 +399,7 @@ interface ResolvedDependency {
     dep:         DependencyNode;
     path:        string;
     content:     string;
-    resolvedVia: 'file_read' | 'symbol_db' | 'semantic';
+    resolvedVia: 'file_read' | 'symbol_db';
 }
 
 /** Builtins & framework names that appear everywhere but rarely need lookup. */
@@ -526,8 +461,8 @@ function _buildDependencyPlan(
 
         const query = opts?.query ?? _defaultQuery(name, kind, language);
 
-        // Strategy assignment: known path → read_file, DB hit → symbol_lookup, else semantic.
-        let strategy: DependencyNode['strategy'] = 'semantic_search';
+        // Strategy assignment: known path → read_file, DB hit → symbol_lookup, else skip.
+        let strategy: DependencyNode['strategy'] = 'symbol_lookup';
         let knownPath = opts?.knownPath;
 
         // Check DB for a direct symbol match.
@@ -649,9 +584,6 @@ async function _resolveAllDependencies(
     db:               ConductorDb | null,
     workspaceFolders: vscodeT.WorkspaceFolder[],
     vscode:           typeof vscodeT,
-    backendUrl:       string,
-    embeddingModel:   string,
-    semanticTopK:     number,
 ): Promise<Map<string, ResolvedDependency>> {
     const resolved = new Map<string, ResolvedDependency>();
     if (nodes.length === 0) return resolved;
@@ -713,20 +645,6 @@ async function _resolveAllDependencies(
                     });
                 }
 
-            } else if (node.strategy === 'semantic_search') {
-                // Targeted semantic search with the dep's query.
-                if (!db) return;
-                const results = await _getSemanticResults(
-                    node.query, backendUrl, db, embeddingModel,
-                    Math.min(3, semanticTopK),
-                );
-                if (results.length > 0) {
-                    const top = results[0];
-                    const symPath = top.symbol_id.split('::')[0] || top.symbol_id;
-                    resolved.set(node.name, {
-                        dep: node, path: symPath, content: '', resolvedVia: 'semantic',
-                    });
-                }
             }
         } catch { /* non-fatal — individual dep failure */ }
     });
@@ -734,21 +652,7 @@ async function _resolveAllDependencies(
     await Promise.all(round1Tasks);
 
     // --- Round 2: gap detection & targeted follow-ups -------------------------
-    await _detectGapsAndResolve(
-        nodes, resolved, db, workspaceFolders, vscode,
-        backendUrl, embeddingModel, semanticTopK,
-    );
-
-    // --- Round 3: emergency fallback ------------------------------------------
-    // Only if > 50% of deps remain unresolved AND the DB has no vectors
-    // (i.e. embeddings haven't been indexed yet).
-    const unresolvedCount = nodes.filter(n => !resolved.has(n.name)).length;
-    const dbEmpty = !db || db.getAllVectorsByModel(embeddingModel).length === 0;
-    if (unresolvedCount > nodes.length * 0.5 && dbEmpty) {
-        console.log(`${LOG} [2.7] Round 3 emergency fallback: ${unresolvedCount}/${nodes.length} unresolved, DB empty`);
-        // This intentionally left empty — the pipeline's outer catch already
-        // handles the broad fallback query.  We just log the situation.
-    }
+    await _detectGapsAndResolve(nodes, resolved);
 
     return resolved;
 }
@@ -758,22 +662,14 @@ async function _resolveAllDependencies(
 // ---------------------------------------------------------------------------
 
 /**
- * Detect unresolved deps after Round 1 and issue targeted follow-up queries.
+ * Detect unresolved deps after Round 1 and attempt method body extraction.
  *
- *   - Unresolved deps → targeted semantic search (parallel).
  *   - Method calls where the receiver class was resolved but the specific
  *     method wasn't found → apply `_extractMethodBody` on the class content.
- *   - Missing receiver types → search fullFileContent for type annotations.
  */
 async function _detectGapsAndResolve(
-    nodes:            DependencyNode[],
-    resolved:         Map<string, ResolvedDependency>,
-    db:               ConductorDb | null,
-    workspaceFolders: vscodeT.WorkspaceFolder[],
-    vscode:           typeof vscodeT,
-    backendUrl:       string,
-    embeddingModel:   string,
-    semanticTopK:     number,
+    nodes:    DependencyNode[],
+    resolved: Map<string, ResolvedDependency>,
 ): Promise<void> {
     const unresolved = nodes.filter(n => !resolved.has(n.name));
     if (unresolved.length === 0) return;
@@ -795,23 +691,8 @@ async function _detectGapsAndResolve(
                             dep: node, path: receiverResult.path,
                             content: methodBody.content, resolvedVia: 'symbol_db',
                         });
-                        return;
                     }
                 }
-            }
-
-            // Fallback: targeted semantic search for unresolved deps.
-            if (!db) return;
-            const results = await _getSemanticResults(
-                node.query, backendUrl, db, embeddingModel,
-                Math.min(3, semanticTopK),
-            );
-            if (results.length > 0) {
-                const top = results[0];
-                const symPath = top.symbol_id.split('::')[0] || top.symbol_id;
-                resolved.set(node.name, {
-                    dep: node, path: symPath, content: '', resolvedVia: 'semantic',
-                });
             }
         } catch { /* non-fatal */ }
     });

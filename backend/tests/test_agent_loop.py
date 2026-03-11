@@ -149,7 +149,10 @@ class TestAgentLoop:
 
         assert result.tool_calls_made == 2
         assert result.iterations == 3
-        assert len(result.context_chunks) == 1  # read_file produces a chunk
+        assert len(result.context_chunks) >= 1  # grep + read_file produce chunks
+        # At least the read_file chunk should be present
+        read_chunks = [c for c in result.context_chunks if c.source_tool == "read_file"]
+        assert len(read_chunks) == 1
 
     @pytest.mark.asyncio
     async def test_max_iterations_reached(self, workspace):

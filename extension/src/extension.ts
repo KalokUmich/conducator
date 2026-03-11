@@ -40,11 +40,8 @@ import {
     resetWorkspaceDb,
     loadWorkspaceConfig,
     WorkspaceConfig,
-    fetchEmbeddingConfig,
-    EmbeddingConfig,
 } from './services/workspaceStorage';
 import { ConductorDb } from './services/conductorDb';
-import { EmbeddingQueue } from './services/embeddingQueue';
 import { runExplainPipeline } from './services/explainWithContextPipeline';
 import { indexWorkspace, reindexSingleFile, cancelCurrentIndex } from './services/workspaceIndexer';
 import { RagClient, RagFileChange } from './services/ragClient';
@@ -59,14 +56,8 @@ let conductorDb: ConductorDb | null = null;
 /** Active workspace root (set alongside conductorDb). */
 let conductorWsRoot: string | null = null;
 
-/** Active EmbeddingQueue — kept so it can be cancelled on rebuild / session end. */
-let activeEmbeddingQueue: EmbeddingQueue | null = null;
-
 /** Workspace configuration loaded from .conductor/config.json (set after hosting starts). */
 let workspaceConfig: WorkspaceConfig | null = null;
-
-/** Embedding config fetched from conductor.settings.yaml via GET /embeddings/config. */
-let embeddingConfig: EmbeddingConfig | null = null;
 
 /** RagClient for backend-centric codebase indexing and search. */
 let ragClient: RagClient | null = null;
@@ -349,7 +340,6 @@ export function deactivate(): void {
         conductorDb = null;
     }
     workspaceConfig = null;
-    embeddingConfig = null;
     console.log('AI Collab extension is now deactivated');
 }
 
@@ -509,8 +499,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     }
                     // Stop all background indexing work before closing the session.
                     cancelCurrentIndex();
-                    activeEmbeddingQueue?.cancel();
-                    activeEmbeddingQueue = null;
                     ragClient?.cancel();
                     ragClient = null;
                     if (this._ragBatchTimer) { clearTimeout(this._ragBatchTimer); this._ragBatchTimer = null; }
@@ -790,8 +778,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
                     // Cancel any Phase 2 still running from a previous session.
                     cancelCurrentIndex();
-                    activeEmbeddingQueue?.cancel();
-                    activeEmbeddingQueue = null;
 
                     // Load extension-side tuning from .conductor/config.json.
                     workspaceConfig = await loadWorkspaceConfig(wsRoot);
@@ -819,18 +805,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         console.log(`[Conductor][StartSession] Incremental scan on branch=${currentBranch ?? 'unknown'} (${fileCount} files cached)`);
                     }
 
-                    // Fetch embedding config (best-effort).  Failure = AST-only mode.
-                    try {
-                        embeddingConfig = await fetchEmbeddingConfig(getBackendUrl());
-                        console.log(
-                            `[Conductor][StartSession] Embedding config: provider=${embeddingConfig.provider} ` +
-                            `model=${embeddingConfig.model} dim=${embeddingConfig.dim}`,
-                        );
-                    } catch (err) {
-                        console.warn('[Conductor][StartSession] Could not fetch embedding config — AST-only mode:', err);
-                        embeddingConfig = null;
-                    }
-
                     // Collect open editor files to process them first in Phase 2.
                     const priorityFiles = vscode.window.tabGroups.all
                         .flatMap(g => g.tabs)
@@ -846,21 +820,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     // });
 
                     // Run two-phase indexing.  Phase 1 always runs (fast mtime diff).
-                    // Phase 2 processes only stale files; embedding only when config available.
+                    // Phase 2 processes only stale files (AST-only mode).
                     const indexResult = await indexWorkspace(wsRoot, db, {
-                        embeddingModel:  embeddingConfig?.model,
-                        embeddingDim:    embeddingConfig?.dim,
                         backendUrl:      getBackendUrl(),
                         phase1TimeoutMs: 5000,
                         priorityFiles,
                         onProgress: (p) => {
                             this._view?.webview.postMessage({ command: 'indexProgress', payload: p });
                         },
-                        onEmbeddingError: (err) => {
-                            console.warn('[Conductor][StartSession] Embedding error:', err.message);
-                            this._view?.webview.postMessage({ command: 'indexEmbeddingError', error: err.message });
-                        },
-                        onQueueReady: (q) => { activeEmbeddingQueue = q; },
                     });
 
                     // Persist the current branch.
@@ -870,8 +837,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
                     console.log(
                         `[Conductor][StartSession] Index done: ${indexResult.filesScanned} files, ` +
-                        `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols, ` +
-                        `${indexResult.embeddingsEnqueued} embeddings enqueued`,
+                        `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols`,
                     );
 
                     // Start watching for file changes (hot incremental updates).
@@ -3048,7 +3014,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         console.log('[Conductor][ExplainCode] code length:', message.code.length, 'chars');
         console.log('[Conductor][ExplainCode] conductorDb:', conductorDb ? 'SET' : 'NULL');
         console.log('[Conductor][ExplainCode] workspaceConfig:', workspaceConfig ? JSON.stringify(workspaceConfig) : 'NULL');
-        console.log('[Conductor][ExplainCode] embeddingConfig:', embeddingConfig ? JSON.stringify(embeddingConfig) : 'NULL');
         console.log('[Conductor][ExplainCode] backendUrl:', backendUrl);
 
         // Resolve the active editor URI and cursor position for LSP queries.
@@ -3104,7 +3069,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 conductorDb,
                 workspaceFolders:  [...(vscode.workspace.workspaceFolders ?? [])],
                 workspaceConfig:   workspaceConfig  ?? undefined,
-                embeddingConfig:   embeddingConfig  ?? undefined,
             });
 
             console.log('[Conductor][ExplainCode] Pipeline returned:',
@@ -3463,14 +3427,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         ]);
         if (SKIP.has(firstSegment)) return;
 
-        const count = await reindexSingleFile(wsRoot, absPath, conductorDb, {
-            embeddingModel:  embeddingConfig?.model,
-            embeddingDim:    embeddingConfig?.dim,
-            backendUrl:      getBackendUrl(),
-            onEmbeddingError: (err) => {
-                console.warn('[Conductor][FileWatcher] Embedding error:', err.message);
-            },
-        });
+        const count = await reindexSingleFile(wsRoot, absPath, conductorDb);
 
         console.log(`[Conductor][FileWatcher] Reindexed ${relPath} (${count} symbols)`);
         this._view?.webview.postMessage({ command: 'indexFileSynced', file: relPath, symbols: count });
@@ -3538,7 +3495,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 conductorDb,
                 workspaceFolders:  [...folders],
                 workspaceConfig:   workspaceConfig  ?? undefined,
-                embeddingConfig:   embeddingConfig  ?? undefined,
             });
 
             // Broadcast the explanation as an AI message in the room.
@@ -3590,44 +3546,24 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         const wsRoot = conductorWsRoot ?? folders[0].uri.fsPath;
 
         try {
-            // 1. Stop all running embedding tasks.
+            // 1. Stop all running indexing tasks.
             cancelCurrentIndex();
-            activeEmbeddingQueue?.cancel();
-            activeEmbeddingQueue = null;
             this._stopFileWatcher();
 
             // 2. Hard-reset: close DB, delete cache.db* + vectors/, reopen fresh.
             conductorDb = await resetWorkspaceDb(wsRoot, conductorDb);
             console.log('[Conductor][RebuildIndex] Workspace hard-reset complete');
 
-            // 3. Re-fetch embedding config (best-effort — failure = AST-only rebuild)
-            try {
-                embeddingConfig = await fetchEmbeddingConfig(getBackendUrl());
-                console.log(
-                    `[Conductor][RebuildIndex] Embedding config: ` +
-                    `provider=${embeddingConfig.provider} model=${embeddingConfig.model} dim=${embeddingConfig.dim}`,
-                );
-            } catch (err) {
-                console.warn('[Conductor][RebuildIndex] Could not fetch embedding config — AST-only mode:', err);
-                embeddingConfig = null;
-            }
-
-            // 4. Re-index workspace from scratch.
+            // 3. Re-index workspace from scratch (AST-only mode).
             const indexResult = await indexWorkspace(wsRoot, conductorDb, {
-                embeddingModel:  embeddingConfig?.model,
-                embeddingDim:    embeddingConfig?.dim,
                 backendUrl:      getBackendUrl(),
                 phase1TimeoutMs: 5000,
                 onProgress: (p) => {
                     this._view?.webview.postMessage({ command: 'indexProgress', payload: p });
                 },
-                onEmbeddingError: (err) => {
-                    this._view?.webview.postMessage({ command: 'indexEmbeddingError', error: err.message });
-                },
-                onQueueReady: (q) => { activeEmbeddingQueue = q; },
             });
 
-            // 5. Persist current branch and restart file watcher.
+            // 4. Persist current branch and restart file watcher.
             const currentBranch = _getGitBranch(wsRoot);
             if (currentBranch) {
                 conductorDb.setMeta('indexed_branch', currentBranch);
@@ -3636,8 +3572,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
             console.log(
                 `[Conductor][RebuildIndex] Done: ${indexResult.filesScanned} files, ` +
-                `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols, ` +
-                `${indexResult.embeddingsEnqueued} embeddings enqueued`,
+                `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols`,
             );
 
             // 6. Also rebuild the backend-side RAG FAISS index (best-effort).

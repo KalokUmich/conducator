@@ -10,8 +10,7 @@
  * Phase 2 (fire-and-forget, runs in the background)
  * --------------------------------------------------
  * For every file that needs re-indexing, extract symbols with
- * `extractSymbols()` and persist them to the DB.  Embedding is intentionally
- * left to the `EmbeddingQueue` (separate concern).
+ * `extractSymbols()` and persist them to the DB.
  *
  * @module services/workspaceIndexer
  */
@@ -38,14 +37,10 @@ export interface IndexProgress {
     staleFilesCount?:    number;
     /** Total symbols extracted during Phase 2. */
     symbolsExtracted?:   number;
-    /** Total embedding jobs enqueued during Phase 2. */
-    embeddingsEnqueued?: number;
 }
 
 /** Options accepted by `indexWorkspace()`. */
 export interface IndexOptions {
-    embeddingModel?:  string;
-    embeddingDim?:    number;
     backendUrl:       string;
     /** Maximum milliseconds to wait for Phase 1 to complete. Default 30 000. */
     phase1TimeoutMs?: number;
@@ -53,10 +48,6 @@ export interface IndexOptions {
     priorityFiles?:   string[];
     /** Called on every significant progress change. */
     onProgress?:      (p: IndexProgress) => void;
-    /** Called when an embedding operation fails (after retry). */
-    onEmbeddingError?: (err: Error) => void;
-    /** Called with the active EmbeddingQueue once Phase 2 starts. */
-    onQueueReady?:    (q: import('./embeddingQueue').EmbeddingQueue) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,21 +122,16 @@ export async function indexWorkspace(
 
 /**
  * Re-index a single file: extract its symbols and update the DB.
- * Does not trigger embedding — that is the caller's responsibility.
  *
  * @param workspaceRoot - Absolute root of the workspace (used to compute relative path).
  * @param absPath       - Absolute path to the file to re-index.
  * @param db            - Local metadata database.
- * @param _options      - Embedding config (reserved for future use).
  * @returns The number of symbols extracted.
  */
 export async function reindexSingleFile(
     workspaceRoot: string,
     absPath:       string,
     db:            ConductorDb,
-    _options:      Pick<IndexOptions, 'embeddingModel' | 'embeddingDim' | 'backendUrl'> & {
-        onEmbeddingError?: (err: Error) => void;
-    },
 ): Promise<number> {
     const relPath = path.relative(workspaceRoot, absPath);
     return _extractAndStoreSymbols(absPath, relPath, db);
