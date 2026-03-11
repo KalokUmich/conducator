@@ -24,6 +24,7 @@ import { diagnoseBackendConnection } from './services/connectionDiagnostics';
 import { ConductorController } from './services/conductorController';
 import {
     ConductorState,
+    ConductorEvent,
     ConductorStateMachine,
 } from './services/conductorStateMachine';
 import { ChangeSet, FileChange, getDiffPreviewService } from './services/diffPreview';
@@ -166,13 +167,23 @@ export function activate(context: vscode.ExtensionContext): void {
     // Conductor FSM + Controller
     // ---------------------------------------------------------------
 
-    // Always start fresh from Idle state on extension activation.
-    // We don't restore Hosting/Joined states because:
-    // 1. Live Share session may have ended
-    // 2. WebSocket connections are lost on reload
-    // 3. User should explicitly start a new session
-    const fsm = new ConductorStateMachine();
-    console.log('[Conductor] Starting FSM from Idle (fresh start)');
+    // Restore FSM state across workspace-folder reloads (e.g. Open Workspace
+    // triggers updateWorkspaceFolders → extension host restart).  Only Hosting
+    // and Joined survive a restart; transient states fall back to Idle.
+    const RESTORABLE_STATES = new Set<string>([ConductorState.Hosting, ConductorState.Joined, ConductorState.ReadyToHost]);
+    const persistedState = context.globalState.get<string>(FSM_STATE_KEY);
+    let initialState = ConductorState.Idle;
+    let wasRestored = false;
+
+    if (persistedState && RESTORABLE_STATES.has(persistedState)) {
+        initialState = persistedState as ConductorState;
+        wasRestored = true;
+        console.log(`[Conductor] Restored FSM state: ${initialState}`);
+    } else {
+        console.log('[Conductor] Starting FSM from Idle (fresh start)');
+    }
+
+    const fsm = new ConductorStateMachine(initialState);
 
     // Create the controller with injected dependencies
     const controller = new ConductorController(
@@ -191,12 +202,32 @@ export function activate(context: vscode.ExtensionContext): void {
         console.log(`[Conductor] FSM state persisted: ${next}`);
     });
 
-    // Auto-start the controller (health check) — async, non-blocking
-    controller.start().then(state => {
-        console.log(`[Conductor] Initial health check complete → ${state}`);
-    }).catch(err => {
-        console.warn('[Conductor] Health check start failed:', err);
-    });
+    // Post-restore health check or normal startup
+    if (wasRestored) {
+        // Don't call controller.start() — it throws for non-Idle/BackendDisconnected states.
+        // Instead, validate the backend is still reachable.
+        checkBackendHealth(getSessionService().getBackendUrl()).then(alive => {
+            if (alive) {
+                console.log(`[Conductor] Backend reachable, restored state ${initialState} preserved`);
+            } else {
+                console.warn('[Conductor] Backend unreachable after restore, transitioning to BackendDisconnected');
+                try {
+                    fsm.transition(ConductorEvent.BACKEND_LOST);
+                } catch (e) {
+                    console.warn('[Conductor] Failed to transition on restore health failure:', e);
+                }
+            }
+        }).catch(err => {
+            console.warn('[Conductor] Restore health check failed:', err);
+        });
+    } else {
+        // Normal startup: health check → ReadyToHost or BackendDisconnected
+        controller.start().then(state => {
+            console.log(`[Conductor] Initial health check complete → ${state}`);
+        }).catch(err => {
+            console.warn('[Conductor] Health check start failed:', err);
+        });
+    }
 
     // Register the WebView provider for the sidebar chat panel
     const provider = new AICollabViewProvider(context.extensionUri, context, controller);
@@ -3705,34 +3736,69 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            // --- 3. Trigger indexing ---
+            // --- 3. Trigger indexing (non-blocking) + poll progress ---
             this._view?.webview.postMessage({
                 command: 'setupAndIndexProgress',
                 phase: 'indexing',
                 detail: 'Indexing code for search...',
-                percent: 100,
+                percent: 0,
             });
 
+            // Fire off the index request (blocks on server until done)
+            // Track whether the fetch itself failed (e.g. backend restart)
+            let indexFetchFailed = false;
+            const indexPromise = fetch(
+                `${backendUrl}/api/git-workspace/workspaces/${encodeURIComponent(roomId)}/index`,
+                { method: 'POST' },
+            ).then(r => {
+                if (!r.ok) { indexFetchFailed = true; return {}; }
+                return r.json();
+            }).catch(() => { indexFetchFailed = true; return {}; });
+
+            // Poll progress while indexing runs
+            const progressUrl = `${backendUrl}/api/context/context/${encodeURIComponent(roomId)}/index-progress`;
             let indexResult: any = {};
-            try {
-                const idxResp = await fetch(`${backendUrl}/api/git-workspace/workspaces/${encodeURIComponent(roomId)}/index`, {
-                    method: 'POST',
-                });
-                if (idxResp.ok) {
-                    indexResult = await idxResp.json();
+            const pollInterval = 3000; // 3 seconds
+            while (true) {
+                // Check if indexing finished
+                const raceResult = await Promise.race([
+                    indexPromise.then(r => ({ done: true as const, result: r })),
+                    new Promise<{ done: false }>(r => setTimeout(() => r({ done: false }), pollInterval)),
+                ]);
+
+                if (raceResult.done) {
+                    indexResult = raceResult.result;
+                    break;
                 }
-            } catch (e) {
-                console.warn('[Conductor] Indexing request failed:', e);
+
+                // Poll progress
+                try {
+                    const progResp = await fetch(progressUrl);
+                    if (progResp.ok) {
+                        const prog = await progResp.json() as any;
+                        this._view?.webview.postMessage({
+                            command: 'setupAndIndexProgress',
+                            phase: 'indexing',
+                            detail: `Indexing code for search... ${prog.indexed_files}/${prog.total_files} files (${prog.indexed_chunks} chunks)`,
+                            percent: prog.percent ?? 0,
+                        });
+                    }
+                } catch {
+                    // Progress endpoint not ready yet — keep waiting
+                }
             }
 
             // --- 4. Notify webview (don't auto-mount — it reloads the window) ---
+            const indexSuccess = !indexFetchFailed && (indexResult.index_success ?? true);
             this._view?.webview.postMessage({
                 command: 'setupAndIndexComplete',
-                success: indexResult.index_success ?? true,
+                success: indexSuccess,
                 filesIndexed: indexResult.files_indexed ?? 0,
                 chunksIndexed: indexResult.chunks_indexed ?? 0,
                 durationMs: indexResult.index_duration_ms ?? 0,
-                message: indexResult.message || 'Workspace ready',
+                message: indexFetchFailed
+                    ? 'Backend restarted during indexing. Please re-trigger indexing.'
+                    : (indexResult.message || 'Workspace ready'),
                 workspace,
                 roomId,
             });
@@ -3814,15 +3880,27 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * Open the conductor:// workspace in a new VS Code window so the
-     * current window (with the chat session) is not disturbed.
+     * Add the conductor:// workspace as a folder in the current VS Code window.
+     *
+     * We add it to the current window rather than opening a new one so that
+     * the chat panel stays visible alongside the remote workspace explorer.
+     * The FileSystemProvider is already registered in this window, so there
+     * is no activation-race with vscode.openFolder in a new window.
      */
     private _handleOpenConductorWorkspace(roomId: string): void {
         const conductorUri = vscode.Uri.parse(`conductor://${roomId}/`);
-        console.log(`[Conductor] Opening conductor://${roomId}/ in new window`);
-        vscode.commands.executeCommand('vscode.openFolder', conductorUri, {
-            forceNewWindow: true,
-        });
+        console.log(`[Conductor] Adding conductor://${roomId}/ as workspace folder`);
+
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        // Remove any existing conductor:// folder for this room (idempotent)
+        const existingIdx = folders.findIndex(
+            f => f.uri.scheme === 'conductor' && f.uri.authority === roomId,
+        );
+        vscode.workspace.updateWorkspaceFolders(
+            existingIdx >= 0 ? existingIdx : folders.length,
+            existingIdx >= 0 ? 1 : 0,
+            { uri: conductorUri, name: `Remote: ${roomId.slice(0, 8)}` },
+        );
     }
 
     private async _handleScanWorkspaceTodos(): Promise<void> {

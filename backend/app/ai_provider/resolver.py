@@ -213,10 +213,6 @@ class ProviderResolver:
         Returns:
             The active AIProvider or None if no healthy provider found.
         """
-        if not self.summary_config.enabled:
-            logger.info("Summary is disabled, skipping provider resolution")
-            return None
-
         logger.debug("Resolving AI providers...")
 
         # Check all provider types

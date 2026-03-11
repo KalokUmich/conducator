@@ -21,13 +21,8 @@ def _stub(name: str, **attrs) -> types.ModuleType:
 # Stub heavy optional dependencies before any app code is imported
 from unittest.mock import MagicMock  # noqa: E402
 
-_stub("cocoindex", FlowBuilder=MagicMock, IndexOptions=MagicMock)
-_stub("sentence_transformers", SentenceTransformer=MagicMock, CrossEncoder=MagicMock)
-_stub("sqlite_vec")
-_stub("litellm")
 _stub("tree_sitter_languages")
 _stub("networkx", DiGraph=MagicMock, pagerank=MagicMock, PowerIterationFailedConvergence=Exception)
-_stub("cohere")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

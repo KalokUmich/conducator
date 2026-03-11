@@ -1,14 +1,11 @@
 # Conductor Project Makefile
 # ===========================
 
-.PHONY: all setup setup-backend setup-extension venv ensure-backend-deps install run-backend run-backend-prod run-backend-port test test-backend test-extension compile compile-ts compile-css package clean help pg-start pg-stop pg-rm pg-clean
+.PHONY: all setup setup-backend setup-extension venv ensure-backend-deps install run-backend run-backend-prod run-backend-port test test-backend test-extension compile compile-ts compile-css package clean help
 
 # Python virtual environment
 VENV_DIR := .venv
 
-# Local Postgres dev container (used when storage_backend = "postgres")
-PG_CONTAINER := conductor-postgres
-PG_SETTINGS  := config/conductor.settings.yaml
 PYTHON := $(CURDIR)/$(VENV_DIR)/bin/python
 PIP := $(CURDIR)/$(VENV_DIR)/bin/pip
 PYTEST := $(CURDIR)/$(VENV_DIR)/bin/pytest
@@ -96,12 +93,7 @@ WS_PING_TIMEOUT := 20.0
 WS_OPTIONS := --ws-ping-interval $(WS_PING_INTERVAL) --ws-ping-timeout $(WS_PING_TIMEOUT)
 
 ## Start backend server (development mode with auto-reload)
-## Auto-starts the local Postgres container when storage_backend = "postgres"
 run-backend: ensure-backend-deps
-	@if grep -qE 'storage_backend[[:space:]]*:[[:space:]]*"?postgres"?' $(PG_SETTINGS) 2>/dev/null; then \
-		echo "📊 Postgres storage_backend detected — ensuring container is running..."; \
-		$(MAKE) pg-start; \
-	fi
 	@echo "🚀 Starting backend server..."
 	@echo "   Swagger UI: http://localhost:8000/docs"
 	@echo "   ReDoc: http://localhost:8000/redoc"
@@ -183,44 +175,6 @@ clean:
 	rm -rf extension/node_modules
 	@echo "✅ Clean complete!"
 
-# ===========================
-# Local Postgres (Docker)
-# ===========================
-
-## Ensure the local Postgres dev container is running (creates it if missing)
-pg-start:
-	@if docker ps --filter "name=^$(PG_CONTAINER)$$" --format "{{.Names}}" 2>/dev/null | grep -q "$(PG_CONTAINER)"; then \
-		echo "✅ Postgres already running ($(PG_CONTAINER))"; \
-	else \
-		echo "🐘 Starting local Postgres container..."; \
-		docker compose up -d postgres; \
-		echo "⏳ Waiting for Postgres to be ready..."; \
-		for i in $$(seq 1 30); do \
-			if docker exec $(PG_CONTAINER) pg_isready -U conductor -q 2>/dev/null; then \
-				echo "✅ Postgres is ready!"; \
-				echo "   Connection URL: postgresql://conductor:conductor@localhost:5432/conductor"; \
-				break; \
-			fi; \
-			sleep 1; \
-		done; \
-	fi
-
-## Stop the local Postgres dev container (data is preserved)
-pg-stop:
-	@docker stop $(PG_CONTAINER) 2>/dev/null \
-		&& echo "⏹️  Postgres stopped ($(PG_CONTAINER))" \
-		|| echo "⚠️  Postgres was not running"
-
-## Remove the local Postgres container (data volume is preserved)
-pg-rm:
-	@docker rm -f $(PG_CONTAINER) 2>/dev/null \
-		&& echo "🗑️  Postgres container removed" \
-		|| echo "⚠️  No container to remove"
-
-## Remove the Postgres container AND its data volume (full reset)
-pg-clean:
-	@docker rm -f $(PG_CONTAINER) 2>/dev/null || true
-	@docker volume rm conductor_pgdata 2>/dev/null && echo "🗑️  Postgres container and data volume removed" || echo "⚠️  Volume not found"
 
 # ===========================
 # Help
@@ -253,15 +207,6 @@ help:
 	@echo "  make compile-css      - Build Tailwind CSS only"
 	@echo "  make package          - Package extension as .vsix (compiles first)"
 	@echo ""
-	@echo "Local Postgres (Docker):"
-	@echo "  make pg-start         - Start local Postgres container (creates if missing)"
-	@echo "  make pg-stop          - Stop Postgres container (data preserved)"
-	@echo "  make pg-rm            - Remove Postgres container (volume preserved)"
-	@echo "  make pg-clean         - Remove container AND data volume (full reset)"
-	@echo ""
 	@echo "Other:"
 	@echo "  make clean            - Remove all generated files"
 	@echo "  make help             - Show this help message"
-	@echo ""
-	@echo "Postgres connection (local dev):"
-	@echo "  URL: postgresql://conductor:conductor@localhost:5432/conductor"

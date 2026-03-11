@@ -47,29 +47,40 @@ backend/
 │   │   ├── service.py               # GitWorkspaceService
 │   │   ├── delegate_broker.py       # DelegateBroker (Model B prep)
 │   │   └── router.py                # /api/git-workspace/ endpoints
-│   ├── code_search/                 # CocoIndex semantic code search
-│   │   ├── service.py               # CodeSearchService (sqlite + postgres backends)
-│   │   ├── embedding_provider.py    # LiteLLM unified + Local SentenceTransformers
-│   │   ├── rerank_provider.py       # 4 reranking backends (abstract + concrete)
-│   │   ├── schemas.py               # Request/response Pydantic models
-│   │   └── router.py                # /api/code-search/ endpoints
-│   ├── repo_graph/                  # RepoMap graph-based context
-│   │   ├── parser.py                # tree-sitter AST + regex fallback
-│   │   ├── graph.py                 # networkx dependency graph + PageRank
-│   │   └── service.py               # RepoMapService (map generation, caching)
-│   └── context/
-│       └── router.py                # /api/context/ hybrid retrieval + reranking
+│   ├── agent_loop/                  # Agentic code intelligence (LLM + tools)
+│   │   ├── service.py               # AgentLoopService — LLM loop, tool dispatch
+│   │   ├── prompts.py               # System prompt for code navigation agent
+│   │   └── router.py                # POST /api/context/query endpoint
+│   ├── code_tools/                  # 13 code intelligence tools
+│   │   ├── schemas.py               # Pydantic models + TOOL_DEFINITIONS for LLM
+│   │   ├── tools.py                 # Tool implementations (grep, AST, call graph, git)
+│   │   └── router.py                # /api/code-tools/ direct access endpoints
+│   ├── langextract/                 # LangExtract + multi-vendor Bedrock integration
+│   │   ├── provider.py              # BedrockLanguageModel — all Bedrock vendors
+│   │   ├── claude_provider.py       # Backwards-compat re-exports from provider.py
+│   │   ├── catalog.py               # BedrockCatalog — dynamic model discovery
+│   │   ├── service.py               # LangExtractService async wrapper
+│   │   └── router.py                # GET /api/langextract/models endpoint
+│   ├── ai_provider/                 # LLM provider abstraction
+│   │   ├── base.py                  # AIProvider ABC + ToolCall/ToolUseResponse
+│   │   ├── claude_bedrock.py        # Bedrock Converse API (+ chat_with_tools)
+│   │   ├── claude_direct.py         # Anthropic Messages API (+ chat_with_tools)
+│   │   ├── openai_provider.py       # OpenAI Chat Completions (+ chat_with_tools)
+│   │   └── resolver.py              # ProviderResolver — health checks, selection
+│   └── repo_graph/                  # AST-based symbol extraction + dependency graph
+│       ├── parser.py                # tree-sitter AST + regex fallback
+│       ├── graph.py                 # networkx dependency graph + PageRank
+│       └── service.py               # RepoMapService (map generation, caching)
 ├── config/
 │   └── conductor.settings.yaml      # Non-secret settings template
 ├── requirements.txt
 └── tests/
     ├── conftest.py                  # Centralized stubs (cocoindex, litellm, etc.)
-    ├── test_embedding_provider.py   # 85+ tests — LiteLLM + Local providers
-    ├── test_rerank_provider.py      # 86 tests — all 4 reranking backends
+    ├── test_code_tools.py           # 52 tests — all 13 code tools + dispatcher
+    ├── test_agent_loop.py           # 21 tests — agent loop + message format conversion
+    ├── test_langextract.py          # 57 tests — Bedrock provider, catalog, service, router
     ├── test_repo_graph.py           # 72 tests — parser + graph + service
     ├── test_config_new.py           # 60+ tests — config + secrets + env vars
-    ├── test_context.py              # 42+ tests — context router + hybrid + reranking
-    ├── test_code_search.py          # 72+ tests — code search service + router
     └── test_git_workspace.py        # Git workspace lifecycle
 ```
 
@@ -91,79 +102,59 @@ extension/src/
     └── index.ts               # VS Code command handlers
 ```
 
-### Embedding Provider Architecture
+### Agentic Code Intelligence Architecture
 
-The `embedding_provider.py` module defines an `EmbeddingProvider` ABC with 2 implementations:
+The code context system uses an **LLM agent loop** instead of a traditional RAG pipeline.
+The agent iteratively calls code tools to navigate the codebase and answer questions.
 
-- **`LocalEmbeddingProvider`** — SentenceTransformers, triggered by `sbert/` model prefix
-- **`LiteLLMEmbeddingProvider`** — unified provider for 100+ backends via LiteLLM
-
-Common model strings:
-
-| Model String | Provider | Dimensions | Cost/1M |
-|-------------|----------|------------|------|
-| `sbert/sentence-transformers/all-MiniLM-L6-v2` | Local | 384 | Free |
-| `bedrock/cohere.embed-v4:0` | AWS Bedrock | 1024 | $0.12 |
-| `text-embedding-3-small` | OpenAI | 1536 | $0.02 |
-| `voyage/voyage-code-3` | Voyage AI | 1024 | $0.06 |
-| `mistral/codestral-embed-2505` | Mistral | 1024 | — |
-
-Default: **bedrock/cohere.embed-v4:0**.
-
-### Reranking Provider Architecture
-
-The `rerank_provider.py` module defines a `RerankProvider` ABC with 4 implementations:
-
-| Provider | Default Model | Cost | Notes |
-|----------|--------------|------|-------|
-| `none` | — | Free | Passthrough (no reranking) |
-| `cohere` | `rerank-v3.5` | $2/1K queries | Direct Cohere API |
-| `bedrock` | `cohere.rerank-v3-5:0` | $2/1K queries | Reuses AWS creds |
-| `cross_encoder` | `ms-marco-MiniLM-L-6-v2` | Free | Local, ~80 MB |
-
-Default: **none** (disabled). Enable for better search precision.
-
-Configuration in `conductor.settings.yaml`:
-```yaml
-code_search:
-  embedding_model: "bedrock/cohere.embed-v4:0"  # Any LiteLLM model string
-  storage_backend: "sqlite"                      # sqlite | postgres
-  incremental: true                              # Only with postgres
-  rerank_backend: "none"                         # none | cohere | bedrock | cross_encoder
-  rerank_top_n: 5
-  rerank_candidates: 20
+```
+User query ("How does auth work?")
+       ↓
+AgentLoopService.run(query, workspace_path)
+       ↓
+  ┌─────────────────────────────────────┐
+  │ LLM decides which tools to call     │
+  │ (via chat_with_tools)               │
+  │   ↓                                 │
+  │ Tool execution (grep, read_file,    │ ← up to 15 iterations
+  │   find_symbol, etc.)                │
+  │   ↓                                 │
+  │ Results fed back to LLM             │
+  └─────────────────────────────────────┘
+       ↓
+AgentResult (answer + context_chunks)
 ```
 
-Credentials in `conductor.secrets.yaml`:
-```yaml
-# All available credentials injected at startup via setdefault()
-aws:
-  access_key_id: "AKIA..."
-  secret_access_key: "..."
-  region: "us-east-1"
-openai:
-  api_key: "sk-..."
-voyage:
-  api_key: "pa-..."
-mistral:
-  api_key: "..."
-cohere:
-  api_key: "..."                   # For Cohere Rerank and/or Embed
-```
+**13 code tools** in `code_tools/tools.py`:
 
-### RepoMap Architecture
+| Tool | Description |
+|------|-------------|
+| `grep` | Regex search across files (excludes .git, node_modules, etc.) |
+| `read_file` | Read file contents with optional line ranges |
+| `list_files` | List directory tree with depth/glob filters |
+| `find_symbol` | AST-based symbol definition search (tree-sitter) |
+| `find_references` | Find symbol usages (grep + AST validation) |
+| `file_outline` | Get all definitions in a file with line numbers |
+| `get_dependencies` | Files this file imports (dependency graph) |
+| `get_dependents` | Files that import this file (reverse dependencies) |
+| `git_log` | Recent commits, optionally per-file |
+| `git_diff` | Diff between two git refs |
+| `ast_search` | Structural AST search via ast-grep (`$VAR`, `$$$MULTI` patterns) |
+| `get_callees` | Functions/methods called within a specific function body |
+| `get_callers` | Functions/methods that call a given function (cross-file) |
 
-The `repo_graph/` module implements Aider-style repository mapping:
+**AI Provider `chat_with_tools()`** — implemented in all 3 providers:
+- `ClaudeBedrockProvider` — Bedrock Converse API `toolConfig`
+- `ClaudeDirectProvider` — Anthropic Messages API `tool_use`
+- `OpenAIProvider` — OpenAI Chat Completions `tools` API
 
-1. **Parser** (`parser.py`): Extract symbol definitions and references from source files using tree-sitter AST parsing (with regex fallback)
-2. **Graph** (`graph.py`): Build a directed dependency graph (file A → file B means A references symbols defined in B). Uses networkx for storage and PageRank computation
-3. **Service** (`service.py`): `RepoMapService` generates text-based repo maps showing top-ranked files and their symbols
+### RepoMap / Symbol Extraction
 
-**Hybrid retrieval** in `context/router.py`:
-- Vector search (CocoIndex) finds semantically similar code
-- Reranking (optional) re-scores candidates for better precision
-- Graph search (PageRank) finds structurally important files
-- PageRank is personalised: biased towards files from vector search
+The `repo_graph/` module provides AST-based symbol extraction used by code tools:
+
+1. **Parser** (`parser.py`): Extract symbol definitions and references using tree-sitter AST (with regex fallback)
+2. **Graph** (`graph.py`): Directed dependency graph (file A → file B). Uses networkx + PageRank
+3. **Service** (`service.py`): RepoMapService for graph building and caching
 
 ### Model A Architecture (Current)
 
@@ -181,43 +172,74 @@ FileSystemProvider mounts conductor://{room_id}/ in VS Code
 
 ## Key Patterns
 
-### EmbeddingProvider Pattern
+### Agent Loop Pattern
 ```python
-from backend.app.code_search.embedding_provider import create_embedding_provider
+from app.agent_loop.service import AgentLoopService
 
-# Factory routes: sbert/ → Local, everything else → LiteLLM
-provider = create_embedding_provider(settings)
-vectors = await provider.embed_texts(["def main(): pass"])  # batch embed
-query_vec = await provider.embed_query("search for main")   # query embed
+agent = AgentLoopService(provider=ai_provider, max_iterations=15)
+result = await agent.run(query="How does auth work?", workspace_path="/path/to/ws")
+# result.answer — LLM's final answer
+# result.context_chunks — code read during the loop
+# result.tool_calls_made — total tools invoked
 ```
 
-### RerankProvider Pattern
+### Code Tools Pattern
 ```python
-from backend.app.code_search.rerank_provider import create_rerank_provider
+from app.code_tools.tools import execute_tool
 
-reranker = create_rerank_provider(settings)  # factory
-results = await reranker.rerank(
-    query="how does authentication work",
-    documents=["chunk1...", "chunk2...", ...],
-    top_n=5,
+result = execute_tool("grep", workspace="/path/to/ws", params={"pattern": "authenticate"})
+# result.success, result.data, result.error
+```
+
+### chat_with_tools Pattern
+```python
+# All 3 providers (Bedrock, Direct, OpenAI) implement chat_with_tools
+response = provider.chat_with_tools(
+    messages=[{"role": "user", "content": [{"text": "Find auth code"}]}],
+    tools=TOOL_DEFINITIONS,  # from code_tools.schemas
+    system="You are a code assistant.",
 )
-# results: List[RerankResult] sorted by relevance score (descending)
+# response.text — model's text output
+# response.tool_calls — List[ToolCall] with id, name, input
+# response.stop_reason — "end_turn", "tool_use", "max_tokens"
 ```
 
-### RepoMapService Pattern
+### LangExtract Pattern
 ```python
-from backend.app.repo_graph.service import RepoMapService
+from app.langextract.service import LangExtractService
+from app.langextract.catalog import BedrockCatalog
+from langextract.data import ExampleData, Extraction
 
-svc = RepoMapService(top_n=10)
-graph = svc.build_graph("/path/to/workspace")        # build or cache
-ranked = svc.get_ranked_files("/path/to/workspace")   # PageRank ranking
-repo_map = svc.generate_repo_map("/path/to/workspace")  # text map
-files = svc.get_context_files(ws, vector_files)       # hybrid merge
+# Optional: attach a catalog for model discovery + inference profile resolution
+catalog = BedrockCatalog(region="eu-west-2")
+catalog.refresh()
+
+svc = LangExtractService(
+    model_id="claude-sonnet-4-20250514",  # or any Bedrock model ID
+    region="eu-west-2",
+    catalog=catalog,
+)
+result = await svc.extract_from_text(
+    text="Meeting notes: Alice will review the PR by March 15...",
+    prompt="Extract people, dates, and action items.",
+    examples=[ExampleData(
+        text="Bob will fix the bug by Friday.",
+        extractions=[
+            Extraction(extraction_class="Person", extraction_text="Bob"),
+            Extraction(extraction_class="Date", extraction_text="Friday"),
+            Extraction(extraction_class="Action", extraction_text="fix the bug"),
+        ],
+    )],
+)
+# result.success, result.documents, result.error
+
+# List available models grouped by vendor
+models_by_vendor = svc.list_available_models()  # {"Anthropic": [...], "Amazon": [...]}
 ```
 
 ### Config Pattern
 ```python
-from backend.app.config import load_settings, _inject_embedding_env_vars
+from app.config import load_settings, _inject_embedding_env_vars
 
 settings = load_settings()                  # loads YAML files
 _inject_embedding_env_vars(settings)        # pushes ALL available secrets → env vars
@@ -228,13 +250,14 @@ _inject_embedding_env_vars(settings)        # pushes ALL available secrets → e
 
 - Backend tests use `pytest` with mocked external dependencies
 - Centralized stubs in `conftest.py` for cocoindex, litellm, sentence_transformers, sqlite_vec
-- LiteLLM embedding provider tested with mocked `litellm.embedding()` calls
-- Local embedding provider tested with mocked SentenceTransformer
-- All reranking providers are tested with mocked API clients
+- **Code tools tests** use real filesystem operations (tmp_path fixtures)
+- **Agent loop tests** use `MockProvider` subclass of `AIProvider` with scripted responses
 - RepoMap tests use real filesystem operations for parser/graph tests
 - tree-sitter and networkx are mocked in import stubs
 - Config tests verify env var injection via `setdefault()` for all credential types
-- Code search tests cover sqlite and postgres backends, incremental processing
+- **LangExtract tests** mock Bedrock/Anthropic API calls and `lx.extract()`
+- ast-grep tests require `ast-grep-cli` installed in the venv
+- Run new tests: `pytest tests/test_code_tools.py tests/test_agent_loop.py tests/test_langextract.py -v`
 
 ## Environment Variables
 
@@ -244,18 +267,11 @@ BACKEND_HOST=0.0.0.0
 BACKEND_PORT=8000
 GIT_WORKSPACE_ROOT=/tmp/conductor_workspaces
 
-# Credentials (all injected by _inject_embedding_env_vars via setdefault)
-AWS_ACCESS_KEY_ID=...            # Bedrock models
-AWS_SECRET_ACCESS_KEY=...        # Bedrock models
-AWS_DEFAULT_REGION=us-east-1     # Bedrock models
-OPENAI_API_KEY=sk-...            # OpenAI models
-VOYAGE_API_KEY=pa-...            # Voyage models
-MISTRAL_API_KEY=...              # Mistral models
-CO_API_KEY=...                   # Cohere (rerank + embed)
-
-# CocoIndex (set by service.py)
-COCOINDEX_CODE_EMBEDDING_MODEL=bedrock/cohere.embed-v4:0
-COCOINDEX_DATABASE_URL=postgresql://...  # Only when storage_backend=postgres
+# AI Provider Credentials (configured in conductor.secrets.yaml)
+AWS_ACCESS_KEY_ID=...            # Bedrock provider
+AWS_SECRET_ACCESS_KEY=...        # Bedrock provider
+AWS_DEFAULT_REGION=us-east-1     # Bedrock provider
+OPENAI_API_KEY=sk-...            # OpenAI provider
 
 # Extension (VS Code settings)
 conductor.backendUrl=http://localhost:8000
@@ -264,14 +280,16 @@ conductor.enableWorkspace=true
 
 ## Recent Changes
 
-- **LiteLLM Unified Embeddings** — replaced 5 hand-written provider classes with `LiteLLMEmbeddingProvider` + `LocalEmbeddingProvider`, supporting 100+ providers via one config field (`embedding_model`)
-- **Postgres Backend + Incremental Processing** — `storage_backend: "postgres"` for production-ready vector storage with incremental re-indexing
-- **Unified Credential Injection** — `_inject_embedding_env_vars()` now injects ALL available secrets via `setdefault()` (never overwrites existing env vars)
-- **Legacy Backward Compatibility** — `_legacy_backend_to_model()` maps old `embedding_backend` values to LiteLLM model strings
-- **Reranking** — 4 configurable reranking backends (`RerankProvider` abstraction) integrated into the context router
-- **RepoMap** — tree-sitter + networkx graph + PageRank for graph-based context
-- **Hybrid retrieval** — vector search + reranking + graph search combined in context router
-- 400+ backend test cases
+- **Agentic Code Intelligence** — replaced RAG pipeline (CocoIndex + embeddings + reranking) with LLM agent loop + 13 code tools. The agent iteratively navigates code to answer questions.
+- **Code Tools** (`code_tools/`) — 13 tool implementations including ast-grep structural search, function-level call graph (get_callers/get_callees), plus the original grep, read_file, list_files, find_symbol, find_references, file_outline, get_dependencies, get_dependents, git_log, git_diff
+- **ast-grep Integration** — structural AST search via ast-grep CLI, supports pattern variables (`$VAR`, `$$$MULTI`), auto-detects language from file extension, meta-variable extraction
+- **Function-Level Call Graph** — `get_callees` finds what a function calls; `get_callers` finds who calls a function. Works with tree-sitter AST and regex fallback.
+- **LangExtract Multi-Vendor Bedrock** (`langextract/`) — `BedrockLanguageModel` provider supports ALL Bedrock models (Claude, Amazon Nova, Llama, Mistral, DeepSeek, Qwen, etc.) via the unified Converse API. `BedrockCatalog` dynamically discovers available models at startup via `list_foundation_models()` + `list_inference_profiles()`, handles `eu.` inference profiles for cross-region models, groups by vendor. `GET /api/langextract/models` endpoint for UI model selection. Backwards-compatible `ClaudeLanguageModel` alias preserved.
+- **Agent Loop** (`agent_loop/`) — `AgentLoopService` drives the LLM loop, dispatches tool calls, collects context chunks
+- **`chat_with_tools()`** — added to all 3 AI providers (Bedrock Converse, Anthropic Messages, OpenAI Chat Completions) for native tool use
+- **`POST /api/context/query`** — new endpoint replacing the old hybrid retrieval context endpoint
+- **RepoMap** — tree-sitter + networkx graph + PageRank (still used by find_symbol, file_outline, dependency tools)
+- 130+ new test cases across code tools, agent loop, and langextract
 
 ## What's Next
 

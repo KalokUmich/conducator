@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -95,22 +95,27 @@ def _write_files(scratch: Path, files: List[RagFileChange]) -> int:
 
 def _get_code_search_service():
     from app.main import app
-    return app.state.code_search_service
+    return getattr(app.state, "code_search_service", None)
+
+
+_RAG_DISABLED_DETAIL = (
+    "RAG pipeline disabled — code search now uses the agent loop "
+    "(POST /api/context/query). The /rag/* endpoints are deprecated."
+)
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoints (deprecated — kept for extension backward-compat)
 # ---------------------------------------------------------------------------
 
 
 @router.post("/reindex", response_model=RagIndexResponse)
 async def rag_reindex(req: RagIndexRequest) -> RagIndexResponse:
-    """Full re-index for *workspace_id*.
+    """Full re-index for *workspace_id*.  **Deprecated.**"""
+    svc = _get_code_search_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail=_RAG_DISABLED_DETAIL)
 
-    Clears existing scratch files, writes all received files, then triggers a
-    forced rebuild of the code index.  Called for the first batch of files at
-    session start.
-    """
     scratch = _get_scratch_dir(req.workspace_id)
 
     # Clear old content so the index reflects the current workspace state.
@@ -121,7 +126,6 @@ async def rag_reindex(req: RagIndexRequest) -> RagIndexResponse:
     files_written = _write_files(scratch, req.files)
     logger.info("[RAG] reindex workspace=%s files=%d", req.workspace_id, files_written)
 
-    svc = _get_code_search_service()
     result = await svc.build_index(str(scratch), force_rebuild=True)
 
     return RagIndexResponse(
@@ -133,16 +137,15 @@ async def rag_reindex(req: RagIndexRequest) -> RagIndexResponse:
 
 @router.post("/index", response_model=RagIndexResponse)
 async def rag_index(req: RagIndexRequest) -> RagIndexResponse:
-    """Incremental index update for *workspace_id*.
+    """Incremental index update for *workspace_id*.  **Deprecated.**"""
+    svc = _get_code_search_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail=_RAG_DISABLED_DETAIL)
 
-    Writes/deletes changed files in the scratch directory, then triggers an
-    incremental rebuild.  Called for all batches after the first reindex.
-    """
     scratch = _get_scratch_dir(req.workspace_id)
     files_written = _write_files(scratch, req.files)
     logger.info("[RAG] index workspace=%s files=%d", req.workspace_id, files_written)
 
-    svc = _get_code_search_service()
     result = await svc.build_index(str(scratch), force_rebuild=False)
 
     return RagIndexResponse(
@@ -154,11 +157,14 @@ async def rag_index(req: RagIndexRequest) -> RagIndexResponse:
 
 @router.post("/search")
 async def rag_search(req: RagSearchRequest) -> dict:
-    """Semantic code search over an indexed workspace."""
+    """Semantic code search over an indexed workspace.  **Deprecated.**"""
+    svc = _get_code_search_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail=_RAG_DISABLED_DETAIL)
+
     scratch = _get_scratch_dir(req.workspace_id)
     file_filter = req.filters.file_pattern if req.filters else None
 
-    svc = _get_code_search_service()
     response = await svc.search(
         query          = req.query,
         workspace_path = str(scratch),

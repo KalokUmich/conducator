@@ -31,6 +31,20 @@ interface CachedEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Blocked path prefixes
+// ---------------------------------------------------------------------------
+
+/**
+ * Top-level path segments that VS Code auto-probes when a workspace folder is
+ * added (e.g. `.vscode/settings.json`, `.git/HEAD`).  The backend intentionally
+ * blocks these with 404, so we short-circuit here to avoid unnecessary network
+ * calls and noisy access-log entries.
+ */
+const _BLOCKED_PREFIXES = new Set([
+    '.vscode', '.idea', '.devcontainer', 'node_modules', '.git',
+]);
+
+// ---------------------------------------------------------------------------
 // ConductorFileSystemProvider
 // ---------------------------------------------------------------------------
 
@@ -128,7 +142,15 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
      */
     async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
         const { workspaceId, filePath } = this._parseUri(uri);
-        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}/stat`;
+
+        // Short-circuit paths the backend intentionally blocks (avoids 404 noise).
+        const firstSegment = filePath.split('/')[0];
+        if (_BLOCKED_PREFIXES.has(firstSegment)) {
+            throw vscode.FileSystemError.FileNotFound(uri);
+        }
+
+        const pathPart = filePath ? `/${this._encodePath(filePath)}` : '';
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files${pathPart}/stat`;
 
         let res: Response;
         try {
@@ -172,14 +194,22 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
      * @throws {vscode.FileSystemError.FileNotFound} when the backend returns 404.
      */
     async readDirectory(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
+        const { workspaceId, filePath } = this._parseUri(uri);
+
+        // Short-circuit blocked paths.
+        const firstSegment = filePath.split('/')[0];
+        if (firstSegment && _BLOCKED_PREFIXES.has(firstSegment)) {
+            throw vscode.FileSystemError.FileNotFound(uri);
+        }
+
         const key = uri.toString();
         if (this._directoryCache.has(key)) {
             const cached = this._directoryCache.get(key)!;
             return cached.map((e) => [e.name, e.type]);
         }
 
-        const { workspaceId, filePath } = this._parseUri(uri);
-        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}`;
+        const pathPart = filePath ? `/${this._encodePath(filePath)}` : '';
+        const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files${pathPart}`;
 
         let res: Response;
         try {
@@ -216,6 +246,13 @@ export class ConductorFileSystemProvider implements vscode.FileSystemProvider {
      */
     async readFile(uri: vscode.Uri): Promise<Uint8Array> {
         const { workspaceId, filePath } = this._parseUri(uri);
+
+        // Short-circuit blocked paths.
+        const firstSegment = filePath.split('/')[0];
+        if (_BLOCKED_PREFIXES.has(firstSegment)) {
+            throw vscode.FileSystemError.FileNotFound(uri);
+        }
+
         const url = `${this._getBaseUrl()}/workspace/${encodeURIComponent(workspaceId)}/files/${this._encodePath(filePath)}/content`;
 
         let res: Response;

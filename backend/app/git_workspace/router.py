@@ -58,6 +58,22 @@ def get_delegate_broker() -> DelegateBroker:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 
+@router.get("/token-cache")
+async def list_token_cache(
+    svc: GitWorkspaceService = Depends(get_git_service),
+) -> dict:
+    """List cached repo tokens (tokens redacted).
+
+    Returns metadata about which repos have cached credentials, and when they
+    expire.  Useful for debugging authentication issues.
+    """
+    cache = svc.token_cache
+    if cache is None:
+        return {"enabled": False, "entries": []}
+    entries = cache.list_entries()
+    return {"enabled": True, "count": len(entries), "entries": entries}
+
+
 @router.get("/health", response_model=GitWorkspaceHealth)
 async def health(
     svc: GitWorkspaceService = Depends(get_git_service),
@@ -135,18 +151,37 @@ async def index_workspace(
     room_id: str,
     svc: GitWorkspaceService = Depends(get_git_service),
 ) -> SetupAndIndexResult:
-    """Trigger code-search indexing for an already-ready workspace."""
+    """Trigger code-search indexing for an already-ready workspace.
+
+    **Deprecated** — code search now uses the agent loop (POST /api/context/query).
+    This endpoint returns a no-op success when the code_search_service is not
+    configured, so older extensions don't break.
+    """
     info = svc.get_workspace(room_id)
     if info is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Workspace not found")
     if info.status != WorktreeStatus.READY:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Workspace not ready (status={info.status})")
 
+    # Use the shared index worktree (one per repo) instead of the
+    # room-specific worktree so all rooms on the same repo share the index.
+    index_wt = svc.get_index_worktree_path(room_id)
+    if index_wt is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Index worktree not available yet")
+
+    from app.main import app as _app
+    code_search_svc = getattr(_app.state, "code_search_service", None)
+    if code_search_svc is None:
+        return SetupAndIndexResult(
+            room_id=room_id,
+            workspace=info,
+            index_success=True,
+            message="Indexing skipped — code search uses agent loop now.",
+        )
+
     try:
-        from app.main import app as _app
-        code_search_svc = _app.state.code_search_service
         index_result = await code_search_svc.build_index(
-            workspace_path=info.worktree_path,
+            workspace_path=str(index_wt),
             force_rebuild=False,
         )
         return SetupAndIndexResult(

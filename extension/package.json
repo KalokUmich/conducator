@@ -10,7 +10,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:aiCollabView"
+    "onView:aiCollabView",
+    "onFileSystem:conductor"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -32,6 +33,10 @@
           "visibility": "visible"
         }
       ]
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Conductor remote workspaces via conductor:// URI scheme"
     },
     "commands": [
       {

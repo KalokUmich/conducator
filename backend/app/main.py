@@ -3,18 +3,10 @@
 Lifespan initializes:
   * Database connection pool
   * Git Workspace Service (replaces Live Share)
-  * CocoIndex Code Search Service (replaces home-built RAG)
-  * Embedding Provider via LiteLLM (100+ backends, single model string)
-  * RepoMap Graph Service (Aider-style file dependency graph + PageRank)
-  * Rerank Provider (configurable: none / cohere / bedrock / cross_encoder)
-  * Optional Postgres backend for incremental processing
+  * AI Provider Resolver (unified — powers summary, agent loop, etc.)
+  * Agent Loop provider (for agentic code search)
+  * Code Tools (code intelligence tools for the agent loop)
   * Ngrok tunnel (when enabled) for external access from VS Code webview
-
-Removed in this version:
-  * FAISS index loading
-  * Bedrock Embeddings initialisation
-  * Old RAG module imports
-  * Hand-written per-provider embedding classes (replaced by LiteLLM)
 
 """
 from __future__ import annotations
@@ -31,14 +23,13 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .config import (
     AppSettings,
     _find_config_file,
-    _inject_embedding_env_vars,
     _load_yaml,
+    get_config,
     load_settings,
 )
 from .git_workspace.service import GitWorkspaceService
 from .git_workspace.delegate_broker import DelegateBroker
-from .code_search.service import CodeSearchService
-from .code_search.rerank_provider import create_rerank_provider
+from .ai_provider.resolver import ProviderResolver, set_resolver
 from .ngrok_service import get_public_url, start_ngrok, stop_ngrok
 
 logger = logging.getLogger(__name__)
@@ -63,43 +54,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.git_workspace_service = git_service
     app.state.delegate_broker       = delegate_broker
 
-    # ---- CocoIndex Code Search ----
-    code_search_service = CodeSearchService()
-    if settings.code_search.enabled:
-        _inject_embedding_env_vars(settings)    # inject secrets → env vars
-        await code_search_service.initialize(settings.code_search)
-        logger.info("CocoIndex Code Search initialized.")
-    app.state.code_search_service = code_search_service
-
-    # ---- RepoMap Graph Service ----
-    repo_map_service = None
-    if settings.code_search.repo_map_enabled:
-        try:
-            from .repo_graph.service import RepoMapService
-            repo_map_service = RepoMapService(
-                top_n=settings.code_search.repo_map_top_n,
-            )
-            logger.info("RepoMap graph service initialized (top_n=%d).",
-                         settings.code_search.repo_map_top_n)
-        except ImportError as exc:
-            logger.warning(
-                "RepoMap dependencies not available (%s). "
-                "Install tree-sitter + networkx to enable.", exc
-            )
-    app.state.repo_map_service = repo_map_service
-
-    # ---- Reranking Service ----
-    rerank_provider = None
+    # ---- AI Provider Resolver ----
+    agent_provider = None
     try:
-        rerank_provider = create_rerank_provider(settings.code_search)
-        logger.info("Rerank provider initialized: %s", rerank_provider.name)
-    except Exception as exc:
-        logger.warning(
-            "Failed to create rerank provider (%s): %s — reranking disabled.",
-            settings.code_search.rerank_backend,
-            exc,
+        conductor_config = get_config()
+        resolver = ProviderResolver(conductor_config)
+        resolver.resolve()
+        set_resolver(resolver)
+        ai_status = resolver.get_status()
+        logger.info(
+            "AI Provider Resolver initialized: active_model=%s, active_provider=%s",
+            ai_status.active_model,
+            ai_status.active_provider,
         )
-    app.state.rerank_provider = rerank_provider
+        # Use the active provider for the agent loop
+        agent_provider = resolver.get_active_provider()
+        if agent_provider:
+            logger.info("Agent loop provider ready.")
+        else:
+            logger.warning("No healthy AI provider — agent loop disabled.")
+    except Exception as exc:
+        logger.warning("Failed to initialize AI provider resolver: %s", exc)
+    app.state.agent_provider = agent_provider
 
     # ---- Ngrok tunnel ----
     # Read ngrok config from raw YAML (not modelled in AppSettings).
@@ -130,12 +106,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             settings.server.host, settings.server.port,
         )
 
+    # ---- Bedrock Model Catalog ----
+    try:
+        _catalog_config = get_config()
+        bedrock_region = _catalog_config.ai_providers.aws_bedrock.region or "eu-west-2"
+        from .langextract.catalog import BedrockCatalog
+        catalog = BedrockCatalog(region=bedrock_region)
+        catalog.refresh()
+        app.state.bedrock_catalog = catalog
+        logger.info("Bedrock catalog: %d models in %s", len(catalog.get_all_models()), bedrock_region)
+    except Exception as exc:
+        logger.warning("Failed to initialize Bedrock catalog: %s", exc)
+        app.state.bedrock_catalog = None
+
     logger.info("Conducator startup complete.")
     yield
     # ---- Shutdown ----
     stop_ngrok()
     await git_service.shutdown()
-    await code_search_service.shutdown()
     logger.info("Conducator shutdown complete.")
 
 
@@ -233,8 +221,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     # --- Routers ---
     from .git_workspace.router import router as git_workspace_router
-    from .code_search.router   import router as code_search_router
-    from .context.router       import router as context_router
+    from .code_tools.router    import router as code_tools_router
+    from .agent_loop.router    import router as agent_loop_router
     from .ai_provider.router   import router as ai_provider_router
     from .audit.router         import router as audit_router
     from .policy.router        import router as policy_router
@@ -247,10 +235,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .files.router         import router as files_router
     from .todos.router         import router as todos_router
     from .workspace_files.router import router as workspace_files_router
+    from .langextract.router     import router as langextract_router
 
     app.include_router(git_workspace_router)
-    app.include_router(code_search_router)
-    app.include_router(context_router)
+    app.include_router(code_tools_router)
+    app.include_router(agent_loop_router)
     app.include_router(ai_provider_router)
     app.include_router(audit_router)
     app.include_router(policy_router)
@@ -263,6 +252,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(files_router)
     app.include_router(todos_router)
     app.include_router(workspace_files_router)
+    app.include_router(langextract_router)
 
     # --- Health check ---
     @app.get("/health", include_in_schema=True)

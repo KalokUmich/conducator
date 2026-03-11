@@ -9,25 +9,6 @@ pyyaml
 pyngrok
 python-multipart
 boto3
-numpy
-
-# --- Code Search (CocoIndex) ---
-# Core indexing and vector search engine
-cocoindex-code
-# Vector storage backend used by CocoIndex (embedded)
-sqlite-vec
-
-# --- LiteLLM (unified embedding provider) ---
-# Supports 100+ embedding providers via single interface
-# Replaces separate openai, voyageai, mistralai packages
-litellm
-
-# --- Local embedding fallback (free, no API key) ---
-sentence-transformers
-
-# --- Reranking Providers ---
-# Cohere Rerank API (rerank-v3.5)
-cohere
 
 # --- RepoMap (Graph-Based Context) ---
 # Dependency graph construction and PageRank
@@ -35,8 +16,11 @@ networkx
 # AST parsing for symbol extraction (Python, JS, TS, Go, Rust, etc.)
 tree-sitter-languages
 
-# --- Postgres backend (for incremental processing) ---
-# Used by cocoindex to store state-tracking (lineage) in Postgres.
-# The vector index itself stays in sqlite-vec; Postgres enables
-# incremental re-indexing (only changed files are re-processed).
-psycopg2-binary
+# --- ast-grep (Structural Code Search) ---
+# Used by ast_search tool for AST-pattern matching
+ast-grep-cli
+
+# --- LangExtract (Structured Document Extraction) ---
+# Google's LLM-powered extraction with custom Claude/Bedrock provider
+langextract
+

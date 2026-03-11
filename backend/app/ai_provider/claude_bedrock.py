@@ -7,6 +7,7 @@ The Converse API is AWS Bedrock's unified API that supports:
 - All Claude models (Claude 3, Claude 3.5, Claude 4, etc.)
 - Cross-region inference profiles (e.g., us.anthropic.claude-sonnet-4-5-20250929-v1:0)
 - Single-region models (e.g., anthropic.claude-3-haiku-20240307-v1:0)
+- Tool use (function calling) via toolConfig
 
 Usage:
     provider = ClaudeBedrockProvider(
@@ -19,9 +20,9 @@ Usage:
 """
 import json
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from .base import AIProvider, ChatMessage, DecisionSummary
+from .base import AIProvider, ChatMessage, DecisionSummary, ToolCall, ToolUseResponse
 from .pipeline import _strip_markdown_code_block
 from .prompts import get_summary_prompt
 
@@ -264,3 +265,68 @@ class ClaudeBedrockProvider(AIProvider):
 
         response = client.converse(**kwargs)
         return response["output"]["message"]["content"][0]["text"].strip()
+
+    def chat_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        max_tokens: int = 4096,
+        system: str | None = None,
+    ) -> ToolUseResponse:
+        """Send messages with tool definitions via the Bedrock Converse API.
+
+        The Converse API natively supports toolConfig for function calling.
+        Tool definitions use the Bedrock toolSpec format.
+        """
+        client = self._get_client()
+
+        # Convert tool definitions to Bedrock toolConfig format
+        tool_specs = []
+        for tool in tools:
+            spec = {
+                "toolSpec": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "inputSchema": {
+                        "json": tool.get("input_schema", {}),
+                    },
+                }
+            }
+            tool_specs.append(spec)
+
+        kwargs: dict = {
+            "modelId": self.model_id,
+            "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens},
+            "toolConfig": {"tools": tool_specs},
+        }
+        if system:
+            kwargs["system"] = [{"text": system}]
+
+        response = client.converse(**kwargs)
+
+        # Parse the response
+        output = response.get("output", {}).get("message", {})
+        content_blocks = output.get("content", [])
+        stop_reason = response.get("stopReason", "end_turn")
+
+        text_parts = []
+        tool_calls = []
+
+        for block in content_blocks:
+            if "text" in block:
+                text_parts.append(block["text"])
+            elif "toolUse" in block:
+                tu = block["toolUse"]
+                tool_calls.append(ToolCall(
+                    id=tu["toolUseId"],
+                    name=tu["name"],
+                    input=tu.get("input", {}),
+                ))
+
+        return ToolUseResponse(
+            text="\n".join(text_parts),
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            raw=response,
+        )

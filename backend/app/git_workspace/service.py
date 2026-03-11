@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from .credential_store import CredentialStore
+from .token_cache import RepoTokenCache
 from .schemas import (
     CloneProgress,
     CredentialPayload,
@@ -49,6 +50,7 @@ class _WorktreeRecord:
 
     __slots__ = (
         "room_id", "repo_url", "branch", "worktree_path",
+        "repo_hash", "base_branch_name",
         "status", "created_at", "last_synced", "error_detail",
         "clone_progress",
     )
@@ -59,11 +61,15 @@ class _WorktreeRecord:
         repo_url: str,
         branch: str,
         worktree_path: Path,
+        repo_hash: str = "",
+        base_branch_name: str = "main",
     ) -> None:
         self.room_id       = room_id
         self.repo_url      = repo_url
         self.branch        = branch
         self.worktree_path = worktree_path
+        self.repo_hash          = repo_hash
+        self.base_branch_name   = base_branch_name
         self.status        = WorktreeStatus.PENDING
         self.created_at    = datetime.now(timezone.utc)
         self.last_synced:  Optional[datetime] = None
@@ -130,6 +136,7 @@ class GitWorkspaceService:
         self._workspaces_dir: Path = Path("./workspaces")
         self._worktrees: Dict[str, _WorktreeRecord] = {}
         self._credential_store = CredentialStore()
+        self._token_cache: Optional[RepoTokenCache] = None
         self._broadcast_callbacks: Dict[str, list] = {}  # room_id → [callbacks]
         self._max_worktrees: int = 20
         self._cleanup_on_close: bool = True
@@ -146,6 +153,18 @@ class GitWorkspaceService:
         self._cleanup_on_close = settings.cleanup_on_room_close
         self._workspaces_dir.mkdir(parents=True, exist_ok=True)
         await self._credential_store.start()
+
+        # Persistent repo-scoped token cache (survives restarts)
+        try:
+            self._token_cache = RepoTokenCache(
+                db_path=self._workspaces_dir / "token_cache.db",
+            )
+            self._token_cache.open()
+        except Exception as exc:
+            logger.warning("Failed to open token cache: %s", exc)
+            self._token_cache = None
+
+        await self._recover_worktrees()
         self._initialized = True
         logger.info(
             "GitWorkspaceService initialized (dir=%s, auth_mode=%s)",
@@ -156,6 +175,8 @@ class GitWorkspaceService:
     async def shutdown(self) -> None:
         """Graceful shutdown — wipe credentials."""
         await self._credential_store.stop()
+        if self._token_cache:
+            self._token_cache.close()
         self._initialized = False
         logger.info("GitWorkspaceService shut down.")
 
@@ -220,9 +241,21 @@ class GitWorkspaceService:
         if req.room_id in self._worktrees:
             return self._worktrees[req.room_id].to_info()
 
-        # Store credentials if supplied (Mode A)
-        if req.credentials:
-            await self._credential_store.put(req.room_id, req.credentials)
+        # Resolve credentials:
+        # 1. Use explicitly provided credentials (Mode A)
+        # 2. Fall back to cached token for this repo (if available)
+        effective_creds = req.credentials
+        if effective_creds is None and self._token_cache:
+            cached = self._token_cache.get(req.repo_url)
+            if cached:
+                effective_creds = cached
+                logger.info(
+                    "Room %s: using cached token for repo %s",
+                    req.room_id, req.repo_url,
+                )
+
+        if effective_creds:
+            await self._credential_store.put(req.room_id, effective_creds)
 
         repo_hash    = hashlib.sha256(req.repo_url.encode()).hexdigest()[:12]
         repo_dir     = self._workspaces_dir / repo_hash
@@ -236,6 +269,8 @@ class GitWorkspaceService:
             repo_url      = req.repo_url,
             branch        = branch,
             worktree_path = worktree_path,
+            repo_hash          = repo_hash,
+            base_branch_name   = req.base_branch,
         )
         self._worktrees[req.room_id] = record
 
@@ -298,10 +333,77 @@ class GitWorkspaceService:
             record.last_synced = datetime.now(timezone.utc)
             logger.info("Worktree ready for room %s at %s", req.room_id, record.worktree_path)
 
+            # --- 3. Cache the token (only if explicitly provided by caller) ---
+            # We cache only after a successful clone so we know the token works.
+            # We do NOT cache tokens that were themselves retrieved from cache to
+            # avoid accidentally resetting their original expiry.
+            if req.credentials and self._token_cache:
+                try:
+                    self._token_cache.put(req.repo_url, req.credentials)
+                except Exception as exc:
+                    logger.warning("Could not cache token for repo %s: %s", req.repo_url, exc)
+
+            # --- 4. Ensure the shared index worktree exists for this repo ---
+            await self._ensure_index_worktree(
+                bare_dir=bare_dir,
+                worktrees_dir=worktrees_dir,
+                base_branch=req.base_branch,
+                env=env,
+            )
+
         except Exception as exc:  # pylint: disable=broad-except
             record.status       = WorktreeStatus.ERROR
             record.error_detail = str(exc)
             logger.error("Failed to set up worktree for room %s: %s", req.room_id, exc)
+
+    async def _ensure_index_worktree(
+        self,
+        bare_dir: Path,
+        worktrees_dir: Path,
+        base_branch: str,
+        env: Dict[str, str],
+    ) -> None:
+        """Create a shared index worktree for the repo if it doesn't exist.
+
+        The index worktree lives at ``worktrees/_index/`` and is checked out
+        on the original base branch.  All rooms that use the same repo share
+        this single worktree for code-search indexing.
+        """
+        index_wt = worktrees_dir / "_index"
+        if index_wt.exists():
+            return
+
+        abs_index_wt = str(index_wt.resolve())
+        logger.info(
+            "Creating shared index worktree at %s (branch=%s)",
+            abs_index_wt, base_branch,
+        )
+        await self._run_git(
+            [
+                "-C", str(bare_dir),
+                "worktree", "add", "--detach",
+                abs_index_wt,
+                base_branch,
+            ],
+            env=env,
+        )
+        logger.info("Shared index worktree ready at %s", abs_index_wt)
+
+    # ------------------------------------------------------------------
+    # Index worktree accessor
+    # ------------------------------------------------------------------
+
+    def get_index_worktree_path(self, room_id: str) -> Optional[Path]:
+        """Return the shared index worktree path for the repo that *room_id* belongs to.
+
+        All rooms on the same repo share a single index worktree at
+        ``workspaces/{repo_hash}/worktrees/_index/``.
+        """
+        record = self._worktrees.get(room_id)
+        if record is None:
+            return None
+        index_wt = self._workspaces_dir / record.repo_hash / "worktrees" / "_index"
+        return index_wt if index_wt.exists() else None
 
     # ------------------------------------------------------------------
     # Sync (pull)
@@ -413,6 +515,11 @@ class GitWorkspaceService:
         record = self._worktrees.get(room_id)
         return record.worktree_path if record else None
 
+    @property
+    def token_cache(self) -> Optional[RepoTokenCache]:
+        """Expose the repo token cache for diagnostics and testing."""
+        return self._token_cache
+
     def list_workspaces(self) -> List[WorkspaceInfo]:
         return [r.to_info() for r in self._worktrees.values()]
 
@@ -453,6 +560,73 @@ class GitWorkspaceService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _recover_worktrees(self) -> None:
+        """Scan the workspaces directory and recover in-memory records for any
+        worktrees that already exist on disk.
+
+        Called once at startup so that a backend restart doesn't lose the
+        mapping from room_id → worktree_path.  Only sets the fields needed to
+        serve file-system and code-search requests; credentials are NOT
+        recovered (they are ephemeral by design).
+        """
+        if not self._workspaces_dir.exists():
+            return
+
+        recovered = 0
+        for repo_dir in self._workspaces_dir.iterdir():
+            if not repo_dir.is_dir():
+                continue
+            repo_hash = repo_dir.name
+            worktrees_dir = repo_dir / "worktrees"
+            if not worktrees_dir.is_dir():
+                continue
+
+            # Try to get the remote URL from the bare clone (best-effort)
+            bare_dir = repo_dir / "bare.git"
+            repo_url = ""
+            if bare_dir.exists():
+                try:
+                    repo_url = await self._run_git(
+                        ["remote", "get-url", "origin"], cwd=bare_dir
+                    )
+                except Exception:
+                    pass
+
+            for wt_dir in worktrees_dir.iterdir():
+                if not wt_dir.is_dir():
+                    continue
+                room_id = wt_dir.name
+                if room_id == "_index":
+                    continue  # shared index worktree — not a room
+
+                if room_id in self._worktrees:
+                    continue  # already registered
+
+                # Read current branch from git
+                branch = f"session/{room_id}"
+                try:
+                    branch = await self._run_git(
+                        ["rev-parse", "--abbrev-ref", "HEAD"], cwd=wt_dir
+                    )
+                except Exception:
+                    pass
+
+                record = _WorktreeRecord(
+                    room_id          = room_id,
+                    repo_url         = repo_url,
+                    branch           = branch,
+                    worktree_path    = wt_dir,
+                    repo_hash        = repo_hash,
+                    base_branch_name = "",
+                )
+                record.status      = WorktreeStatus.READY
+                record.last_synced = datetime.now(timezone.utc)
+                self._worktrees[room_id] = record
+                recovered += 1
+
+        if recovered:
+            logger.info("Recovered %d worktree(s) from disk", recovered)
 
     def _get_record(self, room_id: str) -> _WorktreeRecord:
         record = self._worktrees.get(room_id)

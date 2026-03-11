@@ -198,10 +198,6 @@ class CodeSearchSettings(BaseModel):
         "cohere/embed-english-v3.0"                     — Cohere Direct
         "gemini/text-embedding-004"                     — Google Gemini
 
-    Storage backends:
-      * ``sqlite``   – embedded, zero setup (default)
-      * ``postgres`` – incremental processing, concurrent access
-
     Rerank backend choices:
       * ``none``           – No reranking (default)
       * ``cohere``         – Cohere Rerank API (rerank-v3.5)
@@ -217,11 +213,6 @@ class CodeSearchSettings(BaseModel):
     # -- Embedding (LiteLLM model string) --
     embedding_model:     str = "bedrock/eu.cohere.embed-v4:0"
     embedding_dimensions: Optional[int] = None  # Auto-detected for known models
-
-    # -- Storage backend --
-    storage_backend:     Literal["sqlite", "postgres"] = "sqlite"
-    postgres_url:        Optional[str] = None  # e.g. "postgresql://user:pass@host:5432/cocoindex"
-    incremental:         bool = True  # Only effective with postgres backend
 
     # -- Chunking / search --
     chunk_size:          int = 512
@@ -265,8 +256,7 @@ class AppSettings(BaseModel):
 def _inject_embedding_env_vars(settings: AppSettings) -> None:
     """Inject credentials from conductor.secrets.yaml into environment variables.
 
-    LiteLLM and cocoindex-code read credentials from well-known env vars.
-    This function maps our unified secrets config to those env vars so
+    This function maps our unified secrets config to well-known env vars so
     everything works without extra configuration.
 
     The embedding model string (e.g. ``bedrock/cohere.embed-v4:0``) determines
@@ -281,7 +271,6 @@ def _inject_embedding_env_vars(settings: AppSettings) -> None:
         embedding.voyage  → VOYAGE_API_KEY
         embedding.mistral → MISTRAL_API_KEY
         embedding.cohere  → CO_API_KEY
-        Postgres          → COCOINDEX_DATABASE_URL
     """
     emb = settings.secrets.embedding
 
@@ -315,29 +304,7 @@ def _inject_embedding_env_vars(settings: AppSettings) -> None:
     if emb.cohere.api_key:
         os.environ.setdefault("CO_API_KEY", emb.cohere.api_key)
 
-    # Postgres (CocoIndex incremental processing backend)
-    # Priority: code_search.postgres_url (settings) > secrets.database.url (secrets)
-    if settings.code_search.storage_backend == "postgres":
-        pg_url = settings.code_search.postgres_url or secrets.database.url
-        if pg_url:
-            os.environ.setdefault("COCOINDEX_DATABASE_URL", pg_url)
-            logger.info("Injected COCOINDEX_DATABASE_URL for Postgres backend.")
-        else:
-            logger.warning(
-                "storage_backend=postgres but no postgres URL found. "
-                "Set code_search.postgres_url in conductor.settings.yaml "
-                "or database.url in conductor.secrets.yaml."
-            )
-
-    # CocoIndex embedding model env var
-    model = settings.code_search.embedding_model
-    os.environ["COCOINDEX_CODE_EMBEDDING_MODEL"] = model
-
-    logger.info(
-        "Injected embedding env vars (model=%s, storage=%s).",
-        model,
-        settings.code_search.storage_backend,
-    )
+    logger.info("Injected embedding env vars.")
 
 
 # ---------------------------------------------------------------------------
@@ -363,13 +330,12 @@ def load_settings() -> AppSettings:
     app_settings = AppSettings(**settings_data)
     logger.info(
         "Settings loaded (server=%s:%s, git_workspace.enabled=%s, code_search.enabled=%s, "
-        "embedding_model=%s, storage=%s, rerank_backend=%s)",
+        "embedding_model=%s, rerank_backend=%s)",
         app_settings.server.host,
         app_settings.server.port,
         app_settings.git_workspace.enabled,
         app_settings.code_search.enabled,
         app_settings.code_search.embedding_model,
-        app_settings.code_search.storage_backend,
         app_settings.code_search.rerank_backend,
     )
     return app_settings
