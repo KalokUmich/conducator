@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 class GrepParams(BaseModel):
     pattern: str = Field(..., description="Regex pattern to search for.")
     path: Optional[str] = Field(None, description="Relative path within workspace to search (file or directory).")
-    include_glob: Optional[str] = Field(None, description="Glob to filter files, e.g. '*.py' or '**/*.ts'.")
+    include_glob: Optional[str] = Field(None, description="Glob to filter files by extension, e.g. '*.java', '*.py'. Omit to search all files.")
     max_results: int = Field(default=50, ge=1, le=200)
 
 
@@ -113,6 +113,26 @@ class TraceVariableParams(BaseModel):
             "'forward' = trace where the value flows to (call sites, ORM/SQL sinks). "
             "'backward' = trace where the value comes from (callers, HTTP/config sources)."
         ),
+    )
+
+
+class CompressedViewParams(BaseModel):
+    file_path: str = Field(..., description="Relative path to the file to analyze.")
+    focus: Optional[str] = Field(
+        None,
+        description="Optional: focus on a specific symbol name (substring match).",
+    )
+
+
+class ModuleSummaryParams(BaseModel):
+    module_path: str = Field(..., description="Relative path to the module directory (e.g. 'app/auth').")
+
+
+class ExpandSymbolParams(BaseModel):
+    symbol_name: str = Field(..., description="Name of the symbol to expand (e.g. 'PaymentService' or 'process_payment').")
+    file_path: Optional[str] = Field(
+        None,
+        description="File containing the symbol. If omitted, searches the workspace.",
     )
 
 
@@ -221,13 +241,21 @@ class ToolResult(BaseModel):
 # Tool definition schema (for LLM tool_use protocol)
 # ---------------------------------------------------------------------------
 
+def filter_tools(names: List[str]) -> List[Dict[str, Any]]:
+    """Return TOOL_DEFINITIONS filtered to only the given tool names."""
+    name_set = set(names)
+    return [t for t in TOOL_DEFINITIONS if t["name"] in name_set]
+
+
 TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "grep",
         "description": (
             "Search for a regex pattern across files in the workspace. "
             "Returns matching lines with file paths and line numbers. "
-            "Use include_glob to filter by file type (e.g. '*.py')."
+            "Use path to scope search to a subdirectory. "
+            "Only use include_glob if you know the exact file extension (e.g. '*.java', '*.py'). "
+            "Omit include_glob to search ALL file types."
         ),
         "input_schema": GrepParams.model_json_schema(),
     },
@@ -356,7 +384,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "find_tests",
         "description": (
             "Find test functions that test a given function or class. "
-            "Searches test files (test_*.py, *_test.py, *.test.ts, *.spec.ts, *_test.go) "
+            "Searches test files (test_*.py, *_test.py, *.test.ts, *.spec.ts, *_test.go, *Test.java, *_test.rs) "
             "for references to the target and returns the enclosing test function with context. "
             "Useful for understanding test coverage and finding relevant test examples."
         ),
@@ -383,5 +411,34 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "by chaining forward hops across function boundaries."
         ),
         "input_schema": TraceVariableParams.model_json_schema(),
+    },
+    {
+        "name": "compressed_view",
+        "description": (
+            "Return a compressed view of a file showing function/class signatures, "
+            "call relationships, side effects, and exceptions. Saves ~80% tokens vs "
+            "read_file. Use this FIRST to understand a file's structure, then use "
+            "expand_symbol only for specific symbols you need in detail."
+        ),
+        "input_schema": CompressedViewParams.model_json_schema(),
+    },
+    {
+        "name": "module_summary",
+        "description": (
+            "Return a high-level summary of a module/directory: key services, models, "
+            "classes, functions, dependencies, and file list. Saves ~95% tokens vs "
+            "reading all files. Use this when deciding which part of the codebase to "
+            "explore, or when answering architecture questions."
+        ),
+        "input_schema": ModuleSummaryParams.model_json_schema(),
+    },
+    {
+        "name": "expand_symbol",
+        "description": (
+            "Expand a symbol to its full source code. Use after compressed_view when "
+            "you need the complete implementation of a specific function or class. "
+            "Provide file_path for faster lookup, or omit to search the workspace."
+        ),
+        "input_schema": ExpandSymbolParams.model_json_schema(),
     },
 ]

@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from .base import AIProvider, ChatMessage, DecisionSummary, ToolCall, ToolUseResponse
+from .base import AIProvider, ChatMessage, DecisionSummary, TokenUsage, ToolCall, ToolUseResponse
 from .prompts import get_summary_prompt
 
 logger = logging.getLogger(__name__)
@@ -243,8 +243,9 @@ class ClaudeDirectProvider(AIProvider):
             "model": self.model,
             "max_tokens": max_tokens,
             "messages": _converse_to_anthropic(messages),
-            "tools": anthropic_tools,
         }
+        if anthropic_tools:
+            kwargs["tools"] = anthropic_tools
         if system:
             kwargs["system"] = system
 
@@ -263,11 +264,24 @@ class ClaudeDirectProvider(AIProvider):
                     input=block.input,
                 ))
 
+        # Extract token usage from Anthropic Messages API response
+        usage = None
+        if hasattr(response, "usage") and response.usage:
+            u = response.usage
+            usage = TokenUsage(
+                input_tokens=getattr(u, "input_tokens", 0),
+                output_tokens=getattr(u, "output_tokens", 0),
+                total_tokens=getattr(u, "input_tokens", 0) + getattr(u, "output_tokens", 0),
+                cache_read_input_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
+                cache_write_input_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
+            )
+
         return ToolUseResponse(
             text="\n".join(text_parts),
             tool_calls=tool_calls,
             stop_reason=response.stop_reason,
             raw=response,
+            usage=usage,
         )
 
 

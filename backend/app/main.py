@@ -36,6 +36,26 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Logging configuration
+# ---------------------------------------------------------------------------
+
+def _configure_logging() -> None:
+    """Set up logging for all app.* loggers.
+
+    Called once at module import time so all logger.info() calls are visible
+    in the uvicorn console.
+    """
+    log_format = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+    logging.basicConfig(level=logging.INFO, format=log_format, force=True)
+    # Quiet down noisy libraries
+    logging.getLogger("botocore").setLevel(logging.WARNING)
+    logging.getLogger("boto3").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+_configure_logging()
+
+
+# ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 
@@ -73,9 +93,37 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Agent loop provider ready.")
         else:
             logger.warning("No healthy AI provider — agent loop disabled.")
+
+        # Classifier provider (lightweight model for query pre-classification)
+        classifier_provider = resolver.get_classifier_provider()
+        if classifier_provider:
+            logger.info("Classifier provider ready.")
+        else:
+            logger.info("No classifier model configured — using keyword classification.")
     except Exception as exc:
         logger.warning("Failed to initialize AI provider resolver: %s", exc)
+        classifier_provider = None
     app.state.agent_provider = agent_provider
+    app.state.classifier_provider = classifier_provider
+
+    # Auto-enable classifier if a classifier model is available
+    active_classifier_id = None
+    if classifier_provider is not None:
+        status = resolver.get_status()
+        for m in status.models:
+            if m.classifier and m.available:
+                active_classifier_id = m.id
+                break
+    app.state.active_classifier_model_id = active_classifier_id
+
+    # ---- Session Trace Writer ----
+    from .agent_loop.trace import TraceWriter
+    trace_writer = TraceWriter.from_settings(settings.trace)
+    app.state.trace_writer = trace_writer
+    logger.info(
+        "Trace writer: enabled=%s, backend=%s",
+        settings.trace.enabled, settings.trace.backend,
+    )
 
     # ---- Ngrok tunnel ----
     # Read ngrok config from raw YAML (not modelled in AppSettings).
@@ -236,7 +284,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .chat.settings_router import router as chat_settings_router
     from .agent.router         import router as agent_router
     from .auth.router          import router as auth_router
-    from .rag.router           import router as rag_router
     from .files.router         import router as files_router
     from .todos.router         import router as todos_router
     from .workspace_files.router import router as workspace_files_router
@@ -252,7 +299,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(chat_settings_router)
     app.include_router(agent_router)
     app.include_router(auth_router)
-    app.include_router(rag_router)
     app.include_router(files_router)
     app.include_router(todos_router)
     app.include_router(workspace_files_router)

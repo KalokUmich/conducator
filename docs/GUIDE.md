@@ -38,47 +38,67 @@ backend/
 │   ├── config.py                  # Settings + Secrets from YAML, env injection
 │   ├── agent_loop/                # Agentic code intelligence engine
 │   │   ├── service.py             # AgentLoopService — LLM loop + tool dispatch
-│   │   ├── prompts.py             # System prompt for code navigation agent
-│   │   └── router.py             # POST /api/context/query
-│   ├── code_tools/                # 13 code intelligence tools
-│   │   ├── tools.py               # Tool implementations (grep, AST, call graph, git)
+│   │   ├── budget.py              # BudgetController — token-based budget management
+│   │   ├── trace.py               # SessionTrace — per-session JSON trace
+│   │   ├── query_classifier.py    # QueryClassifier — keyword + LLM classification
+│   │   ├── evidence.py            # EvidenceEvaluator — answer quality gate
+│   │   ├── prompts.py             # 3-layer system prompt (Core Identity + Strategy + Runtime)
+│   │   └── router.py              # POST /api/context/query (+ /stream)
+│   ├── code_tools/                # 21 code intelligence tools
+│   │   ├── tools.py               # Tool implementations (grep, AST, call graph, git, compressed view)
 │   │   ├── schemas.py             # Pydantic models + TOOL_DEFINITIONS for LLM
-│   │   └── router.py             # /api/code-tools/ direct endpoints
+│   │   ├── output_policy.py       # Per-tool truncation policies (budget-adaptive)
+│   │   └── router.py              # /api/code-tools/ direct endpoints
 │   ├── ai_provider/               # LLM provider abstraction layer
-│   │   ├── base.py                # AIProvider ABC + ToolCall/ToolUseResponse
-│   │   ├── claude_bedrock.py      # AWS Bedrock Converse API
-│   │   ├── claude_direct.py       # Anthropic Messages API
-│   │   ├── openai_provider.py     # OpenAI Chat Completions
-│   │   └── resolver.py           # ProviderResolver — health checks, selection
+│   │   ├── base.py                # AIProvider ABC + ToolCall/ToolUseResponse/TokenUsage
+│   │   ├── claude_bedrock.py      # AWS Bedrock Converse API (+ chat_with_tools)
+│   │   ├── claude_direct.py       # Anthropic Messages API (+ chat_with_tools)
+│   │   ├── openai_provider.py     # OpenAI Chat Completions (+ chat_with_tools)
+│   │   └── resolver.py            # ProviderResolver — health checks, selection
 │   ├── chat/                      # WebSocket + HTTP chat endpoints
-│   │   ├── router.py             # WebSocket handler, HTTP history/AI message
-│   │   ├── manager.py            # Room state, user list, broadcast
-│   │   └── stack_trace_parser.py # Parse exception stack traces
+│   │   ├── router.py              # WebSocket handler, HTTP history/AI message
+│   │   ├── manager.py             # Room state, user list, broadcast
+│   │   └── stack_trace_parser.py  # Parse exception stack traces
 │   ├── git_workspace/             # Git worktree management
-│   │   ├── service.py            # GitWorkspaceService
-│   │   ├── delegate_broker.py    # DelegateBroker (Model B)
-│   │   └── router.py            # /api/git-workspace/ endpoints
+│   │   ├── service.py             # GitWorkspaceService
+│   │   ├── delegate_broker.py     # DelegateBroker (Model B prep)
+│   │   └── router.py              # /api/git-workspace/ endpoints
+│   ├── langextract/               # LangExtract + multi-vendor Bedrock integration
+│   │   ├── provider.py            # BedrockLanguageModel — all Bedrock vendors
+│   │   ├── claude_provider.py     # Backwards-compat re-exports
+│   │   ├── catalog.py             # BedrockCatalog — dynamic model discovery
+│   │   ├── service.py             # LangExtractService async wrapper
+│   │   └── router.py              # GET /api/langextract/models
+│   ├── repo_graph/                # AST symbol graph (used by code tools)
+│   │   ├── parser.py              # tree-sitter AST + regex fallback
+│   │   ├── graph.py               # networkx dependency graph + PageRank
+│   │   └── service.py             # RepoMapService (map generation, caching)
 │   ├── files/                     # File upload/download (DuckDB metadata)
 │   ├── audit/                     # DuckDB audit log (apply/skip events)
 │   ├── todos/                     # DuckDB-backed TODO tracker per room
 │   ├── auth/                      # AWS SSO + Google SSO
-│   ├── langextract/               # LangExtract + Claude integration
-│   ├── repo_graph/                # AST symbol graph (used by code tools)
 │   ├── agent/                     # MockAgent + style-driven code generation
 │   ├── policy/                    # Auto-apply policy evaluation
 │   └── workspace_files/           # Per-workspace file CRUD endpoints
 ├── config/
-│   ├── conductor.settings.yaml   # Non-secret settings template
-│   └── conductor.secrets.yaml    # API keys (gitignored)
+│   ├── conductor.settings.yaml    # Non-secret settings template
+│   └── conductor.secrets.yaml     # API keys (gitignored)
 ├── requirements.txt
 └── tests/
-    ├── conftest.py               # Centralized stubs
-    ├── test_code_tools.py        # 52 tests — all 13 tools + dispatcher
-    ├── test_agent_loop.py        # 21 tests — agent loop + message format
-    ├── test_langextract.py       # 21 tests — Claude provider + service
-    ├── test_repo_graph.py        # 72 tests — parser + graph + service
-    ├── test_config_new.py        # 60+ tests — config + secrets + env vars
-    └── test_chat.py              # Chat room + WebSocket protocol tests
+    ├── conftest.py                # Centralized stubs (cocoindex, litellm, etc.)
+    ├── test_code_tools.py         # 98 tests — all 21 tools + dispatcher + multi-language
+    ├── test_agent_loop.py         # 39 tests — agent loop + 3-layer prompt + workspace layout
+    ├── test_budget_controller.py  # 20 tests — token budget signals, tracking, edge cases
+    ├── test_session_trace.py      # 15 tests — SessionTrace, IterationTrace, save/load
+    ├── test_evidence.py           # 14 tests — evidence evaluator
+    ├── test_symbol_role.py        # 24 tests — symbol role classification + sorting
+    ├── test_output_policy.py      # 19 tests — per-tool truncation, budget adaptation
+    ├── test_query_classifier.py   # 26 tests — keyword + LLM classification, dynamic tool sets
+    ├── test_compressed_tools.py   # 24 tests — compressed_view, module_summary, expand_symbol
+    ├── test_langextract.py        # 57 tests — Bedrock provider, catalog, service, router
+    ├── test_repo_graph.py         # 72 tests — parser + graph + service
+    ├── test_config_new.py         # 27 tests — config + secrets
+    └── test_git_workspace.py      # Git workspace lifecycle
 ```
 
 **Why this layout? / 为什么这样组织代码？**
@@ -228,31 +248,44 @@ This is the core innovation of the current architecture. Instead of a traditiona
 ```
 User query ("How does auth work?")
        ↓
-AgentLoopService.run(query, workspace_path)
+QueryClassifier (keyword or LLM-based)
+  → query_type, strategy hint, dynamic tool_set (8-12 of 21)
        ↓
-  ┌───────────────────────────────────────────┐
-  │ LLM decides which tools to call           │
-  │   ↓                                       │
-  │ Tool execution (grep, read_file, etc.)    │ ← up to 15 iterations
-  │   ↓                                       │
-  │ Results fed back to LLM as tool_result    │
-  └───────────────────────────────────────────┘
+3-Layer System Prompt:
+  L1: Core Identity (always) — hard constraints, exploration pattern
+  L2: Strategy (per query type) — e.g. "Business Flow Tracing"
+  L3: Runtime Guidance (dynamic) — budget, scatter, convergence
        ↓
-AgentResult(answer, context_chunks, tool_calls_made)
+AgentLoopService.run(query, workspace_path)  [up to 25 iterations / 500K tokens]
+       ↓
+  ┌───────────────────────────────────────────────┐
+  │ LLM decides which tools to call               │
+  │   ↓                                           │
+  │ Tool execution (grep, read_file, etc.)        │
+  │   ↓                                           │
+  │ BudgetController.track(usage)                 │
+  │   → NORMAL / WARN_CONVERGE / FORCE_CONCLUDE   │
+  │   ↓                                           │
+  │ Results + budget context → LLM                │
+  └───────────────────────────────────────────────┘
+       ↓
+EvidenceEvaluator — rejects weak answers, forces re-investigation
+       ↓
+AgentResult(answer, context_chunks, tool_calls_made, budget_summary)
 ```
 
-**中文说明:** 传统 RAG 流程是一次性检索 + 生成，无法处理"先找到函数定义，再跟踪其调用链"这类需要多步推理的问题。Agentic 方式让 LLM 自主决定每一步要调用哪个工具，像人类工程师一样逐步探索代码库。
+**中文说明:** 传统 RAG 流程是一次性检索 + 生成，无法处理"先找到函数定义，再跟踪其调用链"这类需要多步推理的问题。Agentic 方式让 LLM 自主决定每一步要调用哪个工具，像人类工程师一样逐步探索代码库。QueryClassifier 将查询分为 7 种类型并选出最优工具子集；BudgetController 追踪 token 用量并发出三级信号；EvidenceEvaluator 确保答案有具体文件引用才允许输出。
 
-### 4.2 The 13 Code Tools / 13 个代码工具
+### 4.2 The 21 Code Tools / 21 个代码工具
 
-All tools live in `code_tools/tools.py` and share a common `execute_tool(name, workspace, params)` dispatcher:
+All tools live in `code_tools/tools.py` and share a common `execute_tool(name, workspace, params)` dispatcher. The agent sees only the **dynamically selected subset** (8-12 tools) for its query type:
 
 | Tool | Purpose |
 |------|---------|
 | `grep` | Regex search across files (ripgrep, excludes `.git`/`node_modules`) |
 | `read_file` | Read file content with optional line range |
 | `list_files` | Directory tree with depth/glob filter |
-| `find_symbol` | AST-based symbol definition search (tree-sitter) |
+| `find_symbol` | AST-based symbol definition search with role classification |
 | `find_references` | Find symbol usages (grep + AST validation) |
 | `file_outline` | All definitions in a file with line numbers |
 | `get_dependencies` | Files this file imports |
@@ -262,10 +295,54 @@ All tools live in `code_tools/tools.py` and share a common `execute_tool(name, w
 | `ast_search` | Structural AST search via ast-grep (`$VAR`, `$$$MULTI` patterns) |
 | `get_callees` | Functions/methods called within a specific function body |
 | `get_callers` | Functions/methods that call a given function (cross-file) |
+| `git_blame` | Per-line authorship with commit hash, author, date |
+| `git_show` | Full commit details (message + diff) |
+| `find_tests` | Test functions covering a given function/class |
+| `test_outline` | Test file structure with mocks, assertions, fixtures |
+| `trace_variable` | Data flow tracing: aliases, arg→param mapping, sink/source patterns |
+| `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
+| `module_summary` | Module-level summary: services, models, functions (~95% savings) |
+| `expand_symbol` | Expand a compressed symbol to full source code |
 
-**中文说明:** `ast_search` 使用 ast-grep CLI 进行结构化 AST 查询，支持模式变量（`$VAR` 匹配任意节点）。`get_callers`/`get_callees` 实现了函数级调用图，可跨文件追踪函数调用关系。
+**中文说明:** `ast_search` 使用 ast-grep CLI 进行结构化 AST 查询，支持模式变量（`$VAR` 匹配任意节点）。`get_callers`/`get_callees` 实现了函数级调用图，可跨文件追踪函数调用关系。`compressed_view` 和 `module_summary` 用签名代替函数体，可节省 80-95% token；`trace_variable` 支持多跳数据流追踪（HTTP 入参 → SQL WHERE 子句）。
 
-### 4.3 Path Sandboxing / 路径沙箱
+### 4.3 QueryClassifier / 查询分类器
+
+`query_classifier.py` classifies each query into one of **7 types** using keyword matching (fast) or optional LLM pre-classification (Haiku):
+
+| Type | Example Phrases | Strategy |
+|------|----------------|----------|
+| `architecture` | "how is X structured", "overview" | module_summary first |
+| `bug_root_cause` | "why does X fail", "root cause" | git + call graph |
+| `feature_implementation` | "how to add", "implement" | file outline + grep |
+| `code_review` | "review", "code smell" | find_references + test |
+| `explanation` | "explain", "what does X do" | compressed_view + read |
+| `test_coverage` | "test", "coverage" | find_tests + test_outline |
+| `general` | (default) | balanced mix |
+
+Each type selects 8-12 tools from the full 21. This reduces hallucinated tool calls and token waste.
+
+### 4.4 BudgetController / Token 预算控制器
+
+`budget.py` tracks cumulative token usage and emits signals to the agent loop:
+
+- **NORMAL** — below 70% of the 500K token budget
+- **WARN_CONVERGE** — at 70% or diminishing returns detected. Broad searches (grep, find_symbol) are blocked; only verification calls allowed.
+- **FORCE_CONCLUDE** — at 90% or max 25 iterations reached. Agent must produce a final answer immediately.
+
+The LLM sees a compact budget context string each turn so it can self-regulate.
+
+### 4.5 EvidenceEvaluator / 证据评估器
+
+`evidence.py` acts as a quality gate before the agent finalises its answer. It rejects answers that:
+
+- Have no `file:line` references (e.g., `src/auth.py:42`)
+- Were produced with fewer than 2 tool calls
+- Accessed no files during the loop
+
+If budget remains, the evaluator forces the LLM to investigate further. At FORCE_CONCLUDE, the check is bypassed.
+
+### 4.6 Path Sandboxing / 路径沙箱
 
 Every tool enforces that file paths stay within the workspace root:
 
@@ -282,29 +359,36 @@ This prevents directory traversal attacks (`../../etc/passwd`). All paths return
 
 **中文说明:** 所有工具接收和返回的路径都是相对于 workspace 根目录的相对路径，`_resolve()` 函数确保解析后的绝对路径不会超出沙箱范围。
 
-### 4.4 Using the Agent / 如何调用 Agent
+### 4.7 Using the Agent / 如何调用 Agent
 
 ```python
 from app.agent_loop.service import AgentLoopService
+from app.agent_loop.budget import BudgetConfig
 
-agent = AgentLoopService(provider=ai_provider, max_iterations=15)
+agent = AgentLoopService(
+    provider=ai_provider,
+    max_iterations=25,
+    budget_config=BudgetConfig(max_input_tokens=500_000),
+    classifier_provider=haiku_provider,  # optional LLM pre-classification
+    use_llm_classifier=True,
+)
 result = await agent.run(
     query="How does the authentication flow work?",
     workspace_path="/path/to/worktrees/room-123"
 )
-# result.answer         — LLM's final answer
-# result.context_chunks — code snippets read during the loop
+# result.answer          — LLM's final answer
+# result.context_chunks  — code snippets read during the loop
 # result.tool_calls_made — total number of tool calls
+# result.budget_summary  — token usage breakdown
 ```
 
-The HTTP endpoint:
+The HTTP endpoint (supports SSE streaming):
 
 ```bash
 POST /api/context/query
-{
-  "query": "How does auth work?",
-  "room_id": "room-123"
-}
+{ "query": "How does auth work?", "room_id": "room-123" }
+
+POST /api/context/query/stream        # SSE: real-time tool call progress
 ```
 
 ---
@@ -551,14 +635,37 @@ Personal Access Tokens are passed via `GIT_ASKPASS` (see Section 6.3) and never 
 
 ## 10. LangExtract Integration / LangExtract 集成
 
-`langextract/` provides a **Claude language model plugin** for Google's [langextract](https://github.com/google/langextract) library.
+`langextract/` provides a **multi-vendor Bedrock language model plugin** for Google's [langextract](https://github.com/google/langextract) library. It supports all Bedrock vendors (Claude, Amazon Nova, Llama, Mistral, DeepSeek, Qwen) via the unified Converse API.
 
-### 10.1 ClaudeLanguageModel Provider
+### 10.1 BedrockCatalog — Dynamic Model Discovery
+
+```python
+from app.langextract.catalog import BedrockCatalog
+
+catalog = BedrockCatalog(region="eu-west-2")
+catalog.refresh()   # calls list_foundation_models() + list_inference_profiles()
+
+# Group by vendor for UI dropdowns
+models = catalog.models_by_vendor()
+# → {"Anthropic": [...], "Amazon": [...], "Meta": [...], ...}
+
+# Flat list for selection
+ids = catalog.get_model_ids()
+```
+
+`BedrockCatalog` handles `eu.` cross-region inference profile prefixes automatically, making cross-region models available without manual ID construction.
+
+### 10.2 LangExtractService
 
 ```python
 from app.langextract.service import LangExtractService
+from langextract.data import ExampleData, Extraction
 
-svc = LangExtractService(model_id="claude-sonnet-4-20250514")
+svc = LangExtractService(
+    model_id="claude-sonnet-4-20250514",   # or any Bedrock model ID
+    region="eu-west-2",
+    catalog=catalog,   # optional: enables model discovery
+)
 result = await svc.extract_from_text(
     text="Meeting notes: Alice will review the PR by March 15...",
     prompt="Extract people, dates, and action items.",
@@ -571,11 +678,16 @@ result = await svc.extract_from_text(
     )],
 )
 # result.success, result.documents, result.error
+
+# List available models grouped by vendor
+models_by_vendor = svc.list_available_models()
 ```
 
-The `ClaudeLanguageModel` class is registered via `@router.register()` so `lx.extract(model_id="claude-...")` works automatically with langextract's standard API.
+The `BedrockLanguageModel` class (and backwards-compatible `ClaudeLanguageModel` alias) is registered via `@router.register()` so `lx.extract(model_id="claude-...")` works automatically with langextract's standard API.
 
-**中文说明:** `ClaudeLanguageModel` 是 langextract 的提供商插件，注册后可以无缝使用 Claude 模型进行结构化信息提取（人名、日期、动作等）。支持 Bedrock 和 Anthropic Direct 两种后端。
+The `GET /api/langextract/models` endpoint returns the vendor-grouped model list for UI consumption.
+
+**中文说明:** `BedrockLanguageModel` 是 langextract 的 Bedrock 提供商插件，通过统一 Converse API 支持所有 Bedrock 厂商模型。`BedrockCatalog` 在启动时动态发现可用模型，并自动处理跨区域推理配置（`eu.` 前缀）。`ClaudeLanguageModel` 作为向后兼容别名保留。
 
 ---
 
@@ -583,24 +695,40 @@ The `ClaudeLanguageModel` class is registered via `@router.register()` so `lx.ex
 
 ### 11.1 Backend Tests
 
-All backend tests use `pytest`. Run them with:
+All backend tests use `pytest`. Total: **900+ tests**. Run them with:
 
 ```bash
 cd backend
-pytest                             # all tests
-pytest -k "test_agent_loop"        # agent loop tests only
-pytest -k "test_code_tools"        # code tools tests only
-pytest --cov=. --cov-report=html   # coverage report
+pytest                                        # all tests (900+)
+pytest -k "test_agent_loop"                  # agent loop tests only
+pytest -k "test_code_tools"                  # code tools tests only
+pytest -k "test_budget_controller"           # budget controller tests
+pytest -k "test_langextract"                 # langextract tests
+pytest --cov=. --cov-report=html             # coverage report
 ```
 
-**Test structure:**
+**Key test files:**
+
+| File | Tests | What it covers |
+|------|-------|----------------|
+| `test_code_tools.py` | 98 | All 21 tools + dispatcher + multi-language |
+| `test_agent_loop.py` | 39 | Agent loop + 3-layer prompt + workspace layout |
+| `test_budget_controller.py` | 20 | Token budget signals, tracking, WARN/FORCE |
+| `test_session_trace.py` | 15 | SessionTrace JSON save/load |
+| `test_evidence.py` | 14 | Evidence evaluator quality gate |
+| `test_symbol_role.py` | 24 | Symbol role classification + decorator detection |
+| `test_output_policy.py` | 19 | Per-tool truncation, budget adaptation |
+| `test_query_classifier.py` | 26 | Keyword + LLM classification, dynamic tool sets |
+| `test_compressed_tools.py` | 24 | compressed_view, module_summary, expand_symbol |
+| `test_langextract.py` | 57 | Bedrock provider, catalog, service, router |
+| `test_repo_graph.py` | 72 | Parser + graph + PageRank + service |
+| `test_config_new.py` | 27 | Config + secrets (RAG remnants removed) |
+
+**Test infrastructure:**
 - `tests/conftest.py` — centralized stubs for `cocoindex`, `litellm`, `sentence_transformers`, `sqlite_vec`
-- `tests/test_code_tools.py` — 52 tests covering all 13 tools + dispatcher
-- `tests/test_agent_loop.py` — 21 tests for the agent loop (uses `MockProvider`)
-- `tests/test_langextract.py` — 21 tests for Claude provider + service
-- `tests/test_repo_graph.py` — 72 tests for parser + graph + service
-- `tests/test_config_new.py` — 60+ tests for config + secrets + env vars
-- `tests/test_git_workspace.py` — Git workspace lifecycle tests
+- Code tools tests use **real filesystem** (`tmp_path` fixtures), not mocks
+- Agent loop tests use `MockProvider` with scripted `ToolUseResponse` sequences
+- LangExtract tests mock `lx.extract()` and boto3 API calls
 
 ### 11.2 Agent Loop Testing / Agent Loop 测试
 
@@ -614,17 +742,36 @@ class MockProvider(AIProvider):
     def chat_with_tools(self, messages, tools, system=""):
         return next(self._responses)
 
-agent = AgentLoopService(provider=MockProvider([
-    ToolUseResponse(tool_calls=[ToolCall(id="1", name="grep",
-        input={"pattern": "authenticate"})]),
-    ToolUseResponse(text="Auth is handled in auth/router.py", stop_reason="end_turn"),
-]), max_iterations=15)
+agent = AgentLoopService(
+    provider=MockProvider([
+        ToolUseResponse(tool_calls=[ToolCall(id="1", name="grep",
+            input={"pattern": "authenticate"})]),
+        ToolUseResponse(text="Auth is handled in auth/router.py", stop_reason="end_turn"),
+    ]),
+    max_iterations=25,
+    budget_config=BudgetConfig(max_input_tokens=500_000),
+)
 
 result = await agent.run("How does auth work?", "/tmp/ws")
 assert "auth" in result.answer.lower()
+assert result.budget_summary["total_input_tokens"] > 0
 ```
 
-**中文说明:** `MockProvider` 允许在不调用真实 LLM API 的情况下测试 agent loop 的完整流程，包括工具调用、结果注入和迭代逻辑。
+**中文说明:** `MockProvider` 允许在不调用真实 LLM API 的情况下测试 agent loop 的完整流程，包括工具调用、结果注入、迭代逻辑、预算信号和证据验证。
+
+### 11.3 Code Tools Testing / 代码工具测试
+
+Code tool tests create real temporary workspaces with actual source files:
+
+```python
+def test_grep(tmp_path):
+    (tmp_path / "app.py").write_text("def authenticate(user): ...")
+    result = execute_tool("grep", str(tmp_path), {"pattern": "authenticate"})
+    assert result.success
+    assert "app.py" in result.data
+```
+
+This ensures tools work against real file I/O, not mocked filesystems.
 
 ---
 

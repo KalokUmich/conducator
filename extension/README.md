@@ -46,7 +46,7 @@ The extension drives all state through a finite state machine persisted in `glob
 
 #### Code Intelligence
 - **Code snippet sharing** — Extract editor selection and send in chat; recipients can navigate back to the file and line range.
-- **Code explanation** — `explainWithContextPipeline` runs an 8-stage pipeline (symbol extraction → RAG context → LLM explanation) and posts the result to chat.
+- **Agentic code explanation** — Sends a query to `POST /api/context/query/stream` which runs the backend LLM agent loop (up to 25 iterations, 500K token budget, 21 code tools). Progress is streamed via SSE and shown in real-time in the chat sidebar. The final answer is posted as a collapsible AI explanation card that can be expanded/collapsed inline.
 - **Workspace search** — `conductor.searchWorkspace` command: full-text search over the active `conductor://` workspace via `POST /workspace/{room_id}/search`.
 - **Stack trace parsing** — Shares stack traces in chat with resolved file paths and line anchors.
 
@@ -64,9 +64,9 @@ The extension drives all state through a finite state machine persisted in `glob
 
 #### Workspace Indexing
 - On session start, indexes the workspace into a local SQLite DB (`.conductor/`)
-- Extracts AST symbols via `workspaceIndexer` + optional embedding vectors via `EmbeddingQueue`
+- Extracts AST symbols via `workspaceIndexer`
 - Incremental re-scan on branch change; per-file reindex on file save
-- RAG client (`ragClient.ts`) pushes indexed chunks to backend for search
+- Indexed symbols are used by the backend agentic code tools (find_symbol, file_outline, dependency graph)
 
 #### TODO Management
 - Full CRUD: create, list, update, delete TODOs via `/todos/{room_id}`
@@ -226,7 +226,7 @@ Conductor 是一个 VS Code 扩展，提供基于 WebView 的协作侧边栏、G
 
 #### 代码智能
 - **代码片段共享** — 提取当前编辑器选区并发送到聊天；接收方可跳转至对应文件和行范围。
-- **代码解释** — `explainWithContextPipeline` 运行 8 阶段流水线（符号提取 → RAG 上下文 → LLM 解释）并将结果写入聊天。
+- **Agentic 代码解释** — 向 `POST /api/context/query/stream` 发起请求，在后端运行 LLM agent loop（最多 25 轮迭代、50 万 token 预算、21 个代码工具）。进度通过 SSE 实时流式传输并在聊天侧边栏显示。最终答案以可折叠的 AI 解释卡片形式呈现，可在聊天中内联展开/收起。
 - **工作区搜索** — `conductor.searchWorkspace` 命令：通过 `POST /workspace/{room_id}/search` 对活跃 `conductor://` 工作区进行全文搜索。
 - **堆栈追踪解析** — 共享堆栈追踪，并解析文件路径和行号定位。
 
@@ -244,9 +244,9 @@ Conductor 是一个 VS Code 扩展，提供基于 WebView 的协作侧边栏、G
 
 #### 工作区索引
 - 会话启动时将工作区索引写入本地 SQLite DB（`.conductor/`）
-- 通过 `workspaceIndexer` 提取 AST 符号；可选通过 `EmbeddingQueue` 生成向量嵌入
+- 通过 `workspaceIndexer` 提取 AST 符号
 - 分支切换时硬重置索引；文件保存时增量更新
-- `ragClient.ts` 将索引块推送至后端以供搜索
+- 索引符号供后端 Agentic 代码工具使用（find_symbol、file_outline、依赖图）
 
 #### TODO 管理
 - 完整 CRUD：通过 `/todos/{room_id}` 创建、列出、更新、删除 TODO

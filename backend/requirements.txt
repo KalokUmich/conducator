@@ -14,6 +14,8 @@ boto3
 # Dependency graph construction and PageRank
 networkx
 # AST parsing for symbol extraction (Python, JS, TS, Go, Rust, etc.)
+# tree-sitter-languages 1.x requires tree-sitter 0.21.x (Language API changed in 0.22+)
+tree-sitter>=0.21,<0.22
 tree-sitter-languages
 
 # --- ast-grep (Structural Code Search) ---

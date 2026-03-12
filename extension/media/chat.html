@@ -1421,6 +1421,26 @@
                         <p id="ai-model-select-hint" class="text-xs text-gray-500 mt-2">Applies to summarization and code explanation</p>
                     </div>
 
+                    <!-- Classifier Model Selection -->
+                    <div id="ai-classifier-section" class="bg-blue-900/20 rounded-lg border border-blue-700/50 p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                                    <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.669 0-3.218.51-4.5 1.385V4.804z" />
+                                </svg>
+                                <span class="text-blue-300 text-xs font-medium uppercase tracking-wide">Query Classifier</span>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="ai-classifier-toggle" class="sr-only peer">
+                                <div class="w-9 h-5 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+                        <select id="ai-classifier-select" class="w-full bg-gray-900 border border-gray-600 text-white text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                            <option value="">No classifier models available</option>
+                        </select>
+                        <p id="ai-classifier-hint" class="text-xs text-gray-500 mt-2">Lightweight model for pre-classifying queries before the agent loop.</p>
+                    </div>
+
                     <!-- Provider Health List -->
                     <div>
                         <div class="flex items-center justify-between mb-2">
@@ -1970,6 +1990,9 @@
         const aiLastUpdated = document.getElementById('ai-last-updated');
         const aiProvidersList = document.getElementById('ai-providers-list');
         const aiNoProviders = document.getElementById('ai-no-providers');
+        const aiClassifierSection = document.getElementById('ai-classifier-section');
+        const aiClassifierSelect = document.getElementById('ai-classifier-select');
+        const aiClassifierToggle = document.getElementById('ai-classifier-toggle');
 
         // Track models state
         let aiModelsState = [];
@@ -2929,6 +2952,10 @@
                     // Received result of setting AI model
                     console.log('[WebView] Received setAiModelResult:', message.data);
                     handleSetAiModelResult(message.data);
+                    break;
+                case 'setClassifierResult':
+                    console.log('[WebView] Received setClassifierResult:', message.data);
+                    handleSetClassifierResult(message.data);
                     break;
                 case 'summarizeResult':
                     // Received summarize result from extension
@@ -4337,13 +4364,32 @@
             const startLine = aiData.startLine || 1;
             const endLine = aiData.endLine || startLine;
             const lineInfo = startLine === endLine ? `L${startLine}` : `L${startLine}-${endLine}`;
+            const thinkingSteps = aiData.thinking_steps || [];
             const navigateBtnId = `exp-nav-${msg.id || Date.now()}`;
             const collapseBtnId = `exp-collapse-${msg.id || Date.now()}`;
             const bodyId = `exp-body-${msg.id || Date.now()}`;
+            const thinkingBtnId = `exp-thinking-btn-${msg.id || Date.now()}`;
+            const thinkingBodyId = `exp-thinking-body-${msg.id || Date.now()}`;
 
             // Extract model name from displayName format "AI (model.id)"
             const modelMatch = (msg.displayName || '').match(/\((.+)\)/);
             const modelLabel = modelMatch ? abbreviateModelId(modelMatch[1]) : '';
+
+            // Build thinking steps section (collapsed by default)
+            const stepsHtml = _buildThinkingStepsHtml(thinkingSteps);
+            const thinkingSection = stepsHtml ? `
+                <div class="border-b border-emerald-900/30">
+                    <div class="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer select-none hover:bg-emerald-900/10" id="${thinkingBtnId}">
+                        <svg class="thinking-collapse-toggle h-2.5 w-2.5 text-gray-500 flex-shrink-0 transition-transform collapsed" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                        </svg>
+                        <span class="text-[0.65rem] text-gray-500">Thinking process</span>
+                        <span class="text-[0.55rem] text-gray-600">(${thinkingSteps.length} steps)</span>
+                    </div>
+                    <div id="${thinkingBodyId}" class="px-3 pb-2 max-h-64 overflow-y-auto collapsed" style="display:none;">
+                        ${stepsHtml}
+                    </div>
+                </div>` : '';
 
             const div = document.createElement('div');
             div.setAttribute('data-message-id', msg.id || '');
@@ -4363,6 +4409,7 @@
                             ${relativePath ? `<button id="${navigateBtnId}" class="ml-auto text-[0.65rem] text-blue-400 hover:text-blue-300 font-mono truncate max-w-[140px]" title="Navigate to code">${escapeHtml(relativePath)} ${lineInfo}</button>` : ''}
                         </div>
                         <div id="${bodyId}" class="explain-body">
+                            ${thinkingSection}
                             ${code ? `<pre class="px-3 pt-2 pb-1 text-xs font-mono text-gray-300 overflow-x-auto max-h-28 overflow-y-auto border-b border-emerald-900/20 bg-black/20">${escapeHtml(code)}</pre>` : ''}
                             <div class="px-3 py-2.5 text-xs text-gray-200 leading-relaxed break-words">${renderStructuredOrMarkdown(aiData, msg.content || '')}</div>
                         </div>
@@ -4396,6 +4443,24 @@
                 navBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     vscode.postMessage({ command: 'navigateToCode', relativePath, startLine, endLine });
+                });
+            }
+
+            // Collapse/expand toggle for thinking steps
+            const thinkingBtn = document.getElementById(thinkingBtnId);
+            const thinkingBody = document.getElementById(thinkingBodyId);
+            if (thinkingBtn && thinkingBody) {
+                thinkingBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const chevron = thinkingBtn.querySelector('.thinking-collapse-toggle');
+                    const isHidden = thinkingBody.style.display === 'none';
+                    if (isHidden) {
+                        thinkingBody.style.display = 'block';
+                        chevron?.classList.remove('collapsed');
+                    } else {
+                        thinkingBody.style.display = 'none';
+                        chevron?.classList.add('collapsed');
+                    }
                 });
             }
 
@@ -7103,6 +7168,9 @@
             // Update model selection dropdown
             updateModelSelect(data.models || [], data.active_model);
 
+            // Update classifier section
+            updateClassifierSection(data.models || [], data.classifier_enabled, data.active_classifier);
+
             // Update last updated timestamp
             const now = new Date();
             aiLastUpdated.textContent = `Updated ${now.toLocaleTimeString()}`;
@@ -7250,6 +7318,50 @@
         }
 
         /**
+         * Update the classifier section with available classifier models.
+         * @param {Array} models - All model status objects
+         * @param {boolean} classifierEnabled - Whether LLM classification is enabled
+         * @param {string|null} activeClassifier - Currently active classifier model ID
+         */
+        function updateClassifierSection(models, classifierEnabled, activeClassifier) {
+            if (!aiClassifierSection) return;
+
+            // Filter to classifier-capable models (show all, even unavailable — just disable those)
+            const classifierModels = models.filter(m => m.classifier);
+
+            // Update toggle state
+            if (aiClassifierToggle) {
+                aiClassifierToggle.checked = classifierEnabled;
+            }
+
+            // Populate classifier dropdown
+            if (aiClassifierSelect) {
+                aiClassifierSelect.innerHTML = '';
+
+                if (classifierModels.length === 0) {
+                    const option = document.createElement('option');
+                    option.value = '';
+                    option.textContent = 'No classifier models configured';
+                    option.disabled = true;
+                    aiClassifierSelect.appendChild(option);
+                    aiClassifierSelect.disabled = true;
+                } else {
+                    classifierModels.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.id;
+                        option.textContent = model.display_name + (model.available ? '' : ' (unavailable)');
+                        option.disabled = !model.available;
+                        if (model.id === activeClassifier) {
+                            option.selected = true;
+                        }
+                        aiClassifierSelect.appendChild(option);
+                    });
+                    aiClassifierSelect.disabled = false;
+                }
+            }
+        }
+
+        /**
          * Handle model selection change.
          */
         function handleModelChange(modelId) {
@@ -7286,6 +7398,38 @@
             // Status will be refreshed automatically by the extension
         }
 
+        /**
+         * Handle classifier toggle or model selection change.
+         */
+        function handleClassifierChange(enabled, modelId) {
+            console.log('[WebView] Changing classifier:', { enabled, modelId });
+            if (aiClassifierSelect) aiClassifierSelect.disabled = true;
+            if (aiClassifierToggle) aiClassifierToggle.disabled = true;
+            vscode.postMessage({
+                command: 'setClassifier',
+                enabled: enabled,
+                modelId: enabled ? (modelId || null) : null,
+            });
+        }
+
+        /**
+         * Handle result of setting classifier.
+         */
+        function handleSetClassifierResult(data) {
+            if (aiClassifierSelect) aiClassifierSelect.disabled = false;
+            if (aiClassifierToggle) aiClassifierToggle.disabled = false;
+
+            if (data.error) {
+                console.error('[WebView] Failed to set classifier:', data.error);
+                // Refresh to restore correct state
+                fetchAiStatus();
+                return;
+            }
+            console.log('[WebView] Classifier set successfully:', data.message);
+            // Update toggle + dropdown from response
+            if (aiClassifierToggle) aiClassifierToggle.checked = data.classifier_enabled;
+        }
+
         // AI Config modal event listeners
         if (btnAiConfig) {
             btnAiConfig.addEventListener('click', openAiConfigModal);
@@ -7304,6 +7448,18 @@
         if (aiModelSelect) {
             aiModelSelect.addEventListener('change', (e) => {
                 handleModelChange(e.target.value);
+            });
+        }
+        if (aiClassifierToggle) {
+            aiClassifierToggle.addEventListener('change', (e) => {
+                handleClassifierChange(e.target.checked, aiClassifierSelect?.value || null);
+            });
+        }
+        if (aiClassifierSelect) {
+            aiClassifierSelect.addEventListener('change', (e) => {
+                if (aiClassifierToggle && aiClassifierToggle.checked) {
+                    handleClassifierChange(true, e.target.value);
+                }
             });
         }
 

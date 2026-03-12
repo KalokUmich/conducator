@@ -139,6 +139,112 @@ def workspace(tmp_path: Path) -> Path:
         });
     """))
 
+    # Java source + test files
+    (tmp_path / "src" / "main" / "java").mkdir(parents=True)
+    (tmp_path / "src" / "main" / "java" / "AuthService.java").write_text(textwrap.dedent("""\
+        package com.example;
+
+        public class AuthService {
+            public boolean authenticate(String user, String pass) {
+                return user != null && pass != null;
+            }
+        }
+    """))
+    (tmp_path / "src" / "test" / "java").mkdir(parents=True)
+    (tmp_path / "src" / "test" / "java" / "AuthServiceTest.java").write_text(textwrap.dedent("""\
+        package com.example;
+
+        import org.junit.jupiter.api.Test;
+        import org.junit.jupiter.params.ParameterizedTest;
+        import static org.junit.jupiter.api.Assertions.*;
+        import static org.mockito.Mockito.*;
+
+        public class AuthServiceTest {
+
+            @Test
+            public void testAuthenticate() {
+                AuthService svc = new AuthService();
+                assertTrue(svc.authenticate("admin", "pass"));
+            }
+
+            @ParameterizedTest
+            public void testAuthenticateNull() {
+                AuthService svc = new AuthService();
+                assertFalse(svc.authenticate(null, "pass"));
+            }
+
+            @Test
+            public void testWithMock() {
+                AuthService svc = mock(AuthService.class);
+                when(svc.authenticate("a", "b")).thenReturn(true);
+                verify(svc).authenticate("a", "b");
+            }
+        }
+    """))
+
+    # Go source + test files
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "calc.go").write_text(textwrap.dedent("""\
+        package calc
+
+        func Add(a, b int) int {
+            return a + b
+        }
+    """))
+    (tmp_path / "pkg" / "calc_test.go").write_text(textwrap.dedent("""\
+        package calc
+
+        import (
+            "testing"
+            "github.com/stretchr/testify/assert"
+        )
+
+        func TestAdd(t *testing.T) {
+            result := Add(2, 3)
+            assert.Equal(t, 5, result)
+        }
+
+        func TestAddNegative(t *testing.T) {
+            t.Run("negative numbers", func(t *testing.T) {
+                result := Add(-1, -2)
+                t.Fatal("should not reach here")
+            })
+        }
+
+        func BenchmarkAdd(b *testing.B) {
+            for i := 0; i < b.N; i++ {
+                Add(1, 2)
+            }
+        }
+    """))
+
+    # Rust source + test file
+    (tmp_path / "rust_src").mkdir()
+    (tmp_path / "rust_src" / "lib.rs").write_text(textwrap.dedent("""\
+        pub fn multiply(a: i32, b: i32) -> i32 {
+            a * b
+        }
+    """))
+    (tmp_path / "rust_src" / "lib_test.rs").write_text(textwrap.dedent("""\
+        use super::*;
+
+        #[test]
+        fn test_multiply() {
+            assert_eq!(multiply(3, 4), 12);
+        }
+
+        #[test]
+        fn test_multiply_zero() {
+            let result = multiply(0, 5);
+            assert_eq!(result, 0);
+        }
+
+        #[tokio::test]
+        async fn test_async_multiply() {
+            assert!(multiply(2, 3) > 0);
+        }
+    """))
+
     # node_modules (should be excluded)
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "pkg.js").write_text("module.exports = {}")
@@ -655,6 +761,30 @@ class TestFindTests:
             assert m["test_file"]
             assert m["line_number"] > 0
 
+    def test_find_tests_java(self, ws):
+        result = find_tests(ws, name="authenticate")
+        assert result.success
+        java_matches = [m for m in result.data if m["test_file"].endswith(".java")]
+        assert len(java_matches) >= 2
+        names = [m["test_function"] for m in java_matches]
+        assert any("testAuthenticate" in n for n in names)
+
+    def test_find_tests_go(self, ws):
+        result = find_tests(ws, name="Add")
+        assert result.success
+        go_matches = [m for m in result.data if m["test_file"].endswith(".go")]
+        assert len(go_matches) >= 1
+        names = [m["test_function"] for m in go_matches]
+        assert any("TestAdd" in n for n in names)
+
+    def test_find_tests_rust(self, ws):
+        result = find_tests(ws, name="multiply")
+        assert result.success
+        rust_matches = [m for m in result.data if m["test_file"].endswith(".rs")]
+        assert len(rust_matches) >= 1
+        names = [m["test_function"] for m in rust_matches]
+        assert any("test_multiply" in n for n in names)
+
 
 class TestTestOutline:
     def test_python_outline(self, ws):
@@ -690,6 +820,58 @@ class TestTestOutline:
         # Should have describe and it blocks
         kinds = [e["kind"] for e in result.data]
         assert "describe_block" in kinds or "test_function" in kinds
+
+    def test_java_outline(self, ws):
+        result = outline_tests(ws, path="src/test/java/AuthServiceTest.java")
+        assert result.success
+        names = [e["name"] for e in result.data]
+        assert any("testAuthenticate" in n for n in names)
+        assert any("testAuthenticateNull" in n for n in names)
+        assert any("testWithMock" in n for n in names)
+        # Should detect class prefix
+        assert any("AuthServiceTest::" in n for n in names)
+
+    def test_java_outline_mocks(self, ws):
+        result = outline_tests(ws, path="src/test/java/AuthServiceTest.java")
+        assert result.success
+        mock_test = [e for e in result.data if "testWithMock" in e["name"]]
+        assert len(mock_test) == 1
+        assert len(mock_test[0]["mocks"]) >= 1
+
+    def test_java_outline_assertions(self, ws):
+        result = outline_tests(ws, path="src/test/java/AuthServiceTest.java")
+        assert result.success
+        has_asserts = [e for e in result.data if e.get("assertions")]
+        assert len(has_asserts) >= 1
+
+    def test_go_outline(self, ws):
+        result = outline_tests(ws, path="pkg/calc_test.go")
+        assert result.success
+        names = [e["name"] for e in result.data]
+        assert "TestAdd" in names
+        assert "TestAddNegative" in names
+        assert "BenchmarkAdd" in names
+
+    def test_go_outline_assertions(self, ws):
+        result = outline_tests(ws, path="pkg/calc_test.go")
+        assert result.success
+        test_add = [e for e in result.data if e["name"] == "TestAdd"]
+        assert len(test_add) == 1
+        assert len(test_add[0]["assertions"]) >= 1
+
+    def test_rust_outline(self, ws):
+        result = outline_tests(ws, path="rust_src/lib_test.rs")
+        assert result.success
+        names = [e["name"] for e in result.data]
+        assert "test_multiply" in names
+        assert "test_multiply_zero" in names
+        assert "test_async_multiply" in names
+
+    def test_rust_outline_assertions(self, ws):
+        result = outline_tests(ws, path="rust_src/lib_test.rs")
+        assert result.success
+        has_asserts = [e for e in result.data if e.get("assertions")]
+        assert len(has_asserts) >= 2  # test_multiply + test_multiply_zero both have assert_eq!
 
     def test_nonexistent_file(self, ws):
         result = outline_tests(ws, path="missing_test.py")

@@ -571,6 +571,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     console.log('[Conductor] Received setAiModel message from WebView:', message.modelId);
                     this._handleSetAiModel(message.modelId);
                     return;
+                case 'setClassifier':
+                    console.log('[Conductor] Received setClassifier message from WebView:', message.enabled, message.modelId);
+                    this._handleSetClassifier(message.enabled, message.modelId);
+                    return;
                 case 'summarize':
                     this._handleSummarizeAndPost(message.messages);
                     return;
@@ -1564,8 +1568,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 active_provider: string | null;
                 active_model: string | null;
                 providers: Array<{ name: string; enabled: boolean; configured: boolean; healthy: boolean }>;
-                models: Array<{ id: string; provider: string; display_name: string; available: boolean }>;
+                models: Array<{ id: string; provider: string; display_name: string; available: boolean; classifier: boolean }>;
                 default_model: string;
+                classifier_enabled: boolean;
+                active_classifier: string | null;
             };
             console.log('[Conductor] AI status received:', data);
 
@@ -1664,6 +1670,47 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 data: { error: `Cannot connect to backend: ${msg}` }
             });
             // Refresh status to restore UI to current state
+            this._handleGetAiStatus();
+        }
+    }
+
+    /**
+     * Handle request to set the classifier model and enable/disable state.
+     */
+    private async _handleSetClassifier(enabled: boolean, modelId: string | null): Promise<void> {
+        try {
+            console.log('[Conductor] Setting classifier:', { enabled, modelId });
+            const response = await fetch(`${getBackendUrl()}/ai/classifier`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled, model_id: modelId }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.warn('[Conductor] Set classifier failed:', response.status, errorText);
+                this._view?.webview.postMessage({
+                    command: 'setClassifierResult',
+                    data: { error: `Failed to set classifier: ${response.status}` },
+                });
+                this._handleGetAiStatus();
+                return;
+            }
+
+            const data = await response.json();
+            console.log('[Conductor] Classifier set successfully:', data);
+            this._view?.webview.postMessage({
+                command: 'setClassifierResult',
+                data,
+            });
+            this._handleGetAiStatus();
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] Failed to set classifier:', msg);
+            this._view?.webview.postMessage({
+                command: 'setClassifierResult',
+                data: { error: `Cannot connect to backend: ${msg}` },
+            });
             this._handleGetAiStatus();
         }
     }
@@ -3113,6 +3160,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 startLine:    message.startLine,
                 endLine:      message.endLine,
                 structured:   result.structured,
+                thinking_steps: result.thinking_steps,
             });
             const postParams = new URLSearchParams({
                 message_type: 'ai_explanation',
@@ -3546,6 +3594,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 language,
                 model:        result.model,
                 structured:   result.structured,
+                thinking_steps: result.thinking_steps,
             });
             const postParams = new URLSearchParams({
                 message_type: 'ai_explanation',
@@ -3756,11 +3805,20 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols`,
             );
 
-            // 6. Also rebuild the backend-side RAG FAISS index (best-effort).
+            // 6. Invalidate backend-side symbol + graph caches (best-effort).
             const roomId = getSessionService().getRoomId();
-            if (ragClient && roomId) {
-                this._sendWorkspaceToRag(wsRoot, roomId).catch(err => {
-                    console.warn('[Conductor][RebuildIndex] RAG reindex failed:', err);
+            if (roomId) {
+                const backendUrl = getBackendUrl();
+                fetch(`${backendUrl}/api/code-tools/cache/invalidate?room_id=${encodeURIComponent(roomId)}`, {
+                    method: 'POST',
+                }).then(r => {
+                    if (r.ok) {
+                        console.log('[Conductor][RebuildIndex] Backend caches invalidated');
+                    } else {
+                        console.warn('[Conductor][RebuildIndex] Backend cache invalidation failed:', r.status);
+                    }
+                }).catch(err => {
+                    console.warn('[Conductor][RebuildIndex] Backend cache invalidation failed:', err);
                 });
             }
 

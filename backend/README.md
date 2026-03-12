@@ -7,7 +7,7 @@
 <a name="english"></a>
 ## English
 
-Conductor backend is a FastAPI application providing real-time chat, agentic code intelligence (LLM agent loop + 13 code tools), Git workspace management, file sharing, DuckDB-backed audit logs and TODOs, and multi-provider AI (Bedrock / Anthropic / OpenAI).
+Conductor backend is a FastAPI application providing real-time chat, agentic code intelligence (LLM agent loop + 21 code tools + token budget controller + 3-layer prompts), Git workspace management, file sharing, DuckDB-backed audit logs and TODOs, and multi-provider AI (Bedrock / Anthropic / OpenAI).
 
 ### Quick Start
 
@@ -68,7 +68,10 @@ Docs:
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/context/query` | LLM agent loop — iteratively calls 13 code tools to answer code queries |
+| POST | `/api/context/query` | LLM agent loop — iteratively calls 21 code tools (up to 25 iterations, 500K token budget) |
+| POST | `/api/context/query/stream` | SSE streaming — real-time tool call progress events |
+| POST | `/api/context/explain-rich` | Deep code explanation via agent (replaces XML-prompt pipeline) |
+| POST | `/api/context/explain-rich/stream` | SSE streaming for explain-rich |
 | GET | `/api/code-tools/available` | List all available code tools |
 | POST | `/api/code-tools/execute/{tool_name}` | Directly execute a single code tool |
 
@@ -131,16 +134,16 @@ Docs:
 
 ### Agentic Code Intelligence
 
-`POST /api/context/query` runs an LLM agent loop (up to 15 iterations). The agent iteratively invokes code tools to explore the codebase and answer code-navigation questions — no pre-built vector index required.
+`POST /api/context/query` runs an LLM agent loop (up to **25 iterations**, **500K token budget**). The Query Classifier categorises the query into one of 7 types, selects an optimal 8-12 tool subset, and injects a 3-layer system prompt (Core Identity + Strategy + Runtime Guidance). A token-based Budget Controller emits NORMAL / WARN_CONVERGE / FORCE_CONCLUDE signals. An Evidence Evaluator rejects weak answers before finalising. Session Traces are saved as JSON for offline analysis.
 
-**13 code tools:**
+**21 code tools:**
 
 | Tool | Description |
 |------|-------------|
 | `grep` | Regex search (ripgrep) |
 | `read_file` | Read file with optional line range |
 | `list_files` | Directory tree with depth/glob filters |
-| `find_symbol` | AST-based symbol definition search (tree-sitter) |
+| `find_symbol` | AST-based symbol definition search with role classification |
 | `find_references` | Symbol usages (grep + AST validation) |
 | `file_outline` | All definitions in a file with line numbers |
 | `get_dependencies` | Files this file imports |
@@ -150,6 +153,14 @@ Docs:
 | `ast_search` | Structural AST search via ast-grep (`$VAR`, `$$$MULTI` patterns) |
 | `get_callees` | Functions called within a function body |
 | `get_callers` | Functions that call a given function (cross-file) |
+| `git_blame` | Per-line authorship with commit hash, author, date |
+| `git_show` | Full commit details (message + diff) |
+| `find_tests` | Test functions covering a given function/class |
+| `test_outline` | Test file structure with mocks, assertions, fixtures |
+| `trace_variable` | Data flow tracing: alias detection, arg→param mapping, sink/source patterns |
+| `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
+| `module_summary` | Module-level summary: services, models, functions, file list (~95% savings) |
+| `expand_symbol` | Expand a symbol from compressed view to full source code |
 
 ### AI Provider Notes
 
@@ -216,33 +227,45 @@ curl -X POST http://localhost:8000/api/code-tools/execute/grep \
 
 ### Tests
 
-Total: **670 tests**.
+Total: **900+ tests**.
 
 ```bash
 cd backend
 python -m pytest tests/ -v
 python -m pytest tests/ -q
+pytest --cov=. --cov-report=html   # coverage report
 ```
 
-Breakdown:
-- `tests/test_ai_provider.py`: 131
-- `tests/test_repo_graph.py`: 67
-- `tests/test_prompt_builder.py`: 64
-- `tests/test_code_tools.py`: 52
-- `tests/test_git_workspace.py`: 48
-- `tests/test_config_new.py`: 48
-- `tests/test_workspace_files.py`: 39
-- `tests/test_auth.py`: 38
-- `tests/test_chat.py`: 29
-- `tests/test_auto_apply_policy.py`: 28
-- `tests/test_mock_agent.py`: 26
-- `tests/test_style_loader.py`: 22
-- `tests/test_langextract.py`: 21
-- `tests/test_agent_loop.py`: 21
-- `tests/test_room_settings.py`: 18
-- `tests/test_audit.py`: 14
-- `tests/test_config_paths.py`: 3
-- `tests/test_main.py`: 1
+Key test files (agentic code intelligence):
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| `tests/test_code_tools.py` | 98 | All 21 code tools + dispatcher + multi-language |
+| `tests/test_agent_loop.py` | 39 | Agent loop + message format + workspace layout + 3-layer prompt |
+| `tests/test_budget_controller.py` | 20 | Token budget signals, tracking, edge cases |
+| `tests/test_session_trace.py` | 15 | SessionTrace, IterationTrace, save/load |
+| `tests/test_evidence.py` | 14 | Evidence evaluator (file refs, tool calls, budget checks) |
+| `tests/test_symbol_role.py` | 24 | Symbol role classification + sorting + decorator detection |
+| `tests/test_output_policy.py` | 19 | Per-tool truncation policies, budget adaptation |
+| `tests/test_query_classifier.py` | 26 | Keyword + LLM classification, dynamic tool sets |
+| `tests/test_compressed_tools.py` | 24 | compressed_view, module_summary, expand_symbol |
+| `tests/test_langextract.py` | 57 | Bedrock provider, catalog, service, router |
+| `tests/test_repo_graph.py` | 72 | Parser + graph + PageRank + RepoMapService |
+| `tests/test_config_new.py` | 27 | Config + secrets (RAG remnants removed) |
+| `tests/test_git_workspace.py` | — | Git workspace lifecycle |
+
+Additional test files:
+
+- `tests/test_ai_provider.py`: 131 — all 3 AI providers + chat_with_tools + TokenUsage
+- `tests/test_prompt_builder.py`: 64 — prompt construction
+- `tests/test_workspace_files.py`: 39 — workspace file CRUD
+- `tests/test_auth.py`: 38 — AWS SSO + Google OAuth
+- `tests/test_chat.py`: 29 — WebSocket + history + typing indicators
+- `tests/test_auto_apply_policy.py`: 28 — policy evaluation
+- `tests/test_mock_agent.py`: 26 — MockAgent + code generation
+- `tests/test_style_loader.py`: 22 — style templates
+- `tests/test_room_settings.py`: 18 — room settings
+- `tests/test_audit.py`: 14 — audit log
 
 ---
 

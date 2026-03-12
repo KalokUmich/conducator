@@ -19,8 +19,12 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
   - WorkspaceClient typed HTTP client
   - Workspace code search (`GET /workspace/{room_id}/search`)
 - **Agentic Code Intelligence**:
-  - `AgentLoopService` — LLM-driven iterative tool loop (up to 15 iterations)
-  - 18 code tools: `grep`, `read_file`, `list_files`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `find_tests`, `test_outline`, `trace_variable`
+  - `AgentLoopService` — LLM-driven iterative tool loop (up to 25 iterations, 500K token budget)
+  - 21 code tools: `grep`, `read_file`, `list_files`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`
+  - 3-layer system prompt: Core Identity + Strategy (by query type) + Runtime Guidance
+  - Query classifier: keyword matching (default) or LLM pre-classification (Haiku)
+  - Dynamic tool sets: 8-12 tools per query type (reduces LLM confusion)
+  - Token-based budget controller with convergence signals
   - `trace_variable` — data flow tracing with alias detection, argument→parameter mapping, sink/source patterns
   - Workspace reconnaissance — auto-scan project layout + project marker detection
   - `chat_with_tools()` on all 3 AI providers (Bedrock Converse, Anthropic Messages, OpenAI)
@@ -176,7 +180,155 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 - [ ] Session recording and replay
 - [ ] Admin dashboard (active rooms, user count, file stats)
 
-## Phase 5.5: Code Understanding Enhancements (PLANNED)
+## Phase 5.5: Code Understanding Enhancements (IN PROGRESS)
+
+### 5.5.0 Agent Loop Intelligence (IN PROGRESS)
+Optimizations guided by OpenAI review and academic research (ICLR 2026, MutaGReP, DraCo, LingmaAgent, RAG-Gym).
+
+#### Token-Based Budget Controller (COMPLETE)
+- [x] `TokenUsage` dataclass in `ai_provider/base.py` — extracted from all 3 providers (Bedrock, Anthropic Direct, OpenAI)
+- [x] `BudgetController` in `agent_loop/budget.py` — tracks cumulative input/output tokens per session
+- [x] Three budget signals: `NORMAL`, `WARN_CONVERGE` (70% threshold or diminishing returns), `FORCE_CONCLUDE` (90% threshold or max iterations)
+- [x] Diminishing returns detection: if last N iterations found no new files or symbols, signal convergence
+- [x] File/symbol tracking: `track_file()` / `track_symbol()` for dedup-aware progress monitoring
+- [x] Budget context injection: LLM sees token usage, iteration count, files/symbols accessed in each turn
+- [x] Integrated into `AgentLoopService.run_stream()` — replaces iteration-only budget note with token-aware context
+- [x] `budget_summary` dict in `AgentResult` for downstream logging/analysis
+- [x] 20 unit tests covering all signal transitions, tracking, edge cases
+- References: [ICLR 2026 — Token Consumption in Coding Agents](https://openreview.net/forum?id=1bUeVB3fov), [Anthropic — Effective Context Engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+
+#### Structured Session Trace (COMPLETE)
+- [x] `SessionTrace` dataclass in `agent_loop/trace.py` — per-session JSON trace for offline analysis
+- [x] `IterationTrace` + `ToolCallTrace` — per-iteration metrics with per-tool latencies
+- [x] Record LLM latency, tool latencies, token breakdown, budget signals emitted per iteration
+- [x] `trace.save(trace_dir)` persists as `{session_id}.json` for offline analysis
+- [x] Integrated into `AgentLoopService.run_stream()` — traces saved on every exit path
+- [x] `trace_dir` parameter on `AgentLoopService` constructor (opt-in)
+- [x] 15 unit tests covering all trace dataclasses, save/load, aggregation
+- Reference: [RAG-Gym — Process Supervision for Agents](https://arxiv.org/abs/2502.13957)
+
+#### Tool Output Policy (COMPLETE)
+- [x] `output_policy.py` in `code_tools/` — per-tool truncation policies (max_results, max_chars, truncate_unit)
+- [x] Differentiated policies for 18 tools: search tools limit by result count, read_file by lines, git tools generous chars
+- [x] Budget-adaptive: shrink limits by 50% when remaining input tokens < 100K
+- [x] Replaced uniform 30KB hard cutoff with `apply_policy()` in `_tool_result_block()`
+- [x] Line-boundary truncation for `read_file` (truncate_unit="lines")
+- [x] 19 unit tests covering per-tool policies, budget adaptation, edge cases
+
+#### Config Cleanup (COMPLETE)
+- [x] Removed RAG remnants: `EmbeddingSecrets`, `VoyageSecrets`, `MistralSecrets`, `CohereSecrets`, `AwsSecrets`, `OpenAISecrets` (embedding-specific)
+- [x] Removed `_inject_embedding_env_vars()` — no longer needed without embedding pipeline
+- [x] Cleaned `CodeSearchSettings` — kept only `repo_map_enabled` and `repo_map_top_n`
+- [x] Removed RAG router registration from `main.py` (endpoints were already returning 503)
+- [x] Updated `load_settings()` log message to remove embedding/rerank references
+- [x] Updated test suite: `test_config_new.py` rewritten to match cleaned config
+
+#### Query Classifier + LLM Pre-Classification (COMPLETE)
+- [x] Keyword-based classification into 7 query types (entry_point, flow_tracing, root_cause, impact, architecture, config, data_lineage)
+- [x] Per-type strategy suggestion, initial tool hints, and token budget recommendation
+- [x] Classification result injected into initial user message for LLM guidance
+- [x] Integrated into `AgentLoopService.run_stream()` alongside existing `_is_high_level_query`
+- [x] Optional LLM pre-classification via `classify_query_with_llm()` using lightweight model (Haiku) — ~100ms, ~$0.001 per call
+- [x] Configurable in `conductor.settings.yaml` via `classifier.use_llm` and `classifier.model_id`
+- [x] Falls back to keyword matching on LLM failure
+- [x] Dynamic tool set per query type — only 8-12 of 21 tools exposed to LLM (reduces confusion and token waste)
+- [x] `filter_tools()` helper in `schemas.py` for tool set filtering
+- [x] 26 tests in `test_query_classifier.py` (keyword, LLM mock, tool_set, filter_tools)
+
+#### Compressed View Tools (COMPLETE)
+- [x] `compressed_view` tool — file signatures + call relationships + side effects + raises (~80% token savings vs read_file)
+  - Rich symbol extraction: classes + methods within classes (richer than repo_graph parser)
+  - Multi-language: Python, JS/TS, Java, Go, Rust
+  - Focus filter: narrow output to a specific symbol (substring match)
+  - Side effect detection: db_write, http_call, event_publish, file_write, cache_write
+- [x] `module_summary` tool — module-level summary: services, models, controllers, functions, imports, file list (~95% token savings)
+  - Multi-language support (all 10 supported file extensions)
+  - Classifies symbols by role (Service, Model, Controller, etc.)
+- [x] `expand_symbol` tool — lazy expansion from compressed to full source
+  - With or without file_path (workspace search fallback)
+  - Substring match when exact name not found
+  - Shows alternatives when multiple candidates exist
+- [x] All 3 tools registered in TOOL_REGISTRY, TOOL_DEFINITIONS, output policies
+- [x] System prompt updated with tool usage priority and efficient exploration patterns
+- [x] 24 tests in `test_compressed_tools.py`
+- References: [MutaGReP](https://arxiv.org/abs/2502.15872), [LingmaAgent](https://arxiv.org/abs/2406.01422)
+
+#### Language Support Hardening (COMPLETE)
+- [x] `find_tests` — added test file glob patterns for Java, Rust, C/C++ (`*Test.java`, `*_test.rs`, `*_test.c`, etc.)
+- [x] `find_tests` — added Java `@Test`/`@ParameterizedTest` and Rust `#[test]`/`#[tokio::test]` detection
+- [x] `test_outline` — added Java (JUnit/Mockito), Go (testing.T/testify), Rust (#[test]) parsers
+- [x] 10 new language-specific tests in `test_code_tools.py`
+
+#### Symbol Role Classification (COMPLETE)
+- [x] Classify symbols into 7 roles: route_entry, business_logic, domain_model, infrastructure, utility, test, unknown
+- [x] 3-tier classification: decorator/annotation context (reads 5 lines above symbol) → file path patterns → name patterns
+- [x] `find_symbol` results sorted by role priority: route_entry > business_logic > domain_model > infrastructure > utility > test > unknown
+- [x] Within same role, exact name matches before substring matches
+- [x] Multi-language: Python decorators (@app.route, @Service), Java annotations (@Entity, @RestController, @Repository), path conventions
+- [x] Each result includes `role` field for downstream filtering
+- [x] 24 tests in `test_symbol_role.py` (path, name, decorator, annotation, priority, sorting)
+
+#### 3-Layer System Prompt (COMPLETE)
+- [x] Layer 1: Core Identity (~100 lines) — always included: hard constraints, exploration pattern, answer format
+- [x] Layer 2: Strategy (~30 lines) — selected by query classifier: 7 strategies (entry_point, flow_tracing, root_cause, impact, architecture, config, data_lineage)
+- [x] Layer 3: Runtime Guidance — injected dynamically by service.py: budget context, scatter warnings, convergence checkpoints
+- [x] Prompt compressed from ~7500 to ~4000 tokens per LLM call
+- [x] Removed redundant tool descriptions (already in TOOL_DEFINITIONS)
+- [x] Removed contradictory rules (e.g. "NEVER 3 greps" vs "maximize parallelism")
+- [x] `build_system_prompt()` accepts `query_type` to select Layer 2 strategy
+- [x] Accumulated text trimming — keeps only last 3 thinking turns to limit context growth
+- [x] Budget hard constraints at WARN_CONVERGE — refuses new broad searches, only allows verification calls
+- [x] 39 tests in `test_agent_loop.py` (including strategy selection by query type)
+
+#### RepoMap v2: Dataflow-Enhanced Graph (PLANNED)
+- [ ] Dataflow edges: variable_flows_to, reads_config, writes_to
+- [ ] Change coupling from git log co-change analysis
+- [ ] Enhanced PageRank with new edge types
+- References: [DraCo](https://arxiv.org/abs/2405.19782), [RepoHyper](https://arxiv.org/abs/2403.06095)
+
+#### Evidence Evaluator (COMPLETE)
+- [x] Rule-based evidence completeness check before finalizing answers
+  - Check 1: answer must contain file:line references or code blocks (unless very short)
+  - Check 2: agent must have made ≥ 2 tool calls
+  - Check 3: agent must have accessed ≥ 1 file
+- [x] If evidence insufficient AND budget remains (≥ 2 iterations), reject the answer and inject guidance forcing the LLM to investigate further
+- [x] Graceful degradation: if no budget remains, let the weak answer through
+- [x] Integrated into `AgentLoopService.run_stream()` at the "Final answer" checkpoint
+- [x] 14 tests in `test_evidence.py`
+- Reference: [RAG-Gym](https://arxiv.org/abs/2502.13957)
+- [ ] Future: Optional Haiku-based evaluation when rules are insufficient
+
+#### Cross-Session Query Patterns (PLANNED)
+Analyze session traces to learn from past queries and improve future performance.
+- [ ] Build `query_patterns.json` from offline analysis of session traces
+- [ ] Track common entry points, hot modules, and effective tool strategies per query type
+- [ ] Feed historical data back into Query Classifier — bias initial tool selection toward patterns that worked
+- [ ] Warm-start the budget controller based on observed token costs for similar queries
+- Reference: [RAG-Gym — Process Supervision](https://arxiv.org/abs/2502.13957)
+
+#### Multi-Agent Collaboration (PLANNED — long-term)
+Split the single-agent loop into specialized sub-agents for complex queries.
+- [ ] Navigator Agent (Haiku) — decompose complex questions into sub-tasks + assign strategies
+- [ ] Explorer Agent (Sonnet) — execute sub-tasks, collect evidence, call tools
+- [ ] Critic Agent (Haiku) — verify completeness, identify gaps, suggest follow-ups
+- [ ] Final synthesis by Navigator aggregating Explorer outputs
+- [ ] Shared evidence store across sub-agents (avoid duplicate tool calls)
+- Reference: [MANTRA — 82.8% success rate with multi-agent](https://arxiv.org/abs/2502.15872)
+
+#### Architecture Analyzer (PLANNED)
+Higher-level architectural analysis beyond individual file dependencies.
+- [ ] Generate service dependency graph from RepoMap v2 edges
+- [ ] Detect cyclic dependencies (strongly connected components in import graph)
+- [ ] Identify layer violations (e.g., controller importing repository directly, skipping service layer)
+- [ ] Dead code detection (PageRank ≈ 0 + zero references)
+- [ ] Output as structured JSON for visualization in WebView
+
+#### Side Effect Analyzer Enhancement (PLANNED)
+Extend `trace_variable` with richer sink/source detection.
+- [ ] User-configurable sink/source patterns via `.conductor/sink_patterns.yaml`
+- [ ] Confidence levels: "confirmed" (pattern match + AST verification) vs "probable" (pattern only)
+- [ ] Cross-file flow continuation: auto-chain `trace_variable` across function boundaries
+- [ ] Extended sink patterns: message queues (Kafka, RabbitMQ), cache writes (Redis), event emit
 
 ### 5.5.1 Cross-Layer / Cross-Service Tracing
 Today the agent traces dependencies within a single service. The next frontier is answering:
@@ -293,7 +445,7 @@ This is a **multi-quarter R&D effort** requiring compiler engineering expertise.
 | Phase 4.5: Graph-Based Symbol Index (RepoMap) | ✅ Complete | Sprint 5 |
 | Phase 4.6: Agentic Code Intelligence | ✅ Complete | Sprint 6 |
 | Phase 5: Model B + Advanced | 🟡 Planned | Sprint 7 |
-| Phase 5.5: Code Understanding Enhancements | 🟡 Planned | Sprint 7–8 |
+| Phase 5.5: Code Understanding Enhancements | 🟢 In Progress | Sprint 7–8 |
 | Phase 6: Production Hardening | 🟡 Planned | Sprint 9 |
 
 ## Architecture Decision Log

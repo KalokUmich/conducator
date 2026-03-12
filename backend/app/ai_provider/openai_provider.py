@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from .base import AIProvider, ChatMessage, DecisionSummary, ToolCall, ToolUseResponse
+from .base import AIProvider, ChatMessage, DecisionSummary, TokenUsage, ToolCall, ToolUseResponse
 from .prompts import get_summary_prompt
 
 logger = logging.getLogger(__name__)
@@ -247,12 +247,15 @@ class OpenAIProvider(AIProvider):
             oai_messages.append({"role": "system", "content": system})
         oai_messages.extend(_converse_to_openai(messages))
 
-        response = client.chat.completions.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            messages=oai_messages,
-            tools=openai_tools,
-        )
+        create_kwargs: dict = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": oai_messages,
+        }
+        if openai_tools:
+            create_kwargs["tools"] = openai_tools
+
+        response = client.chat.completions.create(**create_kwargs)
 
         choice = response.choices[0]
         msg = choice.message
@@ -279,11 +282,22 @@ class OpenAIProvider(AIProvider):
         }
         stop_reason = stop_map.get(choice.finish_reason, choice.finish_reason or "end_turn")
 
+        # Extract token usage from OpenAI response
+        usage = None
+        if hasattr(response, "usage") and response.usage:
+            u = response.usage
+            usage = TokenUsage(
+                input_tokens=getattr(u, "prompt_tokens", 0) or 0,
+                output_tokens=getattr(u, "completion_tokens", 0) or 0,
+                total_tokens=getattr(u, "total_tokens", 0) or 0,
+            )
+
         return ToolUseResponse(
             text=text,
             tool_calls=tool_calls,
             stop_reason=stop_reason,
             raw=response,
+            usage=usage,
         )
 
 

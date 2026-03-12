@@ -24,7 +24,7 @@ from .schemas import (
     ReadFileParams,
     ToolResult,
 )
-from .tools import execute_tool
+from .tools import execute_tool, invalidate_graph_cache, invalidate_symbol_cache
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,29 @@ def _get_git_workspace_service():
 async def list_tools() -> Dict[str, Any]:
     """List all available code intelligence tools with their schemas."""
     return {"tools": TOOL_DEFINITIONS}
+
+
+@router.post("/cache/invalidate")
+async def invalidate_cache(
+    room_id: str,
+    git_workspace=Depends(_get_git_workspace_service),
+) -> Dict[str, Any]:
+    """Invalidate backend-side symbol index and dependency graph caches.
+
+    Called by the extension's "Rebuild Index" button to force a fresh scan
+    on the next agent query.
+    """
+    worktree_path = git_workspace.get_worktree_path(room_id)
+    if worktree_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No workspace for room_id={room_id!r}.",
+        )
+    ws = str(worktree_path)
+    invalidate_symbol_cache(ws)
+    invalidate_graph_cache(ws)
+    logger.info("Cache invalidated for room_id=%s workspace=%s", room_id, ws)
+    return {"status": "ok", "room_id": room_id, "workspace": ws}
 
 
 @router.post("/execute/{tool_name}", response_model=ToolResult)

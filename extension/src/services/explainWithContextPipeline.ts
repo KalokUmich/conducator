@@ -108,6 +108,8 @@ export interface PipelineOutput {
     timings:     Record<string, number>;
     /** Structured explanation fields parsed by the backend (if available). */
     structured?: Record<string, string>;
+    /** Agent thinking steps (tool calls, reasoning) for debugging. */
+    thinking_steps: ThinkingStep[];
 }
 
 // ---------------------------------------------------------------------------
@@ -365,11 +367,13 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     let explanation = '';
     let model = 'ai';
     let structured: Record<string, string> | undefined;
+    let thinking_steps: ThinkingStep[] = [];
     try {
         const result = await _callLlm(xmlPrompt, input);
-        explanation = result.explanation;
-        model       = result.model;
-        structured  = result.structured;
+        explanation     = result.explanation;
+        model           = result.model;
+        structured      = result.structured;
+        thinking_steps  = result.thinking_steps;
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`${LOG} [7/8] LLM call failed:`, msg);
@@ -388,7 +392,7 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     const total = Object.values(timings).reduce((a, b) => a + b, 0);
     console.log(`${LOG} Pipeline complete — total=${total.toFixed(1)}ms`);
 
-    return { explanation, model, xmlPrompt, timings, structured };
+    return { explanation, model, xmlPrompt, timings, structured, thinking_steps };
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,10 +1077,20 @@ function _toolLabel(tool: string, params: Record<string, any>): string {
     }
 }
 
+export interface ThinkingStep {
+    kind: string;
+    iteration?: number;
+    text?: string;
+    tool?: string;
+    params?: Record<string, any>;
+    summary?: string;
+    success?: boolean;
+}
+
 async function _callLlm(
     _xmlPrompt: string,   // retained for call-site compatibility; not sent to backend
     input:      PipelineInput,
-): Promise<{ explanation: string; model: string; structured?: Record<string, string> }> {
+): Promise<{ explanation: string; model: string; structured?: Record<string, string>; thinking_steps: ThinkingStep[] }> {
     const progress = input.onProgress;
     const requestBody = JSON.stringify({
         room_id:    input.workspaceId ?? '',
@@ -1109,6 +1123,7 @@ async function _callLlm(
         let buffer = '';
         let finalAnswer = '';
         let finalModel  = 'ai';
+        const collectedSteps: ThinkingStep[] = [];
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
@@ -1133,10 +1148,11 @@ async function _callLlm(
                 let data: Record<string, any>;
                 try { data = JSON.parse(eventData); } catch { continue; }
 
-                // Emit progress to the UI
+                // Emit progress to the UI + collect thinking steps
                 if (eventKind === 'thinking') {
                     const text = (data.text as string || '').slice(0, 120);
                     progress?.({ phase: 'agent', kind: 'thinking', message: text || 'Thinking...', detail: data });
+                    collectedSteps.push({ kind: 'thinking', iteration: data.iteration, text: data.text });
                 } else if (eventKind === 'tool_call') {
                     const label = _toolLabel(data.tool, data.params || {});
                     progress?.({
@@ -1144,15 +1160,22 @@ async function _callLlm(
                         message: label,
                         detail: { tool: data.tool, iteration: data.iteration },
                     });
+                    collectedSteps.push({ kind: 'tool_call', iteration: data.iteration, tool: data.tool, params: data.params });
                 } else if (eventKind === 'tool_result') {
                     progress?.({
                         phase: 'agent', kind: 'tool_result',
                         message: `${data.tool}: ${data.summary || 'done'}`,
                         detail: { tool: data.tool, success: data.success, iteration: data.iteration },
                     });
+                    collectedSteps.push({ kind: 'tool_result', iteration: data.iteration, tool: data.tool, summary: data.summary, success: data.success });
                 } else if (eventKind === 'done') {
                     finalAnswer = data.answer || '';
                     finalModel  = data.model  || 'ai';
+                    // Backend also sends thinking_steps in done event — prefer those
+                    if (data.thinking_steps?.length) {
+                        collectedSteps.length = 0;
+                        for (const s of data.thinking_steps) { collectedSteps.push(s); }
+                    }
                 } else if (eventKind === 'error') {
                     finalAnswer = data.answer || '';
                     finalModel  = data.model  || 'ai';
@@ -1163,8 +1186,8 @@ async function _callLlm(
             }
         }
 
-        console.log(`${LOG} [LLM] SSE stream complete — answer=${finalAnswer.length} chars, model=${finalModel}`);
-        return { explanation: finalAnswer, model: finalModel };
+        console.log(`${LOG} [LLM] SSE stream complete — answer=${finalAnswer.length} chars, model=${finalModel}, steps=${collectedSteps.length}`);
+        return { explanation: finalAnswer, model: finalModel, thinking_steps: collectedSteps };
 
     } catch (streamErr) {
         // Fall back to non-streaming endpoint
@@ -1187,12 +1210,14 @@ async function _callLlm(
             explanation: string;
             model: string;
             structured?: Record<string, string> | null;
+            thinking_steps?: ThinkingStep[];
         };
 
         return {
-            explanation: data.explanation,
-            model:       data.model,
-            structured:  data.structured ?? undefined,
+            explanation:    data.explanation,
+            model:          data.model,
+            structured:     data.structured ?? undefined,
+            thinking_steps: data.thinking_steps || [],
         };
     }
 }

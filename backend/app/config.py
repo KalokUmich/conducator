@@ -3,21 +3,10 @@
 Loads settings from two YAML files:
   * conductor.settings.yaml  — non-secret configuration
   * conductor.secrets.yaml   — secrets (never committed)
-
-Supported embedding backends: local, bedrock, openai, voyage, mistral.
-Default backend is ``bedrock`` with Cohere Embed v4.
-
-Supported rerank backends: none, cohere, bedrock, cross_encoder.
-Default is ``none`` (disabled). Enable for better search precision.
-
-Secrets for Voyage, Mistral, and Cohere are loaded from
-conductor.secrets.yaml and injected into environment variables so
-downstream SDKs can use them.
 """
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -66,32 +55,6 @@ def _load_yaml(path: Optional[Path]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class AwsSecrets(BaseModel):
-    access_key_id:     Optional[str] = None
-    secret_access_key: Optional[str] = None
-    session_token:     Optional[str] = None  # STS temporary credentials
-    region:            Optional[str] = "us-east-1"
-
-
-class OpenAISecrets(BaseModel):
-    api_key: Optional[str] = None
-
-
-class VoyageSecrets(BaseModel):
-    """Voyage AI credentials (voyage-code-3 etc.)."""
-    api_key: Optional[str] = None
-
-
-class MistralSecrets(BaseModel):
-    """Mistral AI credentials (codestral-embed-2505 etc.)."""
-    api_key: Optional[str] = None
-
-
-class CohereSecrets(BaseModel):
-    """Cohere credentials (reranking and embedding)."""
-    api_key: Optional[str] = None
-
-
 class DatabaseSecrets(BaseModel):
     url: Optional[str] = None
 
@@ -101,31 +64,7 @@ class JWTSecrets(BaseModel):
     algorithm:  str = "HS256"
 
 
-class EmbeddingSecrets(BaseModel):
-    """Credentials for LiteLLM embedding + reranking providers.
-
-    These are injected into environment variables consumed by LiteLLM / CocoIndex::
-
-        aws     → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-                  AWS_SESSION_TOKEN, AWS_DEFAULT_REGION
-        openai  → OPENAI_API_KEY
-        voyage  → VOYAGE_API_KEY
-        mistral → MISTRAL_API_KEY
-        cohere  → CO_API_KEY  (Cohere embed + reranking)
-
-    Configured under the ``embedding:`` key in conductor.secrets.yaml.
-    The model / provider is chosen in conductor.settings.yaml:
-        code_search.embedding_model: "bedrock/cohere.embed-v4:0"
-    """
-    aws:     AwsSecrets     = Field(default_factory=AwsSecrets)
-    openai:  OpenAISecrets  = Field(default_factory=OpenAISecrets)
-    voyage:  VoyageSecrets  = Field(default_factory=VoyageSecrets)
-    mistral: MistralSecrets = Field(default_factory=MistralSecrets)
-    cohere:  CohereSecrets  = Field(default_factory=CohereSecrets)
-
-
 class Secrets(BaseModel):
-    embedding: EmbeddingSecrets = Field(default_factory=EmbeddingSecrets)
     database:  DatabaseSecrets  = Field(default_factory=DatabaseSecrets)
     jwt:       JWTSecrets       = Field(default_factory=JWTSecrets)
 
@@ -185,56 +124,28 @@ class GitWorkspaceSettings(BaseModel):
     cleanup_on_room_close:  bool                    = True
 
 
-class CodeSearchSettings(BaseModel):
-    """Configuration for CocoIndex Code Search.
+class TraceSettings(BaseModel):
+    """Configuration for agent loop session tracing.
 
-    Embedding uses LiteLLM model strings — supports 100+ providers::
+    Traces record per-iteration metrics (tokens, latencies, tool calls)
+    for offline analysis and prompt optimization.
 
-        "sbert/sentence-transformers/all-MiniLM-L6-v2"  — local, free
-        "bedrock/cohere.embed-v4:0"                     — AWS Bedrock
-        "text-embedding-3-small"                        — OpenAI
-        "voyage/voyage-code-3"                          — Voyage AI
-        "mistral/codestral-embed-2505"                  — Mistral
-        "cohere/embed-english-v3.0"                     — Cohere Direct
-        "gemini/text-embedding-004"                     — Google Gemini
-
-    Rerank backend choices:
-      * ``none``           – No reranking (default)
-      * ``cohere``         – Cohere Rerank API (rerank-v3.5)
-      * ``bedrock``        – AWS Bedrock Rerank (Cohere on Bedrock)
-      * ``cross_encoder``  – Local cross-encoder model
-
-    Credentials are read from ``conductor.secrets.yaml`` and injected
-    into environment variables by :func:`_inject_embedding_env_vars`.
+    Storage backends:
+      * ``local``    — JSON files in ``local_path`` (default, gitignored)
+      * ``database`` — SQLite / PostgreSQL via ``database_url``
     """
-    enabled:             bool = True
-    index_dir:           str  = "./cocoindex_data"
+    enabled:      bool = True
+    backend:      Literal["local", "database"] = "local"
+    local_path:   str  = ".conductor/session_traces"
+    database_url: str  = ""  # e.g. "sqlite:///traces.db" or "postgresql://..."
 
-    # -- Embedding (LiteLLM model string) --
-    embedding_model:     str = "bedrock/eu.cohere.embed-v4:0"
-    embedding_dimensions: Optional[int] = None  # Auto-detected for known models
 
-    # -- Chunking / search --
-    chunk_size:          int = 512
-    top_k_results:       int = 5
 
+class CodeSearchSettings(BaseModel):
+    """Configuration for code search and repo graph features."""
     # -- RepoMap (graph-based context) --
     repo_map_enabled:    bool = True
     repo_map_top_n:      int  = 10  # Top N files by PageRank to include in map
-
-    # -- Reranking (post-retrieval) --
-    rerank_backend:         Literal["none", "cohere", "bedrock", "cross_encoder"] = "none"
-    rerank_top_n:           int  = 5   # Return top N after reranking
-    rerank_candidates:      int  = 20  # Fetch this many candidates from vector search before reranking
-
-    # -- Cohere Rerank (direct API) --
-    cohere_rerank_model:    str = "rerank-v3.5"
-
-    # -- Bedrock Rerank --
-    bedrock_rerank_model_id: str = "cohere.rerank-v3-5:0"
-
-    # -- Cross-encoder (local) --
-    cross_encoder_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 class AppSettings(BaseModel):
@@ -245,66 +156,8 @@ class AppSettings(BaseModel):
     live_share:     LiveShareSettings    = Field(default_factory=LiveShareSettings)
     git_workspace:  GitWorkspaceSettings = Field(default_factory=GitWorkspaceSettings)
     code_search:    CodeSearchSettings   = Field(default_factory=CodeSearchSettings)
+    trace:          TraceSettings        = Field(default_factory=TraceSettings)
     secrets:        Secrets              = Field(default_factory=Secrets)
-
-
-# ---------------------------------------------------------------------------
-# Environment variable injection for embedding + reranking providers
-# ---------------------------------------------------------------------------
-
-
-def _inject_embedding_env_vars(settings: AppSettings) -> None:
-    """Inject credentials from conductor.secrets.yaml into environment variables.
-
-    This function maps our unified secrets config to well-known env vars so
-    everything works without extra configuration.
-
-    The embedding model string (e.g. ``bedrock/cohere.embed-v4:0``) determines
-    which credentials are needed.  We inject all available credentials so
-    switching models only requires changing the model string.
-
-    Mapping::
-
-        embedding.aws     → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-                            AWS_SESSION_TOKEN, AWS_DEFAULT_REGION
-        embedding.openai  → OPENAI_API_KEY
-        embedding.voyage  → VOYAGE_API_KEY
-        embedding.mistral → MISTRAL_API_KEY
-        embedding.cohere  → CO_API_KEY
-    """
-    emb = settings.secrets.embedding
-
-    # --- Always inject all available credentials ---
-    # This allows model switching without re-injecting env vars.
-
-    # AWS (Bedrock embedding + reranking)
-    if emb.aws.access_key_id:
-        os.environ.setdefault("AWS_ACCESS_KEY_ID", emb.aws.access_key_id)
-    if emb.aws.secret_access_key:
-        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", emb.aws.secret_access_key)
-    if emb.aws.session_token:
-        os.environ.setdefault("AWS_SESSION_TOKEN", emb.aws.session_token)
-    if emb.aws.region:
-        os.environ.setdefault("AWS_DEFAULT_REGION", emb.aws.region)
-        os.environ.setdefault("AWS_REGION_NAME", emb.aws.region)
-
-    # OpenAI
-    if emb.openai.api_key:
-        os.environ.setdefault("OPENAI_API_KEY", emb.openai.api_key)
-
-    # Voyage AI
-    if emb.voyage.api_key:
-        os.environ.setdefault("VOYAGE_API_KEY", emb.voyage.api_key)
-
-    # Mistral AI
-    if emb.mistral.api_key:
-        os.environ.setdefault("MISTRAL_API_KEY", emb.mistral.api_key)
-
-    # Cohere (embedding + reranking)
-    if emb.cohere.api_key:
-        os.environ.setdefault("CO_API_KEY", emb.cohere.api_key)
-
-    logger.info("Injected embedding env vars.")
 
 
 # ---------------------------------------------------------------------------
@@ -329,14 +182,12 @@ def load_settings() -> AppSettings:
 
     app_settings = AppSettings(**settings_data)
     logger.info(
-        "Settings loaded (server=%s:%s, git_workspace.enabled=%s, code_search.enabled=%s, "
-        "embedding_model=%s, rerank_backend=%s)",
+        "Settings loaded (server=%s:%s, git_workspace.enabled=%s, "
+        "repo_map.enabled=%s)",
         app_settings.server.host,
         app_settings.server.port,
         app_settings.git_workspace.enabled,
-        app_settings.code_search.enabled,
-        app_settings.code_search.embedding_model,
-        app_settings.code_search.rerank_backend,
+        app_settings.code_search.repo_map_enabled,
     )
     return app_settings
 
@@ -386,12 +237,19 @@ class AIProviderSettingsConfig(BaseModel):
 
 
 class AIModelConfig(BaseModel):
-    """Configuration for a single AI model."""
+    """Configuration for a single AI model.
+
+    Flags:
+      - ``classifier``: If True, this model can be used as a lightweight
+        pre-classification model before the agent loop starts.
+        (Typically a small/fast model like Haiku.)
+    """
     id:           str  = ""
     provider:     str  = ""
     model_name:   str  = ""
     display_name: str  = ""
     enabled:      bool = True
+    classifier:   bool = False
 
 
 # ---------------------------------------------------------------------------

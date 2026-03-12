@@ -1,7 +1,7 @@
 # Conductor Project Makefile
 # ===========================
 
-.PHONY: all setup setup-backend setup-extension venv ensure-backend-deps install run-backend run-backend-prod run-backend-port test test-backend test-extension compile compile-ts compile-css package clean help
+.PHONY: all setup setup-backend setup-extension venv ensure-backend-deps install run-backend run-backend-prod run-backend-port test test-backend test-extension integration-test compile compile-ts compile-css package clean help
 
 # Python virtual environment
 VENV_DIR := .venv
@@ -124,6 +124,11 @@ test-backend: ensure-backend-deps
 	@echo "🧪 Running backend tests..."
 	cd backend && $(PYTHON) -m pytest tests/ -v
 
+## Run backend integration tests (requires real API credentials)
+integration-test: ensure-backend-deps
+	@echo "🧪 Running backend integration tests (requires API credentials)..."
+	cd backend && $(PYTHON) -m pytest tests/ -v -s -m integration
+
 ## Run extension tests (if any)
 test-extension:
 	@echo "🧪 Running extension tests..."
@@ -197,9 +202,10 @@ help:
 	@echo "  make run-backend-port PORT=8001 - Start on custom port"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test             - Run all tests"
-	@echo "  make test-backend     - Run backend tests only"
+	@echo "  make test             - Run all tests (unit only)"
+	@echo "  make test-backend     - Run backend unit tests only"
 	@echo "  make test-extension   - Run extension tests only"
+	@echo "  make integration-test - Run backend integration tests (needs API keys)"
 	@echo ""
 	@echo "Build:"
 	@echo "  make compile          - Compile extension (TypeScript + CSS)"

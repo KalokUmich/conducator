@@ -189,10 +189,21 @@ class ToolCall:
 
 
 @dataclass
+class TokenUsage:
+    """Token counts from a single LLM call."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+
+
+@dataclass
 class ToolUseResponse:
     """Response from chat_with_tools — may contain text and/or tool calls."""
     text: str = ""
     tool_calls: List[ToolCall] = field(default_factory=list)
     stop_reason: str = ""  # "end_turn", "tool_use", "max_tokens"
     raw: Any = None  # Provider-specific raw response
+    usage: Optional[TokenUsage] = None  # Token counts (if provider returns them)
 

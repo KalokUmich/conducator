@@ -20,16 +20,43 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.ai_provider.base import AIProvider, ToolUseResponse
 from app.code_tools.executor import LocalToolExecutor, ToolExecutor
-from app.code_tools.schemas import TOOL_DEFINITIONS
+from app.code_tools.output_policy import apply_policy
+from app.code_tools.schemas import TOOL_DEFINITIONS, filter_tools
 
+from .budget import BudgetConfig, BudgetController, BudgetSignal, IterationMetrics
+from .evidence import check_evidence
 from .prompts import _read_key_docs, build_system_prompt, scan_workspace_layout
+from .query_classifier import QueryClassification, classify_query, classify_query_with_llm
+from .trace import IterationTrace, SessionTrace, ToolCallTrace, TraceWriter
 
 logger = logging.getLogger(__name__)
+
+# Keywords that signal a high-level / architectural question
+_HIGH_LEVEL_KEYWORDS = {
+    "journey", "journeys", "step", "steps", "flow", "flows",
+    "workflow", "workflows", "pipeline", "pipelines",
+    "stage", "stages", "process", "processes",
+    "architecture", "design", "overview", "high level", "high-level",
+    "how does .* work", "what are the", "what is the",
+    "explain the flow", "explain the process", "explain the architecture",
+    "describe the", "walk me through", "walkthrough",
+    "sequence", "lifecycle", "life cycle",
+}
+
+
+def _is_high_level_query(query: str) -> bool:
+    """Heuristic: does the query ask a high-level / architectural question?"""
+    q = query.lower()
+    for kw in _HIGH_LEVEL_KEYWORDS:
+        if kw in q:
+            return True
+    return False
 
 
 @dataclass
@@ -81,6 +108,7 @@ class AgentResult:
     iterations: int = 0
     duration_ms: float = 0.0
     error: Optional[str] = None
+    budget_summary: Optional[Dict[str, Any]] = None
 
 
 class AgentLoopService:
@@ -89,12 +117,18 @@ class AgentLoopService:
     def __init__(
         self,
         provider: AIProvider,
-        max_iterations: int = 25,
+        max_iterations: int = 40,
         tool_executor: Optional[ToolExecutor] = None,
+        budget_config: Optional[BudgetConfig] = None,
+        trace_writer: Optional[TraceWriter] = None,
+        classifier_provider: Optional[AIProvider] = None,
     ) -> None:
         self._provider = provider
         self._max_iterations = max_iterations
         self._tool_executor = tool_executor
+        self._budget_config = budget_config
+        self._trace_writer = trace_writer
+        self._classifier_provider = classifier_provider
 
     async def run(
         self,
@@ -119,6 +153,7 @@ class AgentLoopService:
                 result.tool_calls_made = event.data.get("tool_calls_made", 0)
                 result.iterations = event.data.get("iterations", 0)
                 result.duration_ms = event.data.get("duration_ms", 0.0)
+                result.budget_summary = event.data.get("budget_summary")
                 # Collect thinking steps
                 raw_steps = event.data.get("thinking_steps", [])
                 result.thinking_steps = [
@@ -149,20 +184,57 @@ class AgentLoopService:
         """
         start = time.monotonic()
 
+        # Session trace — records per-iteration metrics for offline analysis
+        trace = SessionTrace(
+            session_id=uuid.uuid4().hex[:16],
+            query=query,
+            workspace_path=workspace_path,
+        )
+        trace.begin()
+
         # Pre-scan the workspace layout and key docs in parallel so the
         # LLM knows the project structure and context from iteration 1.
         layout_task = asyncio.to_thread(scan_workspace_layout, workspace_path)
         docs_task = asyncio.to_thread(_read_key_docs, workspace_path)
         layout, project_docs = await asyncio.gather(layout_task, docs_task)
+        # Classify the query — use LLM if a classifier provider is available
+        if self._classifier_provider:
+            try:
+                classification = await classify_query_with_llm(
+                    query, self._classifier_provider,
+                )
+            except Exception as exc:
+                logger.warning("LLM classifier failed, falling back to keywords: %s", exc)
+                classification = classify_query(query)
+        else:
+            classification = classify_query(query)
+        is_high_level = classification.query_type == "architecture_question" or _is_high_level_query(query)
+
         system = build_system_prompt(
             workspace_path,
             workspace_layout=layout,
             project_docs=project_docs,
             max_iterations=self._max_iterations,
+            query_type=classification.query_type,
         )
-        messages = self._initial_messages(query)
+
+        # Dynamic tool set — only expose tools relevant to the query type
+        active_tools = filter_tools(classification.tool_set) if classification.tool_set else TOOL_DEFINITIONS
+        logger.info(
+            "Query classified: type=%s, budget=%s, tools=%d/%d, strategy=%s",
+            classification.query_type, classification.budget_level,
+            len(active_tools), len(TOOL_DEFINITIONS),
+            classification.strategy[:60],
+        )
+
+        messages = self._initial_messages(query, classification)
         total_tool_calls = 0
         response: Optional[ToolUseResponse] = None
+
+        # Token budget controller — tracks cumulative token usage
+        budget = BudgetController(self._budget_config or BudgetConfig(
+            max_iterations=self._max_iterations,
+        ))
 
         # Accumulate LLM text throughout the loop so we have a fallback
         # if the final answer is empty (e.g. max_tokens hit, model quirk).
@@ -181,22 +253,32 @@ class AgentLoopService:
         # Build executor: prefer the injected one, fall back to local
         executor = self._tool_executor or LocalToolExecutor(workspace_path)
 
-        # Closure executed in a thread for each tool call
+        # Closure executed in a thread for each tool call (with timing)
         async def _exec_tool(tc_arg):
-            return tc_arg, await executor.execute(tc_arg.name, tc_arg.input)
+            t0 = time.monotonic()
+            result = await executor.execute(tc_arg.name, tc_arg.input)
+            elapsed = (time.monotonic() - t0) * 1000
+            return tc_arg, result, elapsed
 
         for iteration in range(self._max_iterations):
             # LLM call — offload to thread to avoid blocking the event loop
+            llm_start = time.monotonic()
             try:
                 response = await asyncio.to_thread(
                     self._provider.chat_with_tools,
                     messages=messages,
-                    tools=TOOL_DEFINITIONS,
+                    tools=active_tools,
                     max_tokens=8192,
                     system=system,
                 )
             except Exception as exc:
                 logger.error("Agent LLM call failed at iteration %d: %s", iteration, exc)
+                trace.finish(
+                    answer="\n\n".join(accumulated_text) if accumulated_text else "",
+                    error=str(exc),
+                    budget_summary=budget.summary(),
+                )
+                self._save_trace(trace)
                 yield AgentEvent(kind="error", data={
                     "error": str(exc),
                     "answer": "\n\n".join(accumulated_text) if accumulated_text else "",
@@ -204,12 +286,30 @@ class AgentLoopService:
                     "iterations": iteration + 1,
                     "duration_ms": (time.monotonic() - start) * 1000,
                     "thinking_steps": thinking_steps,
+                    "budget_summary": budget.summary(),
                 })
                 return
+            llm_elapsed_ms = (time.monotonic() - llm_start) * 1000
 
-            # Track all LLM text for fallback
+            # Track token usage from LLM response
+            iter_metrics = IterationMetrics(
+                input_tokens=response.usage.input_tokens if response.usage else 0,
+                output_tokens=response.usage.output_tokens if response.usage else 0,
+            )
+
+            # Build iteration trace
+            iter_trace = IterationTrace(
+                iteration=iteration + 1,
+                input_tokens=iter_metrics.input_tokens,
+                output_tokens=iter_metrics.output_tokens,
+                llm_latency_ms=llm_elapsed_ms,
+            )
+
+            # Track all LLM text for fallback (keep last 3 to limit context growth)
             if response.text:
                 accumulated_text.append(response.text)
+                if len(accumulated_text) > 3:
+                    accumulated_text = accumulated_text[-3:]
 
             # Emit thinking text when the LLM also requests tool calls
             if response.text and response.tool_calls:
@@ -225,6 +325,7 @@ class AgentLoopService:
 
             # Final answer — no tool calls requested
             if response.stop_reason == "end_turn" or not response.tool_calls:
+                budget.track(iter_metrics)
                 answer = response.text or ""
                 # Fallback: if final answer is empty, use accumulated thinking
                 if not answer.strip() and accumulated_text:
@@ -234,12 +335,47 @@ class AgentLoopService:
                         "falling back to last thinking text (%d chars)",
                         iteration + 1, len(answer),
                     )
+
+                # Evidence check — reject weak answers if budget remains
+                remaining = self._max_iterations - (iteration + 1)
+                ev = check_evidence(
+                    answer=answer,
+                    tool_calls_made=total_tool_calls,
+                    files_accessed=len(budget.files_accessed),
+                    remaining_iterations=remaining,
+                )
+                if not ev.passed:
+                    logger.info(
+                        "Evidence check failed at iteration %d "
+                        "(refs=%d, tools=%d, files=%d) — requesting retry",
+                        iteration + 1, ev.file_refs, ev.tool_calls_made,
+                        len(budget.files_accessed),
+                    )
+                    # Push back: re-add the answer as assistant, then
+                    # inject evidence guidance as a user message
+                    messages.append({
+                        "role": "assistant",
+                        "content": [{"text": answer}],
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [{"text": ev.guidance}],
+                    })
+                    iter_trace.budget_signal = budget.get_signal().value
+                    trace.add_iteration(iter_trace)
+                    continue  # back to the loop for another LLM call
+
+                iter_trace.budget_signal = budget.get_signal().value
+                trace.add_iteration(iter_trace)
+                trace.finish(answer=answer, budget_summary=budget.summary())
+                self._save_trace(trace)
                 yield AgentEvent(kind="done", data={
                     "answer": answer,
                     "tool_calls_made": total_tool_calls,
                     "iterations": iteration + 1,
                     "duration_ms": (time.monotonic() - start) * 1000,
                     "thinking_steps": thinking_steps,
+                    "budget_summary": budget.summary(),
                 })
                 return
 
@@ -269,7 +405,7 @@ class AgentLoopService:
             tool_results_content = []
             guidance_notes: List[str] = []
 
-            for tc, tool_result in tool_outputs:
+            for tc, tool_result, tool_elapsed_ms in tool_outputs:
                 total_tool_calls += 1
                 logger.info(
                     "Agent tool call #%d: %s(%s)",
@@ -291,6 +427,16 @@ class AgentLoopService:
                     "success": tool_result.success,
                     "summary": result_summary,
                 })
+
+                # Record tool call in the iteration trace
+                result_chars = len(json.dumps(tool_result.data, default=str)) if tool_result.data else 0
+                tc_trace = ToolCallTrace(
+                    tool_name=tc.name,
+                    params=tc.input,
+                    success=tool_result.success,
+                    result_chars=result_chars,
+                    latency_ms=tool_elapsed_ms,
+                )
 
                 # Track files read and detect redundant reads
                 if tc.name == "read_file" and tool_result.success:
@@ -348,6 +494,29 @@ class AgentLoopService:
                                 f"Do NOT widen to a catch-all pattern."
                             )
 
+                # Track files and symbols for budget controller
+                iter_metrics.tool_names.append(tc.name)
+                if tc.name == "read_file" and tool_result.success:
+                    fpath = tc.input.get("path", "")
+                    if fpath:
+                        new_f = budget.track_file(fpath)
+                        iter_metrics.new_files_accessed += new_f
+                        tc_trace.new_files = new_f
+                elif tc.name == "find_symbol" and tool_result.success:
+                    if isinstance(tool_result.data, list):
+                        for sym in tool_result.data:
+                            sname = sym.get("name", "")
+                            if sname:
+                                new_s = budget.track_symbol(sname)
+                                iter_metrics.new_symbols_found += new_s
+                                tc_trace.new_symbols += new_s
+                elif tc.name in ("file_outline", "compressed_view") and tool_result.success:
+                    fpath = tc.input.get("path", tc.input.get("file_path", ""))
+                    if fpath:
+                        new_f = budget.track_file(fpath)
+                        iter_metrics.new_files_accessed += new_f
+                        tc_trace.new_files = new_f
+
                 # Collect context chunks from relevant tools
                 for chunk in _extract_context(tc, tool_result, query):
                     yield AgentEvent(kind="context_chunk", data={
@@ -359,12 +528,62 @@ class AgentLoopService:
                         "source_tool": chunk.source_tool,
                     })
 
+                remaining_tokens = budget.config.max_input_tokens - budget.cumulative_input
                 tool_results_content.append(
-                    self._tool_result_block(tc.id, tool_result)
+                    self._tool_result_block(tc.id, tool_result, tc.name, remaining_tokens)
+                )
+                iter_trace.tool_calls.append(tc_trace)
+
+            # Commit iteration metrics to budget controller
+            budget.track(iter_metrics)
+            budget_signal = budget.get_signal()
+
+            # Record iteration trace
+            iter_trace.budget_signal = budget_signal.value
+            if response.text and response.tool_calls:
+                iter_trace.thinking_text = response.text[:500]
+            trace.add_iteration(iter_trace)
+
+            # Budget-driven convergence
+            if budget_signal == BudgetSignal.FORCE_CONCLUDE:
+                answer = "\n\n".join(accumulated_text) if accumulated_text else ""
+                conclude_reason = (
+                    "Max iterations reached"
+                    if budget.iteration_count >= budget.config.max_iterations
+                    else "Token budget exhausted"
+                )
+                logger.warning(
+                    "Budget FORCE_CONCLUDE at iteration %d: %s "
+                    "(input tokens: %s/%s)",
+                    iteration + 1, conclude_reason,
+                    budget.cumulative_input, budget.config.max_input_tokens,
+                )
+                trace.finish(answer=answer, error=conclude_reason, budget_summary=budget.summary())
+                self._save_trace(trace)
+                yield AgentEvent(kind="done", data={
+                    "answer": answer,
+                    "tool_calls_made": total_tool_calls,
+                    "iterations": iteration + 1,
+                    "duration_ms": (time.monotonic() - start) * 1000,
+                    "error": conclude_reason,
+                    "thinking_steps": thinking_steps,
+                    "budget_summary": budget.summary(),
+                })
+                return
+
+            if budget_signal == BudgetSignal.WARN_CONVERGE:
+                guidance_notes.append(
+                    f"⚠ BUDGET WARNING: {budget.budget_context} "
+                    f"You MUST start converging NOW. Only verification tool calls "
+                    f"are allowed (expand_symbol on already-identified symbols, "
+                    f"read_file with specific line ranges). "
+                    f"Do NOT start new searches (grep, find_symbol, module_summary). "
+                    f"Summarize your findings and provide your answer."
                 )
 
-            # Scatter detection: warn if reading from too many different directories
-            if len(dirs_accessed) >= 5:
+            # Scatter detection: tighter threshold for high-level queries
+            scatter_limit = 3 if is_high_level else 5
+            if len(dirs_accessed) >= scatter_limit:
                 top_dirs = sorted(dirs_accessed.keys())
                 guidance_notes.append(
                     f"⚠ SCATTER WARNING: You have read files from {len(dirs_accessed)} "
@@ -374,25 +593,43 @@ class AgentLoopService:
                     f"chain. If you cannot find the answer, provide what you know so far."
                 )
 
-            # Convergence checkpoint at ~50% budget
-            half_budget = self._max_iterations // 2
-            if iteration + 1 == half_budget and iteration > 2:
+            # Convergence checkpoints — earlier for high-level queries
+            if is_high_level and iteration + 1 >= 3 and iteration > 1:
                 guidance_notes.append(
-                    f"⚠ HALFWAY CHECKPOINT: You've used {iteration + 1} of "
-                    f"{self._max_iterations} iterations. Summarize what you've "
-                    f"learned so far, identify what's missing, and decide: "
-                    f"can you answer now? If not, make a focused 2-3 step plan "
-                    f"for the remaining budget. Do not keep exploring broadly."
+                    f"⚠ HIGH-LEVEL QUERY CHECKPOINT: You've used {iteration + 1} of "
+                    f"{self._max_iterations} iterations on a high-level question. "
+                    f"By now you should have found the orchestration layer. "
+                    f"STOP and write your answer using what you've found. "
+                    f"List the steps/flow with file paths and line numbers. "
+                    f"Do NOT keep exploring implementation details."
                 )
+            elif not is_high_level:
+                half_budget = self._max_iterations // 2
+                if iteration + 1 == half_budget and iteration > 2:
+                    guidance_notes.append(
+                        f"⚠ HALFWAY CHECKPOINT: You've used {iteration + 1} of "
+                        f"{self._max_iterations} iterations. Summarize what you've "
+                        f"learned so far, identify what's missing, and decide: "
+                        f"can you answer now? If not, make a focused 2-3 step plan "
+                        f"for the remaining budget. Do not keep exploring broadly."
+                    )
 
-            # Inject iteration budget + guidance notes into the conversation
+            # Inject budget context + guidance notes into the conversation
             remaining = self._max_iterations - (iteration + 1)
-            budget_note = f"[Iteration {iteration + 1}/{self._max_iterations} — {remaining} remaining]"
-            if remaining <= 3:
-                budget_note += (
-                    " ⚠ Running low on iterations. "
-                    "Wrap up your investigation and provide your answer soon."
-                )
+            budget_note = budget.budget_context
+            low_threshold = 5 if is_high_level else 3
+            if remaining <= low_threshold:
+                if is_high_level:
+                    budget_note += (
+                        " ⚠ URGENT: You are running low on iterations for a high-level question. "
+                        "You MUST provide your answer NOW. Summarize the flow/steps you've found "
+                        "with file paths and line numbers. Do NOT make any more exploratory tool calls."
+                    )
+                else:
+                    budget_note += (
+                        " ⚠ Running low on iterations. "
+                        "Wrap up your investigation and provide your answer soon."
+                    )
             if guidance_notes:
                 budget_note += "\n" + "\n".join(guidance_notes)
 
@@ -409,6 +646,8 @@ class AgentLoopService:
                 "falling back to last thinking text (%d chars)",
                 self._max_iterations, len(answer),
             )
+        trace.finish(answer=answer, error="Max iterations reached", budget_summary=budget.summary())
+        self._save_trace(trace)
         yield AgentEvent(kind="done", data={
             "answer": answer,
             "tool_calls_made": total_tool_calls,
@@ -416,7 +655,13 @@ class AgentLoopService:
             "duration_ms": (time.monotonic() - start) * 1000,
             "error": "Max iterations reached",
             "thinking_steps": thinking_steps,
+            "budget_summary": budget.summary(),
         })
+
+    def _save_trace(self, trace: SessionTrace) -> None:
+        """Persist the session trace if a writer is configured."""
+        if self._trace_writer:
+            self._trace_writer.save(trace)
 
     # ------------------------------------------------------------------
     # Message formatting — provider-agnostic (Bedrock Converse format)
@@ -427,11 +672,21 @@ class AgentLoopService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _initial_messages(query: str) -> List[Dict[str, Any]]:
+    def _initial_messages(
+        query: str,
+        classification: Optional[QueryClassification] = None,
+    ) -> List[Dict[str, Any]]:
+        text = query
+        if classification:
+            text += (
+                f"\n\n[Query Classification: {classification.query_type} | "
+                f"Strategy: {classification.strategy} | "
+                f"Suggested tools: {', '.join(classification.initial_tools)}]"
+            )
         return [
             {
                 "role": "user",
-                "content": [{"text": query}],
+                "content": [{"text": text}],
             }
         ]
 
@@ -451,12 +706,14 @@ class AgentLoopService:
         return {"role": "assistant", "content": content}
 
     @staticmethod
-    def _tool_result_block(tool_use_id: str, result) -> Dict[str, Any]:
+    def _tool_result_block(
+        tool_use_id: str,
+        result,
+        tool_name: str = "",
+        remaining_input_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
         if result.success:
-            text = json.dumps(result.data, default=str)
-            # Truncate very large results
-            if len(text) > 30_000:
-                text = text[:30_000] + "\n... (truncated)"
+            text = apply_policy(tool_name, result.data, remaining_input_tokens)
         else:
             text = f"ERROR: {result.error}"
 

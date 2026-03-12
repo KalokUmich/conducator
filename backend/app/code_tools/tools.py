@@ -89,6 +89,46 @@ def _run_git(workspace: str, args: List[str], max_output: int = 50_000) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _walk_files(
+    search_root: Path,
+    ws: Path,
+    include_glob: Optional[str] = None,
+) -> tuple:
+    """Walk files under search_root, respecting exclusions and glob filter.
+
+    Returns (files_list, skipped_size, skipped_glob, dirs_excluded).
+    """
+    files: List[Path] = []
+    skipped_size = 0
+    skipped_glob = 0
+    dirs_excluded = 0
+    # Normalize glob: fnmatch operates on bare filenames, strip **/ prefix.
+    file_glob = None
+    if include_glob:
+        file_glob = include_glob.split("/")[-1] if "/" in include_glob else include_glob
+
+    for dirpath, dirnames, filenames in os.walk(search_root):
+        rel_dir = Path(dirpath).relative_to(ws)
+        if _is_excluded(rel_dir.parts):
+            dirs_excluded += 1
+            dirnames.clear()
+            continue
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+        for f in filenames:
+            if file_glob and not fnmatch.fnmatch(f, file_glob):
+                skipped_glob += 1
+                continue
+            fp = Path(dirpath) / f
+            try:
+                if fp.stat().st_size > _MAX_FILE_SIZE:
+                    skipped_size += 1
+                    continue
+            except OSError:
+                continue
+            files.append(fp)
+    return files, skipped_size, skipped_glob, dirs_excluded
+
+
 def grep(
     workspace: str,
     pattern: str,
@@ -106,34 +146,50 @@ def grep(
     except re.error as exc:
         return ToolResult(tool_name="grep", success=False, error=f"Invalid regex: {exc}")
 
-    matches: List[Dict] = []
     ws = Path(workspace).resolve()
 
     if search_root.is_file():
         files_to_search = [search_root]
+        glob_dropped = False
     else:
-        files_to_search = []
-        for dirpath, dirnames, filenames in os.walk(search_root):
-            rel_dir = Path(dirpath).relative_to(ws)
-            if _is_excluded(rel_dir.parts):
-                dirnames.clear()
-                continue
-            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
-            for f in filenames:
-                fp = Path(dirpath) / f
-                if include_glob and not fnmatch.fnmatch(f, include_glob):
-                    continue
-                if fp.stat().st_size > _MAX_FILE_SIZE:
-                    continue
-                files_to_search.append(fp)
+        files_to_search, skipped_size, skipped_glob, dirs_excluded = _walk_files(
+            search_root, ws, include_glob,
+        )
+        logger.info(
+            "grep: pattern=%r path=%r files_to_search=%d "
+            "skipped_size=%d skipped_glob=%d dirs_excluded=%d include_glob=%r",
+            pattern, path, len(files_to_search),
+            skipped_size, skipped_glob, dirs_excluded, include_glob,
+        )
+        # Self-healing: if include_glob filtered out ALL files, retry without
+        # it. The LLM often guesses the wrong file extension (e.g. *.py for a
+        # Java codebase), which makes grep useless.
+        glob_dropped = False
+        if not files_to_search and include_glob and skipped_glob > 0:
+            logger.warning(
+                "grep: include_glob=%r filtered out all %d files — "
+                "retrying without glob filter",
+                include_glob, skipped_glob,
+            )
+            files_to_search, skipped_size, _, dirs_excluded = _walk_files(
+                search_root, ws, None,
+            )
+            glob_dropped = True
+            logger.info(
+                "grep: retry without glob: files_to_search=%d",
+                len(files_to_search),
+            )
 
     compiled = re.compile(pattern)
+    matches: List[Dict] = []
+    read_errors = 0
     for fp in files_to_search:
         if len(matches) >= max_results:
             break
         try:
             text = fp.read_text(errors="replace")
         except (OSError, UnicodeDecodeError):
+            read_errors += 1
             continue
         for i, line in enumerate(text.split("\n"), 1):
             if compiled.search(line):
@@ -145,6 +201,10 @@ def grep(
                 if len(matches) >= max_results:
                     break
 
+    logger.info(
+        "grep: pattern=%r matches=%d read_errors=%d glob_dropped=%s",
+        pattern, len(matches), read_errors, glob_dropped,
+    )
     return ToolResult(
         tool_name="grep",
         data=matches,
@@ -171,6 +231,10 @@ def read_file(
     lines = text.split("\n")
     total = len(lines)
 
+    # Max lines to return when no line range is specified.
+    # Kept small to force the agent to use file_outline → targeted read_file.
+    _AUTO_TRUNCATE_LINES = 200
+
     if start_line or end_line:
         s = (start_line or 1) - 1
         e = end_line or total
@@ -178,9 +242,14 @@ def read_file(
         content = "\n".join(f"{s + i + 1:>4} | {l}" for i, l in enumerate(selected))
         truncated = e < total
     else:
-        if total > 500:
-            selected = lines[:500]
+        if total > _AUTO_TRUNCATE_LINES:
+            selected = lines[:_AUTO_TRUNCATE_LINES]
             content = "\n".join(f"{i + 1:>4} | {l}" for i, l in enumerate(selected))
+            content += (
+                f"\n\n... (showing first {_AUTO_TRUNCATE_LINES} of {total} lines) "
+                f"Use file_outline to see all definitions, then read_file with "
+                f"start_line/end_line to read specific sections."
+            )
             truncated = True
         else:
             content = "\n".join(f"{i + 1:>4} | {l}" for i, l in enumerate(lines))
@@ -228,8 +297,10 @@ def list_files(
         for f in sorted(filenames):
             if len(entries) >= max_entries:
                 break
-            if include_glob and not fnmatch.fnmatch(f, include_glob):
-                continue
+            if include_glob:
+                file_glob = include_glob.split("/")[-1] if "/" in include_glob else include_glob
+                if not fnmatch.fnmatch(f, file_glob):
+                    continue
             fp = Path(dirpath) / f
             try:
                 size = fp.stat().st_size
@@ -295,7 +366,11 @@ def _disk_cache_path(workspace: str) -> Path:
 
 
 def _load_disk_cache(workspace: str) -> Optional[tuple]:
-    """Load symbol index from disk. Returns (index, git_head) or None."""
+    """Load symbol index from disk. Returns (index, git_head) or None.
+
+    Rejects empty indexes (0 definitions) — these are likely stale caches
+    from an incomplete workspace checkout.
+    """
     path = _disk_cache_path(workspace)
     if not path.exists():
         return None
@@ -304,7 +379,19 @@ def _load_disk_cache(workspace: str) -> Optional[tuple]:
         head = data.get("git_head")
         raw_index = data.get("index")
         if head and raw_index is not None:
-            return _deserialize_definitions(raw_index), head
+            index = _deserialize_definitions(raw_index)
+            if not index:
+                logger.warning(
+                    "Disk cache has 0 definitions — discarding stale cache "
+                    "(workspace=%s, head=%s)",
+                    workspace, head[:8],
+                )
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+            return index, head
     except (OSError, _json.JSONDecodeError, KeyError):
         pass
     return None
@@ -335,7 +422,8 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
     """
     try:
         from app.repo_graph.parser import extract_definitions, detect_language
-    except ImportError:
+    except ImportError as exc:
+        logger.warning("Symbol index unavailable: cannot import parser (%s)", exc)
         return None
 
     current_head = _get_git_head(workspace)
@@ -345,6 +433,10 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
     if entry is not None:
         index, cached_head = entry
         if cached_head == current_head:
+            logger.debug(
+                "Symbol index in-memory hit: %d files, head=%s",
+                len(index), (current_head or "")[:8],
+            )
             return index
 
     # 2. Disk hit
@@ -353,12 +445,24 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
         if disk_entry is not None:
             disk_index, disk_head = disk_entry
             if disk_head == current_head:
+                logger.debug(
+                    "Symbol index disk hit: %d files, head=%s",
+                    len(disk_index), current_head[:8],
+                )
                 _symbol_index_cache[workspace] = (disk_index, current_head)
                 return disk_index
 
     # 3. Full scan
     ws = Path(workspace).resolve()
+    if not ws.is_dir():
+        logger.warning("Symbol index scan: workspace does not exist: %s", ws)
+        return {}
+
     index: Dict[str, list] = {}
+    files_scanned = 0
+    files_skipped_lang = 0
+    files_skipped_size = 0
+    total_defs = 0
 
     for dirpath, dirnames, filenames in os.walk(ws):
         rel_dir = Path(dirpath).relative_to(ws)
@@ -370,22 +474,48 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
         for f in filenames:
             fp = Path(dirpath) / f
             if detect_language(str(fp)) is None:
+                files_skipped_lang += 1
                 continue
-            if fp.stat().st_size > _MAX_FILE_SIZE:
+            try:
+                fsize = fp.stat().st_size
+            except OSError:
+                continue
+            if fsize > _MAX_FILE_SIZE:
+                files_skipped_size += 1
                 continue
             try:
                 source = fp.read_bytes()
             except OSError:
                 continue
+            files_scanned += 1
             rel = str(fp.relative_to(ws))
             symbols = extract_definitions(str(fp), source)
             if symbols.definitions:
                 index[rel] = symbols.definitions
+                total_defs += len(symbols.definitions)
+
+    logger.info(
+        "Symbol index built: %d files with %d definitions "
+        "(scanned=%d, skipped_lang=%d, skipped_size=%d, workspace=%s, head=%s)",
+        len(index), total_defs, files_scanned,
+        files_skipped_lang, files_skipped_size,
+        workspace, (current_head or "")[:8],
+    )
 
     cache_head = current_head or ""
     _symbol_index_cache[workspace] = (index, cache_head)
-    if current_head:
+    # Only persist to disk if the index is non-trivial.
+    # An empty or near-empty index may indicate the workspace wasn't fully
+    # checked out yet (e.g. git worktree still in progress).  By skipping
+    # disk caching we ensure the next call does a fresh scan.
+    if current_head and total_defs > 0:
         _save_disk_cache(workspace, index, current_head)
+    elif current_head and total_defs == 0 and files_scanned > 0:
+        logger.warning(
+            "Symbol index has 0 definitions from %d scanned files — "
+            "NOT saving to disk cache (possible incomplete checkout)",
+            files_scanned,
+        )
     return index
 
 
@@ -406,18 +536,138 @@ def invalidate_symbol_cache(workspace: Optional[str] = None) -> None:
         _symbol_index_cache.clear()
 
 
+# ---------------------------------------------------------------------------
+# Symbol Role Classification
+# ---------------------------------------------------------------------------
+
+# Role priority for sorting (lower = more important to show first)
+_ROLE_PRIORITY = {
+    "route_entry": 0,
+    "business_logic": 1,
+    "domain_model": 2,
+    "infrastructure": 3,
+    "utility": 4,
+    "test": 5,
+    "unknown": 6,
+}
+
+# File path patterns → role
+_PATH_ROLE_PATTERNS = [
+    (re.compile(r"test[s_/]|_test\.|\.test\.|\.spec\."), "test"),
+    (re.compile(r"route[rs]?[/.]|endpoint|handler|controller|view[s]?[/.]"), "route_entry"),
+    (re.compile(r"service[s]?[/.]|usecase|interactor"), "business_logic"),
+    (re.compile(r"model[s]?[/.]|schema[s]?[/.]|entit(?:y|ies)[/.]|domain[/.]"), "domain_model"),
+    (re.compile(r"util[s]?[/.]|helper[s]?[/.]|common[/.]|lib[/.]"), "utility"),
+    (re.compile(r"repo(?:sitory)?[/.]|dao[/.]|adapter[/.]|client[/.]|infra[/.]|db[/.]"), "infrastructure"),
+]
+
+# Signature / name patterns → role
+_SIG_ROLE_PATTERNS = [
+    # Route decorators (Python, Java, TS)
+    (re.compile(r"@(?:app|router|api)\.\s*(?:get|post|put|delete|patch|route)"), "route_entry"),
+    (re.compile(r"@(?:Get|Post|Put|Delete|Patch|Request)Mapping"), "route_entry"),
+    (re.compile(r"@Controller|@RestController|@Resource"), "route_entry"),
+    # Service/business logic
+    (re.compile(r"@Service|@Component|@Injectable"), "business_logic"),
+    (re.compile(r"class\s+\w*Service"), "business_logic"),
+    # Domain models
+    (re.compile(r"@Entity|@Table|@Document|@dataclass"), "domain_model"),
+    (re.compile(r"class\s+\w*(?:Model|Schema|Entity|DTO)"), "domain_model"),
+    (re.compile(r"class\s+\w+\(.*(?:Base|Model|Schema|DeclarativeBase)"), "domain_model"),
+    # Infrastructure
+    (re.compile(r"@Repository|@Mapper"), "infrastructure"),
+    (re.compile(r"class\s+\w*(?:Repository|Repo|DAO|Client|Adapter)"), "infrastructure"),
+    # Test
+    (re.compile(r"(?:def|function)\s+test_|@Test|@pytest|#\[test\]|#\[tokio::test\]"), "test"),
+    (re.compile(r"class\s+Test\w+|describe\s*\("), "test"),
+]
+
+
+def _classify_symbol_role(
+    name: str,
+    kind: str,
+    file_path: str,
+    signature: str,
+    workspace: str,
+    start_line: int = 0,
+) -> str:
+    """Classify a symbol's role based on naming, decorators, and file path.
+
+    Checks (in priority order):
+      1. Signature + decorator context patterns (most specific)
+      2. File path patterns (reliable heuristic)
+      3. Name patterns (fallback)
+    """
+    # 1. Check signature patterns — also read 5 lines above the symbol
+    #    to catch decorators like @app.route, @Service, @Entity
+    context = signature
+    if start_line > 1:
+        try:
+            full_path = Path(workspace).resolve() / file_path
+            if full_path.is_file() and full_path.stat().st_size < _MAX_FILE_SIZE:
+                with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
+                    all_lines = fh.readlines()
+                # Grab up to 5 lines before the symbol definition
+                deco_start = max(0, start_line - 6)  # 0-indexed
+                deco_end = min(len(all_lines), start_line)  # up to (not incl.) the def line
+                context = "".join(all_lines[deco_start:deco_end]) + "\n" + signature
+        except Exception:
+            pass
+
+    for pat, role in _SIG_ROLE_PATTERNS:
+        if pat.search(context):
+            return role
+
+    # 2. Check file path
+    fp_lower = file_path.lower().replace("\\", "/")
+    for pat, role in _PATH_ROLE_PATTERNS:
+        if pat.search(fp_lower):
+            return role
+
+    # 3. Name-based fallback
+    n_lower = name.lower()
+    if n_lower.startswith("test") or n_lower.endswith("test"):
+        return "test"
+    if any(s in n_lower for s in ("service", "usecase", "interactor")):
+        return "business_logic"
+    if any(s in n_lower for s in ("model", "schema", "entity")):
+        return "domain_model"
+    if any(s in n_lower for s in ("handler", "controller", "endpoint", "route", "view")):
+        return "route_entry"
+    if any(s in n_lower for s in ("repository", "repo", "dao", "client", "adapter")):
+        return "infrastructure"
+    if any(s in n_lower for s in ("util", "helper", "common")):
+        return "utility"
+
+    return "unknown"
+
+
 def find_symbol(
     workspace: str,
     name: str,
     kind: Optional[str] = None,
     _graph_cache: Optional[Dict] = None,
 ) -> ToolResult:
-    """Find symbol definitions using a cached symbol index."""
+    """Find symbol definitions using a cached symbol index.
+
+    Results are sorted by role priority: route_entry > business_logic >
+    domain_model > infrastructure > utility > test > unknown.
+    Within the same role, exact name matches come first.
+    """
     index = _get_symbol_index(workspace)
     if index is None:
         return ToolResult(
             tool_name="find_symbol", success=False,
-            error="Symbol index not available (missing tree-sitter).",
+            error="Symbol index not available (parser import failed — check tree-sitter-languages install).",
+        )
+    if not index:
+        logger.warning(
+            "find_symbol('%s'): index is empty (0 files indexed) for workspace=%s",
+            name, workspace,
+        )
+        return ToolResult(
+            tool_name="find_symbol", data=[],
+            error="Symbol index is empty — no parseable source files found in workspace.",
         )
 
     results: List[Dict] = []
@@ -429,15 +679,36 @@ def find_symbol(
                 continue
             if kind and defn.kind != kind:
                 continue
-            results.append(SymbolLocation(
+            role = _classify_symbol_role(
+                name=defn.name,
+                kind=defn.kind,
+                file_path=rel,
+                signature=defn.signature,
+                workspace=workspace,
+                start_line=defn.start_line,
+            )
+            d = SymbolLocation(
                 name=defn.name,
                 kind=defn.kind,
                 file_path=rel,
                 start_line=defn.start_line,
                 end_line=defn.end_line,
                 signature=defn.signature,
-            ).model_dump())
+            ).model_dump()
+            d["role"] = role
+            results.append(d)
 
+    # Sort: role priority first, then exact match before substring match
+    results.sort(key=lambda r: (
+        _ROLE_PRIORITY.get(r.get("role", "unknown"), 99),
+        0 if r["name"].lower() == name_lower else 1,
+    ))
+
+    logger.info(
+        "find_symbol('%s'%s): %d results from %d indexed files",
+        name, f", kind={kind}" if kind else "",
+        len(results), len(index),
+    )
     return ToolResult(tool_name="find_symbol", data=results)
 
 
@@ -1051,6 +1322,12 @@ _TEST_FILE_PATTERNS = [
     re.compile(r"^.*\.test\.[jt]sx?$"),
     re.compile(r"^.*\.spec\.[jt]sx?$"),
     re.compile(r"^.*_test\.go$"),
+    re.compile(r"^.*Test\.java$"),
+    re.compile(r"^.*Tests\.java$"),
+    re.compile(r"^.*_test\.rs$"),
+    re.compile(r"^.*_test\.c$"),
+    re.compile(r"^.*_test\.cpp$"),
+    re.compile(r"^.*_test\.cc$"),
 ]
 
 
@@ -1063,6 +1340,10 @@ _PY_TEST_DEF = re.compile(r"^(\s*)(?:async\s+)?def\s+(test_\w+)\s*\(")
 _PY_CLASS_DEF = re.compile(r"^(\s*)class\s+(Test\w+)")
 _JS_TEST_BLOCK = re.compile(r"(test|it)\s*\(\s*['\"`](.+?)['\"`]")
 _GO_TEST_FUNC = re.compile(r"^func\s+(Test\w+|Benchmark\w+)\s*\(")
+_JAVA_TEST_ANNOTATION = re.compile(r"^\s*@(Test|ParameterizedTest|RepeatedTest)\b")
+_JAVA_METHOD_DEF = re.compile(r"^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:void|[\w<>\[\]]+)\s+(\w+)\s*\(")
+_RUST_TEST_ATTR = re.compile(r"^\s*#\[(test|tokio::test|rstest)\]")
+_RUST_FN_DEF = re.compile(r"^\s*(?:async\s+)?fn\s+(\w+)\s*\(")
 
 
 def _find_enclosing_test(
@@ -1085,6 +1366,33 @@ def _find_enclosing_test(
             m = _GO_TEST_FUNC.match(lines[i])
             if m:
                 return {"name": m.group(1), "line": i + 1}
+        return None
+
+    if lang == "java":
+        # Walk backward: find a method def preceded by @Test / @ParameterizedTest
+        for i in range(idx, -1, -1):
+            mm = _JAVA_METHOD_DEF.match(lines[i])
+            if mm:
+                # Check lines above for a test annotation
+                for k in range(i - 1, max(i - 5, -1), -1):
+                    if _JAVA_TEST_ANNOTATION.match(lines[k]):
+                        return {"name": mm.group(1), "line": i + 1}
+                    stripped = lines[k].strip()
+                    if stripped and not stripped.startswith("@") and not stripped.startswith("//"):
+                        break
+        return None
+
+    if lang == "rust":
+        # Walk backward: find fn def preceded by #[test] / #[tokio::test]
+        for i in range(idx, -1, -1):
+            fm = _RUST_FN_DEF.match(lines[i])
+            if fm:
+                for k in range(i - 1, max(i - 5, -1), -1):
+                    if _RUST_TEST_ATTR.match(lines[k]):
+                        return {"name": fm.group(1), "line": i + 1}
+                    stripped = lines[k].strip()
+                    if stripped and not stripped.startswith("#[") and not stripped.startswith("//"):
+                        break
         return None
 
     # Default: Python
@@ -1216,6 +1524,12 @@ def outline_tests(
 
     if lang in ("javascript", "typescript"):
         entries = _js_test_outline(lines)
+    elif lang == "java":
+        entries = _java_test_outline(lines)
+    elif lang == "go":
+        entries = _go_test_outline(lines)
+    elif lang == "rust":
+        entries = _rust_test_outline(lines)
     else:
         entries = _py_test_outline(lines)
 
@@ -1368,6 +1682,183 @@ def _js_test_outline(lines: List[str]) -> List[TestOutlineEntry]:
                 mocks=mocks[:10], assertions=assertions[:10],
             ))
 
+    return entries
+
+
+# Java test outline helpers
+_JAVA_MOCK_RE = [
+    re.compile(r"@Mock\b"),
+    re.compile(r"@InjectMocks\b"),
+    re.compile(r"@MockBean\b"),
+    re.compile(r"@SpyBean\b"),
+    re.compile(r"(?:Mockito\.)?(?:mock|spy|when)\((.{0,60}?)\)"),
+]
+_JAVA_ASSERT_RE = re.compile(
+    r"(assert\w+\(.{0,80}|assertThat\(.{0,80}|verify\(.{0,60})"
+)
+
+
+def _java_test_outline(lines: List[str]) -> List[TestOutlineEntry]:
+    """Parse Java test file for @Test methods, mocks (Mockito), assertions."""
+    entries: List[TestOutlineEntry] = []
+    # Find class name
+    class_name = ""
+    class_re = re.compile(r"^\s*(?:public\s+)?class\s+(\w+)")
+    for line in lines:
+        cm = class_re.match(line)
+        if cm:
+            class_name = cm.group(1)
+            break
+
+    # Scan for @Test annotated methods
+    i = 0
+    while i < len(lines):
+        if _JAVA_TEST_ANNOTATION.match(lines[i]):
+            annotation_line = i
+            # Advance past annotations to find the method def
+            j = i + 1
+            while j < len(lines):
+                mm = _JAVA_METHOD_DEF.match(lines[j])
+                if mm:
+                    method_name = mm.group(1)
+                    full_name = f"{class_name}::{method_name}" if class_name else method_name
+                    # Scan method body (brace counting)
+                    brace = 0
+                    started = False
+                    body_lines: List[str] = []
+                    end_line = j + 1
+                    for k in range(j, min(j + 200, len(lines))):
+                        brace += lines[k].count("{") - lines[k].count("}")
+                        if "{" in lines[k]:
+                            started = True
+                        body_lines.append(lines[k])
+                        if started and brace <= 0:
+                            end_line = k + 1
+                            break
+                    body_text = "\n".join(body_lines)
+                    mocks: List[str] = []
+                    for mp in _JAVA_MOCK_RE:
+                        for m in mp.finditer(body_text):
+                            val = m.group(1).strip()[:60] if m.lastindex else m.group(0).strip()[:60]
+                            mocks.append(val)
+                    assertions = [
+                        m.group(1).strip()[:80]
+                        for m in _JAVA_ASSERT_RE.finditer(body_text)
+                    ]
+                    entries.append(TestOutlineEntry(
+                        name=full_name, kind="test_function",
+                        line_number=j + 1, end_line=end_line,
+                        mocks=mocks[:10], assertions=assertions[:10],
+                    ))
+                    i = end_line
+                    break
+                stripped = lines[j].strip()
+                if stripped and not stripped.startswith("@") and not stripped.startswith("//"):
+                    break
+                j += 1
+            else:
+                i += 1
+                continue
+            continue
+        i += 1
+    return entries
+
+
+def _go_test_outline(lines: List[str]) -> List[TestOutlineEntry]:
+    """Parse Go test file for Test*/Benchmark* functions, assertions."""
+    entries: List[TestOutlineEntry] = []
+    go_assert_re = re.compile(
+        r"(t\.(?:Error|Fatal|Log|Run|Helper|Skip|Parallel)\w*\(.{0,60}|"
+        r"assert\.\w+\(.{0,60}|require\.\w+\(.{0,60})"
+    )
+    go_mock_re = re.compile(r"(gomock\.NewController|mock\.\w+)")
+
+    for i, line in enumerate(lines):
+        fm = _GO_TEST_FUNC.match(line)
+        if not fm:
+            continue
+        func_name = fm.group(1)
+        # Scan body via brace counting
+        brace = 0
+        started = False
+        body_lines: List[str] = []
+        end_line = i + 1
+        for k in range(i, min(i + 300, len(lines))):
+            brace += lines[k].count("{") - lines[k].count("}")
+            if "{" in lines[k]:
+                started = True
+            body_lines.append(lines[k])
+            if started and brace <= 0:
+                end_line = k + 1
+                break
+        body_text = "\n".join(body_lines)
+        assertions = [m.group(1).strip()[:80] for m in go_assert_re.finditer(body_text)]
+        mocks = [m.group(1).strip()[:60] for m in go_mock_re.finditer(body_text)]
+        entries.append(TestOutlineEntry(
+            name=func_name, kind="test_function",
+            line_number=i + 1, end_line=end_line,
+            mocks=mocks[:10], assertions=assertions[:10],
+        ))
+    return entries
+
+
+def _rust_test_outline(lines: List[str]) -> List[TestOutlineEntry]:
+    """Parse Rust test file for #[test] / #[tokio::test] functions, assertions."""
+    entries: List[TestOutlineEntry] = []
+    rust_assert_re = re.compile(
+        r"(assert!\(.{0,80}|assert_eq!\(.{0,80}|assert_ne!\(.{0,80}|"
+        r"panic!\(.{0,60}|should_panic)"
+    )
+    # Detect mod tests { ... } block
+    mod_test_re = re.compile(r"^\s*mod\s+tests\b")
+    in_test_mod = False
+
+    i = 0
+    while i < len(lines):
+        if mod_test_re.match(lines[i]):
+            in_test_mod = True
+
+        if _RUST_TEST_ATTR.match(lines[i]):
+            # Advance to the fn def
+            j = i + 1
+            while j < len(lines):
+                fm = _RUST_FN_DEF.match(lines[j])
+                if fm:
+                    func_name = fm.group(1)
+                    # Scan body via brace counting
+                    brace = 0
+                    started = False
+                    body_lines: List[str] = []
+                    end_line = j + 1
+                    for k in range(j, min(j + 200, len(lines))):
+                        brace += lines[k].count("{") - lines[k].count("}")
+                        if "{" in lines[k]:
+                            started = True
+                        body_lines.append(lines[k])
+                        if started and brace <= 0:
+                            end_line = k + 1
+                            break
+                    body_text = "\n".join(body_lines)
+                    assertions = [
+                        m.group(1).strip()[:80]
+                        for m in rust_assert_re.finditer(body_text)
+                    ]
+                    entries.append(TestOutlineEntry(
+                        name=func_name, kind="test_function",
+                        line_number=j + 1, end_line=end_line,
+                        assertions=assertions[:10],
+                    ))
+                    i = end_line
+                    break
+                stripped = lines[j].strip()
+                if stripped and not stripped.startswith("#[") and not stripped.startswith("//"):
+                    break
+                j += 1
+            else:
+                i += 1
+                continue
+            continue
+        i += 1
     return entries
 
 
@@ -1928,6 +2419,469 @@ def _detect_sources(
 
 
 # ---------------------------------------------------------------------------
+# Compressed view / module summary / expand symbol
+# ---------------------------------------------------------------------------
+
+_SIDE_EFFECT_PATTERNS = {
+    "db_write": [
+        "session.add", "session.commit", ".save()", ".create(",
+        ".update(", ".delete(", "bulk_create", ".objects.create",
+        "INSERT", "UPDATE", "db.add", "db.flush", "db.execute",
+    ],
+    "http_call": [
+        "requests.", "httpx.", "aiohttp.", "fetch(",
+        "urllib", "ClientSession",
+    ],
+    "event_publish": [
+        "publish(", "emit(", "send_event(", "dispatch(",
+        "notify(", "event_bus.", "broker.",
+    ],
+    "file_write": [
+        ".write(", "mkdir(", "shutil.", "copyfile",
+    ],
+    "cache_write": [
+        "cache.set", "redis.", "memcached.", ".cache(",
+    ],
+}
+
+
+def _detect_side_effects(body_text: str) -> List[str]:
+    """Detect side effects by pattern matching in function body."""
+    if not body_text:
+        return []
+    effects = []
+    for effect_type, markers in _SIDE_EFFECT_PATTERNS.items():
+        if any(m in body_text for m in markers):
+            effects.append(effect_type.replace("_", " "))
+    return effects
+
+
+def _extract_callees_from_body(body_lines: List[str]) -> List[str]:
+    """Quick extraction of function/method calls from body text."""
+    call_re = re.compile(r"(?:self\.)?(\w+(?:\.\w+)*)\s*\(")
+    seen: set = set()
+    result: List[str] = []
+    for line in body_lines:
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        for m in call_re.finditer(line):
+            name = m.group(1)
+            # Skip common builtins / keywords
+            if name in ("if", "for", "while", "return", "print", "len",
+                        "str", "int", "float", "bool", "list", "dict",
+                        "set", "tuple", "range", "super", "isinstance",
+                        "hasattr", "getattr", "setattr", "type", "None"):
+                continue
+            if name not in seen:
+                seen.add(name)
+                result.append(name)
+    return result
+
+
+def _extract_raises(body_text: str) -> List[str]:
+    """Extract exception types raised in a function body."""
+    raise_re = re.compile(r"raise\s+(\w+)")
+    throws_re = re.compile(r"throw\s+new\s+(\w+)")
+    seen: set = set()
+    result: List[str] = []
+    for m in raise_re.finditer(body_text):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    for m in throws_re.finditer(body_text):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def _extract_symbols_rich(lines: List[str], lang: Optional[str]) -> List[Dict[str, Any]]:
+    """Extract symbols including methods within classes (richer than repo_graph parser).
+
+    Returns list of dicts: {name, kind, indent, start_line, end_line, signature, parent}.
+    """
+    symbols: List[Dict[str, Any]] = []
+
+    if lang in ("python", None):
+        class_re = re.compile(r"^(\s*)class\s+(\w+)\s*[:\(]")
+        func_re = re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)")
+    elif lang in ("javascript", "typescript"):
+        class_re = re.compile(r"^(\s*)(?:export\s+)?class\s+(\w+)")
+        func_re = re.compile(r"^(\s*)(?:export\s+)?(?:async\s+)?(?:function\s+)?(\w+)\s*\(([^)]*)\)")
+    elif lang == "java":
+        class_re = re.compile(r"^(\s*)(?:public|private|protected|abstract|final|static)?\s*class\s+(\w+)")
+        func_re = re.compile(r"^(\s*)(?:public|private|protected)?\s*(?:static\s+)?(?:\w[\w<>\[\],\s]*?)\s+(\w+)\s*\(([^)]*)\)")
+    elif lang == "go":
+        class_re = re.compile(r"^(\s*)type\s+(\w+)\s+struct")
+        func_re = re.compile(r"^(\s*)func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(([^)]*)\)")
+    elif lang == "rust":
+        class_re = re.compile(r"^(\s*)(?:pub\s+)?(?:struct|enum|trait)\s+(\w+)")
+        func_re = re.compile(r"^(\s*)(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)")
+    else:
+        class_re = re.compile(r"^(\s*)class\s+(\w+)")
+        func_re = re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)")
+
+    for i, line in enumerate(lines):
+        cm = class_re.match(line)
+        if cm:
+            symbols.append({
+                "name": cm.group(2), "kind": "class",
+                "indent": len(cm.group(1)), "start_line": i + 1,
+                "end_line": i + 1, "signature": line.strip(), "parent": None,
+            })
+            continue
+        fm = func_re.match(line)
+        if fm:
+            name = fm.group(2)
+            # Skip dunder methods that are noise in compressed view
+            if name.startswith("__") and name not in ("__init__", "__call__", "__enter__", "__exit__"):
+                continue
+            indent = len(fm.group(1))
+            kind = "method" if indent > 0 else "function"
+            # Find parent class
+            parent = None
+            for prev in reversed(symbols):
+                if prev["kind"] == "class" and prev["indent"] < indent:
+                    parent = prev["name"]
+                    break
+            symbols.append({
+                "name": name, "kind": kind,
+                "indent": indent, "start_line": i + 1,
+                "end_line": i + 1, "signature": line.strip(), "parent": parent,
+            })
+
+    # Compute end_line for each symbol
+    for idx, sym in enumerate(symbols):
+        for nxt in symbols[idx + 1:]:
+            if nxt["indent"] <= sym["indent"]:
+                sym["end_line"] = nxt["start_line"] - 1
+                break
+        else:
+            sym["end_line"] = len(lines)
+
+    return symbols
+
+
+def compressed_view(
+    workspace: str,
+    file_path: str,
+    focus: Optional[str] = None,
+) -> ToolResult:
+    """Compressed view of a file: signatures + call relationships + side effects.
+
+    Saves ~80% tokens vs read_file while preserving structural information.
+    Agent uses this FIRST to understand a file, then expand_symbol for details.
+    """
+    from app.repo_graph.parser import detect_language
+
+    fp = _resolve(workspace, file_path)
+    if not fp.is_file():
+        return ToolResult(tool_name="compressed_view", success=False,
+                          error=f"File not found: {file_path}")
+
+    try:
+        source = fp.read_text(errors="replace")
+    except OSError as exc:
+        return ToolResult(tool_name="compressed_view", success=False, error=str(exc))
+
+    lines = source.split("\n")
+    total_lines = len(lines)
+    lang = detect_language(str(fp))
+
+    symbols = _extract_symbols_rich(lines, lang)
+
+    if focus:
+        focus_lower = focus.lower()
+        symbols = [s for s in symbols
+                   if focus_lower in s["name"].lower()
+                   or (s.get("parent") and focus_lower in s["parent"].lower())]
+
+    ws = Path(workspace).resolve()
+    rel_path = str(fp.relative_to(ws))
+    header = f"## {rel_path} ({total_lines} lines, {len(symbols)} symbols)"
+
+    output_lines: List[str] = [header, ""]
+    for sym in symbols:
+        indent = "    " if sym["kind"] == "method" else ""
+        sig = sym["signature"]
+        output_lines.append(f"{indent}{sig}")
+
+        # Extract body for analysis
+        body_start = sym["start_line"] - 1
+        body_end = min(sym["end_line"], total_lines)
+        body_lines = lines[body_start:body_end]
+        body_text = "\n".join(body_lines)
+
+        # Callees
+        callees = _extract_callees_from_body(body_lines)
+        if callees:
+            callee_strs = [f"{c}()" for c in callees[:8]]
+            if len(callees) > 8:
+                callee_strs.append(f"... +{len(callees) - 8} more")
+            output_lines.append(f"{indent}    calls: {', '.join(callee_strs)}")
+
+        # Side effects
+        effects = _detect_side_effects(body_text)
+        if effects:
+            output_lines.append(f"{indent}    side_effects: {', '.join(effects)}")
+
+        # Exceptions raised
+        exceptions = _extract_raises(body_text)
+        if exceptions:
+            output_lines.append(f"{indent}    raises: {', '.join(exceptions)}")
+
+        output_lines.append("")
+
+    return ToolResult(
+        tool_name="compressed_view",
+        data={"content": "\n".join(output_lines), "path": rel_path,
+              "total_lines": total_lines, "symbol_count": len(symbols)},
+    )
+
+
+def module_summary(
+    workspace: str,
+    module_path: str,
+) -> ToolResult:
+    """High-level module summary: responsibilities, key services, dependencies.
+
+    Saves ~95% tokens vs reading all files. Results are computed from AST analysis.
+    """
+    from app.repo_graph.parser import extract_definitions, detect_language
+
+    ws = Path(workspace).resolve()
+    mod_dir = _resolve(workspace, module_path)
+    if not mod_dir.is_dir():
+        return ToolResult(tool_name="module_summary", success=False,
+                          error=f"Directory not found: {module_path}")
+
+    # Collect source files (all supported languages)
+    _LANG_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".c", ".cpp"}
+    source_files: List[Path] = []
+    for dirpath, dirnames, filenames in os.walk(mod_dir):
+        rel = Path(dirpath).relative_to(ws)
+        if _is_excluded(rel.parts):
+            dirnames.clear()
+            continue
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+        for f in filenames:
+            if Path(f).suffix in _LANG_EXTS:
+                source_files.append(Path(dirpath) / f)
+
+    if not source_files:
+        return ToolResult(tool_name="module_summary",
+                          data={"content": f"## Module: {module_path}\nNo source files found.",
+                                "file_count": 0, "loc": 0})
+
+    total_loc = 0
+    all_classes: List[str] = []
+    all_functions: List[str] = []
+    import_modules: set = set()
+
+    for f in source_files[:100]:  # cap for very large modules
+        if f.stat().st_size > _MAX_FILE_SIZE:
+            continue
+        try:
+            content = f.read_text(errors="replace")
+            total_loc += len(content.splitlines())
+
+            syms = extract_definitions(str(f), f.read_bytes())
+            for d in syms.definitions:
+                if d.kind == "class":
+                    all_classes.append(d.name)
+                elif d.kind in ("function", "method"):
+                    all_functions.append(d.name)
+
+            # Quick import extraction
+            for line in content.splitlines()[:100]:
+                stripped = line.strip()
+                if stripped.startswith("from ") or stripped.startswith("import "):
+                    # Extract module name
+                    parts = stripped.split()
+                    if len(parts) >= 2:
+                        mod = parts[1].split(".")[0]
+                        if mod and mod not in (".", ".."):
+                            import_modules.add(mod)
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    # Classify notable symbols
+    services = [c for c in all_classes if "Service" in c or "Manager" in c]
+    models = [c for c in all_classes
+              if any(kw in c for kw in ("Model", "Schema", "Entity", "DTO"))]
+    controllers = [c for c in all_classes
+                   if any(kw in c for kw in ("Controller", "Router", "Handler", "View"))]
+    remaining_classes = [c for c in all_classes
+                         if c not in services and c not in models and c not in controllers]
+
+    # Build summary text
+    rel_module = str(mod_dir.relative_to(ws))
+    lines = [f"## Module: {rel_module} ({len(source_files)} files, {total_loc:,} LOC)", ""]
+
+    if services:
+        lines.append(f"Key Services: {', '.join(services[:15])}")
+    if models:
+        lines.append(f"Key Models: {', '.join(models[:15])}")
+    if controllers:
+        lines.append(f"Controllers: {', '.join(controllers[:15])}")
+    if remaining_classes:
+        lines.append(f"Other Classes: {', '.join(remaining_classes[:15])}")
+
+    # Show top functions (by heuristic importance)
+    notable_fns = [f for f in all_functions
+                   if not f.startswith("_") and f not in ("__init__", "setUp", "tearDown")]
+    if notable_fns:
+        lines.append(f"Key Functions ({len(notable_fns)} total): {', '.join(notable_fns[:20])}")
+
+    if import_modules:
+        lines.append(f"\nExternal Imports: {', '.join(sorted(import_modules)[:20])}")
+
+    # List files
+    lines.append(f"\nFiles ({len(source_files)}):")
+    for f in sorted(source_files)[:30]:
+        try:
+            loc = len(f.read_text(errors="replace").splitlines())
+            lines.append(f"  {f.relative_to(ws)} ({loc} lines)")
+        except OSError:
+            lines.append(f"  {f.relative_to(ws)}")
+    if len(source_files) > 30:
+        lines.append(f"  ... and {len(source_files) - 30} more files")
+
+    return ToolResult(
+        tool_name="module_summary",
+        data={"content": "\n".join(lines), "file_count": len(source_files),
+              "loc": total_loc},
+    )
+
+
+def expand_symbol(
+    workspace: str,
+    symbol_name: str,
+    file_path: Optional[str] = None,
+) -> ToolResult:
+    """Expand a symbol to its full source code.
+
+    Agent workflow: compressed_view → identify symbol → expand_symbol.
+    This implements the "compress first, expand on demand" principle.
+    """
+    from app.repo_graph.parser import extract_definitions
+
+    ws = Path(workspace).resolve()
+
+    # If file_path is provided, search within that file
+    if file_path:
+        fp = _resolve(workspace, file_path)
+        if not fp.is_file():
+            return ToolResult(tool_name="expand_symbol", success=False,
+                              error=f"File not found: {file_path}")
+
+        syms = extract_definitions(str(fp), fp.read_bytes())
+        matches = [s for s in syms.definitions if s.name == symbol_name]
+        if not matches:
+            # Try substring match
+            matches = [s for s in syms.definitions
+                       if symbol_name.lower() in s.name.lower()]
+
+        if not matches:
+            available = [s.name for s in syms.definitions][:20]
+            return ToolResult(
+                tool_name="expand_symbol", success=False,
+                error=f"Symbol '{symbol_name}' not found in {file_path}. "
+                      f"Available: {', '.join(available)}",
+            )
+
+        sym = matches[0]
+        try:
+            source = fp.read_text(errors="replace")
+            lines = source.split("\n")
+            body = "\n".join(lines[sym.start_line - 1 : sym.end_line])
+        except OSError as exc:
+            return ToolResult(tool_name="expand_symbol", success=False, error=str(exc))
+
+        rel = str(fp.relative_to(ws))
+        return ToolResult(
+            tool_name="expand_symbol",
+            data={
+                "symbol_name": sym.name,
+                "kind": sym.kind,
+                "file_path": rel,
+                "start_line": sym.start_line,
+                "end_line": sym.end_line,
+                "signature": sym.signature,
+                "source": body,
+            },
+        )
+
+    # No file_path — search the entire workspace
+    candidates = []
+    for dirpath, dirnames, filenames in os.walk(ws):
+        rel_dir = Path(dirpath).relative_to(ws)
+        if _is_excluded(rel_dir.parts):
+            dirnames.clear()
+            continue
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+
+        for f in filenames:
+            fpath = Path(dirpath) / f
+            if fpath.suffix not in (".py", ".js", ".jsx", ".ts", ".tsx",
+                                     ".java", ".go", ".rs", ".c", ".cpp"):
+                continue
+            if fpath.stat().st_size > _MAX_FILE_SIZE:
+                continue
+            try:
+                syms = extract_definitions(str(fpath), fpath.read_bytes())
+                for s in syms.definitions:
+                    if s.name == symbol_name:
+                        candidates.append((s, fpath))
+                    elif symbol_name.lower() in s.name.lower() and not candidates:
+                        candidates.append((s, fpath))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(candidates) >= 5:
+                break
+        if len(candidates) >= 5:
+            break
+
+    if not candidates:
+        return ToolResult(
+            tool_name="expand_symbol", success=False,
+            error=f"Symbol '{symbol_name}' not found in the workspace.",
+        )
+
+    sym, fpath = candidates[0]
+    try:
+        source = fpath.read_text(errors="replace")
+        lines = source.split("\n")
+        body = "\n".join(lines[sym.start_line - 1 : sym.end_line])
+    except OSError as exc:
+        return ToolResult(tool_name="expand_symbol", success=False, error=str(exc))
+
+    rel = str(fpath.relative_to(ws))
+    data = {
+        "symbol_name": sym.name,
+        "kind": sym.kind,
+        "file_path": rel,
+        "start_line": sym.start_line,
+        "end_line": sym.end_line,
+        "signature": sym.signature,
+        "source": body,
+    }
+
+    # If multiple candidates, show alternatives
+    if len(candidates) > 1:
+        data["alternatives"] = [
+            {"name": s.name, "file_path": str(fp.relative_to(ws)),
+             "kind": s.kind, "line": s.start_line}
+            for s, fp in candidates[1:5]
+        ]
+
+    return ToolResult(tool_name="expand_symbol", data=data)
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1950,6 +2904,9 @@ TOOL_REGISTRY = {
     "find_tests": find_tests,
     "test_outline": outline_tests,
     "trace_variable": trace_variable,
+    "compressed_view": compressed_view,
+    "module_summary": module_summary,
+    "expand_symbol": expand_symbol,
 }
 
 

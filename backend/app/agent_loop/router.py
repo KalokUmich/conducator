@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/context", tags=["context"])
 class ContextQueryRequest(BaseModel):
     room_id: str
     query: str = Field(..., description="Natural-language question about the codebase.")
-    max_iterations: int = Field(default=25, ge=1, le=50)
+    max_iterations: int = Field(default=40, ge=1, le=80)
     model_id: Optional[str] = Field(
         default=None,
         description="Override model for this request. Uses default if null.",
@@ -85,6 +85,10 @@ class ExplainRichResponse(BaseModel):
     explanation: str
     model: str
     structured: Optional[Dict[str, str]] = None
+    thinking_steps: List[ThinkingStepResponse] = []
+    tool_calls_made: int = 0
+    iterations: int = 0
+    duration_ms: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +107,19 @@ def _get_agent_provider():
     return getattr(app.state, "agent_provider", None)
 
 
+def _get_trace_writer():
+    """Get the TraceWriter from app state (created during lifespan)."""
+    from app.main import app
+    return getattr(app.state, "trace_writer", None)
+
+
+def _get_classifier_provider():
+    """Get the lightweight model used for query pre-classification."""
+    from app.main import app
+    return getattr(app.state, "classifier_provider", None)
+
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -113,6 +130,8 @@ async def context_query(
     req: ContextQueryRequest,
     git_workspace=Depends(_get_git_workspace_service),
     agent_provider=Depends(_get_agent_provider),
+    trace_writer=Depends(_get_trace_writer),
+    classifier_provider=Depends(_get_classifier_provider),
 ) -> ContextQueryResponse:
     """Run an agent loop to find relevant code context and answer a question."""
     if agent_provider is None:
@@ -131,6 +150,8 @@ async def context_query(
     agent = AgentLoopService(
         provider=agent_provider,
         max_iterations=req.max_iterations,
+        trace_writer=trace_writer,
+        classifier_provider=classifier_provider,
     )
 
     result: AgentResult = await agent.run(
@@ -180,11 +201,13 @@ async def context_query_stream(
     req: ContextQueryRequest,
     git_workspace=Depends(_get_git_workspace_service),
     agent_provider=Depends(_get_agent_provider),
+    trace_writer=Depends(_get_trace_writer),
+    classifier_provider=Depends(_get_classifier_provider),
 ):
     """SSE streaming version of context_query.
 
     Streams events as the agent loop progresses so the client can display
-    real-time progress (e.g. "Searching for auth patterns…").
+    real-time progress (e.g. "Searching for auth patterns...").
 
     Event types:
       * ``thinking``      — LLM reasoning text
@@ -210,6 +233,8 @@ async def context_query_stream(
     agent = AgentLoopService(
         provider=agent_provider,
         max_iterations=req.max_iterations,
+        trace_writer=trace_writer,
+        classifier_provider=classifier_provider,
     )
 
     async def event_generator():
@@ -261,16 +286,9 @@ async def explain_rich(
     req: ExplainRichRequest,
     git_workspace=Depends(_get_git_workspace_service),
     agent_provider=Depends(_get_agent_provider),
+    trace_writer=Depends(_get_trace_writer),
 ) -> ExplainRichResponse:
-    """Explain a code snippet using the agentic code-intelligence loop.
-
-    The agent iteratively calls code tools (read_file, find_symbol,
-    find_references, grep, get_callers, etc.) to gather context around the
-    snippet before producing a thorough explanation.
-
-    This replaces the old approach where the VS Code extension pre-assembled
-    a large XML prompt from LSP data and sent it to the LLM directly.
-    """
+    """Explain a code snippet using the agentic code-intelligence loop."""
     if agent_provider is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -285,12 +303,23 @@ async def explain_rich(
         )
 
     query = _build_explain_query(req)
-    agent = AgentLoopService(provider=agent_provider, max_iterations=10)
+    agent = AgentLoopService(provider=agent_provider, max_iterations=25, trace_writer=trace_writer)
     result: AgentResult = await agent.run(query=query, workspace_path=str(worktree_path))
 
     return ExplainRichResponse(
         explanation=result.answer,
         model=_resolve_model_name(),
+        thinking_steps=[
+            ThinkingStepResponse(
+                kind=s.kind, iteration=s.iteration, text=s.text,
+                tool=s.tool, params=s.params, summary=s.summary,
+                success=s.success,
+            )
+            for s in result.thinking_steps
+        ],
+        tool_calls_made=result.tool_calls_made,
+        iterations=result.iterations,
+        duration_ms=result.duration_ms,
     )
 
 
@@ -299,20 +328,9 @@ async def explain_rich_stream(
     req: ExplainRichRequest,
     git_workspace=Depends(_get_git_workspace_service),
     agent_provider=Depends(_get_agent_provider),
+    trace_writer=Depends(_get_trace_writer),
 ):
-    """SSE streaming version of explain-rich.
-
-    Streams events as the agent loop progresses so the client can display
-    real-time progress (e.g. "Reading router.py...").
-
-    Event types (same as /query/stream):
-      * ``thinking``      - LLM reasoning text
-      * ``tool_call``     - tool invocation starting
-      * ``tool_result``   - tool execution completed
-      * ``context_chunk`` - a piece of code context collected
-      * ``done``          - final answer (includes ``model`` field)
-      * ``error``         - unrecoverable error
-    """
+    """SSE streaming version of explain-rich."""
     if agent_provider is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -327,7 +345,7 @@ async def explain_rich_stream(
         )
 
     query = _build_explain_query(req)
-    agent = AgentLoopService(provider=agent_provider, max_iterations=10)
+    agent = AgentLoopService(provider=agent_provider, max_iterations=25, trace_writer=trace_writer)
     model_name = _resolve_model_name()
 
     async def event_generator():
