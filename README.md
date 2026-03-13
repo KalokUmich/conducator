@@ -1,29 +1,105 @@
 # Conductor
 
+**AI-native collaborative coding inside VS Code.**
+
+Turn engineering discussions into structured decisions and executable code tasks.
+
+Conductor combines real-time team collaboration, isolated Git workspaces, agentic code intelligence, and multi-provider AI into a single developer environment.
+
 [English](#english) | [中文](#中文)
 
 ---
 
 <a name="english"></a>
-## English
 
-Conductor is a VS Code collaboration extension + FastAPI backend for team chat, Git workspace sharing, file sharing, and **agentic AI code intelligence**.
+## Why Conductor
 
-### Features
+Modern AI coding tools are powerful — but they are mostly **single-user tools**.
 
-- **Agentic Code Intelligence** — LLM agent loop (up to 25 iterations, 500K token budget) that iteratively navigates the codebase using 21 code tools (grep, AST search, call graph, git log, data flow tracing, compressed views, ...) to answer questions. No pre-built vector index needed.
-- **3-Layer System Prompt** — Core Identity + per-query-type Strategy + dynamic Runtime Guidance. Query Classifier categorises queries into 7 types and selects the optimal 8-12 tool subset, reducing token waste.
-- **Token-Based Budget Controller** — tracks cumulative input/output tokens; emits NORMAL → WARN_CONVERGE → FORCE_CONCLUDE signals. LLM sees budget context each turn.
-- **Evidence Evaluator** — rule-based quality gate before finalising answers: requires file:line references, ≥2 tool calls, ≥1 file accessed. Rejects weak answers if budget remains.
-- **Session Trace** — per-session JSON trace (LLM latency, tool latencies, token breakdown, budget signals) saved for offline analysis.
-- **Git Workspace Management** — per-room bare repo + worktree isolation. Files appear in VS Code explorer via a `conductor://` URI scheme (FileSystemProvider).
-- **Real-time Chat** — WebSocket rooms with typing indicators, read receipts, reconnect recovery, and AI message injection.
-- **File Sharing** — multipart upload with SHA-256 deduplication, DuckDB-backed metadata.
-- **Audit & Todos** — DuckDB-persisted audit log (AI change apply/skip events) and room-scoped TODO tracker.
-- **Multi-Provider AI** — Bedrock Converse, Anthropic Direct, OpenAI. ProviderResolver health-checks all configured providers at startup and picks the fastest. All 3 providers implement `chat_with_tools()`.
-- **LangExtract Integration** — multi-vendor Bedrock language model plugin for Google's langextract library. `BedrockCatalog` dynamically discovers all available Bedrock models (Claude, Amazon Nova, Llama, Mistral, DeepSeek, Qwen) at startup.
+Tools like GitHub Copilot, Cursor, and ChatGPT help individuals write code. But software development is a **team activity**.
 
-### Architecture
+Most engineering knowledge lives in meetings, chat discussions, and design reviews. By the time code is written, the reasoning behind decisions is often lost.
+
+Conductor explores a different approach: instead of starting from code prompts, we start from **engineering discussions**.
+
+## The Idea
+
+Conductor transforms engineering conversations into structured inputs for AI systems.
+
+```
+Team Discussion
+      ↓
+AI Distillation
+      ↓
+Structured Engineering Decisions
+      ↓
+Code Intelligence Agent
+      ↓
+Implementation
+```
+
+This allows AI systems to understand not only the codebase, but also the **context behind engineering decisions**.
+
+## What Conductor Provides
+
+### Collaborative Coding Rooms
+
+Teams collaborate inside shared rooms with real-time chat, file sharing, code snippets, and TODO tracking.
+
+### Isolated Git Workspaces
+
+Each collaboration room runs inside its own Git workspace using bare repositories, Git worktrees, and a custom VS Code filesystem (`conductor://`). This allows AI agents to explore code safely without affecting developers' local repositories.
+
+### Agentic Code Intelligence
+
+Conductor uses a tool-based agent loop instead of simple RAG. The agent iteratively navigates the repository using 21 code tools (up to 25 iterations, 500K token budget):
+
+| Tool | Description |
+|------|-------------|
+| `grep` | Regex search (ripgrep) |
+| `read_file` | Read file content with line range |
+| `list_files` | Directory tree |
+| `find_symbol` | AST-based symbol definition (with role classification) |
+| `find_references` | All usages of a symbol |
+| `file_outline` | All definitions in a file |
+| `get_dependencies` | Files this file imports |
+| `get_dependents` | Files that import this file |
+| `git_log` | Recent commits |
+| `git_diff` | Diff between refs |
+| `ast_search` | Structural AST search (ast-grep, `$VAR`/`$$$MULTI` patterns) |
+| `get_callees` | Functions called within a function |
+| `get_callers` | Functions that call a given function (cross-file) |
+| `git_blame` | Per-line authorship with commit hash, author, date |
+| `git_show` | Full commit details (message + diff) |
+| `find_tests` | Test functions covering a given function/class |
+| `test_outline` | Test file structure with mocks, assertions, fixtures |
+| `trace_variable` | Data flow tracing: alias detection, arg→param mapping, sink/source patterns |
+| `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
+| `module_summary` | Module-level summary: services, models, functions, file list (~95% savings) |
+| `expand_symbol` | Expand a symbol from compressed view to full source code |
+
+The agent dynamically selects 8–12 tools per query type (reducing hallucinated calls and token waste). A **Token Budget Controller** emits `NORMAL → WARN_CONVERGE → FORCE_CONCLUDE` signals. An **Evidence Evaluator** gates answers before finalising: requires file:line references, ≥2 tool calls, ≥1 file accessed.
+
+### Multi-Provider AI
+
+Conductor supports AWS Bedrock, Anthropic, and OpenAI. `ProviderResolver` health-checks all configured providers at startup and automatically selects the best available model. All three providers implement `chat_with_tools()`.
+
+## Quick Demo
+
+```bash
+# Start the backend
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Open the VS Code extension and start a session. Then ask questions like:
+
+- "Where is the loan approval logic implemented?"
+- "Trace how the payment service is called."
+- "Explain the dependency graph of this module."
+
+## Architecture
 
 ```
 ┌──────────────────────────┐     ┌──────────────────────────────────────────┐
@@ -61,50 +137,31 @@ Conductor is a VS Code collaboration extension + FastAPI backend for team chat, 
 └──────────────────────────┘     └──────────────────────────────────────────┘
 ```
 
-### 21 Code Tools
+## Project Status
 
-The agent selects an optimal 8-12 tool subset per query type (reducing hallucinated calls and token waste):
+Current prototype includes:
 
-| Tool | Description |
-|------|-------------|
-| `grep` | Regex search (ripgrep) |
-| `read_file` | Read file content with line range |
-| `list_files` | Directory tree |
-| `find_symbol` | AST-based symbol definition (with role classification) |
-| `find_references` | All usages of a symbol |
-| `file_outline` | All definitions in a file |
-| `get_dependencies` | Files this file imports |
-| `get_dependents` | Files that import this file |
-| `git_log` | Recent commits |
-| `git_diff` | Diff between refs |
-| `ast_search` | Structural AST search (ast-grep, `$VAR`/`$$$MULTI` patterns) |
-| `get_callees` | Functions called within a function |
-| `get_callers` | Functions that call a given function (cross-file) |
-| `git_blame` | Per-line authorship with commit hash, author, date |
-| `git_show` | Full commit details (message + diff) |
-| `find_tests` | Test functions covering a given function/class |
-| `test_outline` | Test file structure with mocks, assertions, fixtures |
-| `trace_variable` | Data flow tracing: alias detection, arg→param mapping, sink/source patterns |
-| `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
-| `module_summary` | Module-level summary: services, models, functions, file list (~95% savings) |
-| `expand_symbol` | Expand a symbol from compressed view to full source code |
+- VS Code collaboration extension
+- FastAPI backend
+- Agentic code intelligence (21 tools)
+- Isolated Git workspaces per room
+- Multi-provider AI support (Bedrock, Anthropic, OpenAI)
+- 900+ automated tests
 
-### Quick Start
+## Roadmap
 
-```bash
-# Backend
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+Upcoming features:
 
-# Extension
-cd extension
-npm install
-npm run compile
-# Press F5 in VS Code to launch Extension Development Host
-```
+- AI decision distillation from discussions
+- Code change proposals with diff preview and review
+- Jira task generation from engineering decisions
+- PR assistant
+- Model B delegate authentication
+- Enterprise access control and audit export
 
-### Running Tests
+See [ROADMAP.md](ROADMAP.md) for full details.
+
+## Running Tests
 
 ```bash
 cd backend
@@ -125,7 +182,15 @@ pytest tests/test_git_workspace.py -v         # git workspace
 pytest --cov=. --cov-report=html              # coverage report
 ```
 
-### Documentation
+## Contributing
+
+We welcome contributors interested in:
+
+- AI developer tools
+- Collaborative coding environments
+- Agentic code intelligence
+
+## Documentation
 
 - [Backend Guide](docs/GUIDE.md) — code walkthrough (EN + 中文)
 - [Roadmap](ROADMAP.md) — project phases and ADRs
@@ -134,75 +199,124 @@ pytest --cov=. --cov-report=html              # coverage report
 ---
 
 <a name="中文"></a>
-## 中文
 
-Conductor 是一个 VS Code 协作扩展 + FastAPI 后端，用于团队聊天、Git 工作区共享、文件共享和 **Agentic AI 代码智能分析**。
+## 为什么做 Conductor
 
-### 功能特性
+现代 AI 编程工具很强大——但大多数都是**单人工具**。
 
-- **Agentic 代码智能** — LLM agent loop（最多 25 轮迭代，50 万 token 预算），通过迭代调用 21 个代码工具（grep、AST 搜索、调用图、git log、数据流追踪、压缩视图等）主动探索代码库，无需预建向量索引。
-- **三层系统提示** — 核心身份 + 按查询类型选择的策略层 + 动态运行时引导。QueryClassifier 将查询分为 7 种类型，并为每种类型选择最优的 8-12 个工具子集，减少 token 浪费。
-- **基于 Token 的预算控制器** — 跟踪累计输入/输出 token；发出 NORMAL → WARN_CONVERGE → FORCE_CONCLUDE 信号。LLM 每轮都能看到预算上下文。
-- **证据评估器** — 答案最终确认前的规则质检：要求包含文件:行号引用、≥2 次工具调用、≥1 个已访问文件。预算充足时拒绝低质量答案。
-- **会话追踪** — 每个会话生成 JSON 追踪文件（LLM 延迟、工具延迟、token 分布、预算信号），供离线分析使用。
-- **Git 工作区管理** — 每个房间独立的裸仓库 + worktree 隔离。文件通过 `conductor://` URI 方案（FileSystemProvider）出现在 VS Code 文件管理器中。
-- **实时聊天** — WebSocket 房间，支持打字指示、已读回执、断线重连和 AI 消息注入。
-- **文件共享** — 多部分上传，SHA-256 去重，DuckDB 元数据存储。
-- **审计与任务追踪** — DuckDB 持久化审计日志（AI 变更接受/跳过事件）和房间级 TODO 追踪器。
-- **多提供商 AI** — Bedrock Converse、Anthropic Direct、OpenAI。`ProviderResolver` 在启动时对所有已配置的提供商做健康检查，自动选择最快的。三个提供商均实现 `chat_with_tools()`。
-- **LangExtract 集成** — 多厂商 Bedrock 语言模型插件，支持 Google langextract 库。`BedrockCatalog` 在启动时动态发现所有可用的 Bedrock 模型（Claude、Amazon Nova、Llama、Mistral、DeepSeek、Qwen）。
+GitHub Copilot、Cursor、ChatGPT 帮助个人写代码。但软件开发本质上是**团队活动**。
 
-### 架构
+大多数工程知识存在于会议、聊天讨论和设计评审中。等到代码写出来，决策背后的原因往往已经消失了。
 
-架构图见上方英文部分。
+Conductor 探索一种不同的方式：不从代码提示出发，而从**工程讨论**出发。
 
-### 快速开始
+## 核心思想
+
+Conductor 将工程对话转化为 AI 系统的结构化输入。
+
+```
+团队讨论
+  ↓
+AI 提炼
+  ↓
+结构化工程决策
+  ↓
+代码智能 Agent
+  ↓
+代码实现
+```
+
+这让 AI 系统不仅理解代码库，还能理解**工程决策背后的上下文**。
+
+## 功能特性
+
+### 协作编码房间
+
+团队在共享房间内协作，支持实时聊天、文件共享、代码片段和 TODO 追踪。
+
+### 独立 Git 工作区
+
+每个协作房间运行在独立的 Git 工作区中，使用裸仓库、Git worktree 和自定义 VS Code 文件系统（`conductor://`）。AI Agent 可以安全探索代码，不影响开发者本地仓库。
+
+### Agentic 代码智能
+
+Conductor 使用基于工具的 Agent 循环，而非简单的 RAG。Agent 通过 21 个代码工具迭代探索代码库（最多 25 轮迭代，50 万 token 预算）。
+
+工具详情见上方英文部分。
+
+Agent 每种查询类型动态选择 8-12 个工具。**Token 预算控制器**发出 `NORMAL → WARN_CONVERGE → FORCE_CONCLUDE` 信号。**证据评估器**在最终确认答案前把关：要求文件:行号引用、≥2 次工具调用、≥1 个已访问文件。
+
+### 多提供商 AI
+
+支持 AWS Bedrock、Anthropic 和 OpenAI。`ProviderResolver` 在启动时对所有已配置的提供商做健康检查，自动选择最优模型。三个提供商均实现 `chat_with_tools()`。
+
+## 快速开始
 
 ```bash
-# 后端
+# 启动后端
 cd backend
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 
-# 扩展
+# 启动扩展
 cd extension
 npm install
 npm run compile
 # 在 VS Code 中按 F5 启动扩展开发主机
 ```
 
-### 运行测试
+打开 VS Code 扩展并开始会话，然后提问例如：
+
+- "贷款审批逻辑在哪里实现的？"
+- "追踪支付服务是如何被调用的。"
+- "解释这个模块的依赖图。"
+
+## 架构
+
+架构图见上方英文部分。
+
+## 项目状态
+
+当前原型包括：
+
+- VS Code 协作扩展
+- FastAPI 后端
+- Agentic 代码智能（21 个工具）
+- 每个房间独立的 Git 工作区
+- 多提供商 AI 支持（Bedrock、Anthropic、OpenAI）
+- 900+ 自动化测试
+
+## Roadmap
+
+即将推出的功能：
+
+- 从讨论中 AI 提炼工程决策
+- 代码变更提案与 diff 预览审查
+- 从工程决策生成 Jira 任务
+- PR 助手
+- Model B 委托认证
+- 企业级访问控制与审计导出
+
+详见 [ROADMAP.md](ROADMAP.md)。
+
+## 运行测试
 
 ```bash
 cd backend
-pytest                                        # 所有测试 (900+)
-pytest tests/test_code_tools.py -v            # 21 个代码工具 (98 项)
-pytest tests/test_agent_loop.py -v            # agent loop + 三层提示 (39 项)
-pytest tests/test_budget_controller.py -v     # token 预算控制器 (20 项)
-pytest tests/test_session_trace.py -v         # 会话追踪 (15 项)
-pytest tests/test_evidence.py -v              # 证据评估器 (14 项)
-pytest tests/test_symbol_role.py -v           # 符号角色分类 (24 项)
-pytest tests/test_output_policy.py -v         # 工具输出策略 (19 项)
-pytest tests/test_query_classifier.py -v      # 查询分类器 (26 项)
-pytest tests/test_compressed_tools.py -v      # 压缩视图工具 (24 项)
-pytest tests/test_langextract.py -v           # LangExtract 多厂商 (57 项)
-pytest tests/test_repo_graph.py -v            # 仓库图 (72 项)
-pytest tests/test_config_new.py -v            # 配置 (27 项)
+pytest                          # 所有测试 (900+)
+pytest --cov=. --cov-report=html  # 覆盖率报告
 ```
 
-### 配置
+## 配置
 
-在 `backend/config/conductor.secrets.yaml` 中配置凭证：
+在 `config/conductor.secrets.yaml` 中配置 AI 提供商凭证（参考 `config/conductor.secrets.yaml.example`）。
 
-```yaml
-aws:
-  access_key_id: "AKIA..."
-  secret_access_key: "..."
-  region: "us-east-1"
-openai:
-  api_key: "sk-..."
-anthropic:
-  api_key: "sk-ant-..."
-```
+非敏感配置在 `config/conductor.settings.yaml` 中。
 
-非敏感配置在 `backend/config/conductor.settings.yaml` 中。
+## 参与贡献
+
+欢迎对以下方向感兴趣的贡献者：
+
+- AI 开发者工具
+- 协作编码环境
+- Agentic 代码智能
