@@ -1473,6 +1473,29 @@
                             </select>
                         </div>
 
+                        <!-- Code Explorer (Sub-Agent) -->
+                        <div class="bg-purple-900/20 rounded-lg border border-purple-700/50 p-4">
+                            <div class="flex items-center gap-2 mb-3">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-purple-400" viewBox="0 0 20 20" fill="currentColor">
+                                    <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+                                </svg>
+                                <span class="text-purple-300 text-xs font-medium uppercase tracking-wide">Code Explorer</span>
+                            </div>
+                            <div class="flex items-center justify-between mb-2">
+                                <div>
+                                    <span class="text-gray-200 text-sm">Enable Explorer Model</span>
+                                    <p class="text-xs text-gray-500 mt-0.5">Lightweight model for sub-agent code exploration (thinking disabled for Alibaba)</p>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer ml-3 shrink-0">
+                                    <input type="checkbox" id="ai-explorer-toggle" class="sr-only peer">
+                                    <div class="w-9 h-5 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-purple-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
+                                </label>
+                            </div>
+                            <select id="ai-explorer-select" class="w-full bg-gray-900 border border-gray-600 text-white text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-purple-500 focus:border-purple-500">
+                                <option value="">No explorer models available</option>
+                            </select>
+                        </div>
+
                         <!-- LiteLLM Fallback -->
                         <div class="bg-blue-900/20 rounded-lg border border-blue-700/50 p-4">
                             <div class="flex items-center gap-2 mb-3">
@@ -2034,6 +2057,8 @@
         const aiCodeIntelSection = document.getElementById('ai-code-intel-section');
         const aiClassifierSelect = document.getElementById('ai-classifier-select');
         const aiClassifierToggle = document.getElementById('ai-classifier-toggle');
+        const aiExplorerSelect = document.getElementById('ai-explorer-select');
+        const aiExplorerToggle = document.getElementById('ai-explorer-toggle');
         const aiLiteLLMToggle = document.getElementById('ai-litellm-toggle');
         const aiLiteLLMHint = document.getElementById('ai-litellm-hint');
 
@@ -2999,6 +3024,10 @@
                 case 'setClassifierResult':
                     console.log('[WebView] Received setClassifierResult:', message.data);
                     handleSetClassifierResult(message.data);
+                    break;
+                case 'setExplorerResult':
+                    console.log('[WebView] Received setExplorerResult:', message.data);
+                    handleSetExplorerResult(message.data);
                     break;
                 case 'setLiteLLMFallbackResult':
                     console.log('[WebView] Received setLiteLLMFallbackResult:', message.data);
@@ -7236,7 +7265,7 @@
             updateModelSelect(data.models || [], data.active_model);
 
             // Update code intelligence section (classifier + LiteLLM fallback)
-            updateCodeIntelSection(data.models || [], data.classifier_enabled, data.active_classifier, data.litellm_fallback);
+            updateCodeIntelSection(data.models || [], data.classifier_enabled, data.active_classifier, data.explorer_enabled, data.active_explorer, data.litellm_fallback);
 
             // Update last updated timestamp
             const now = new Date();
@@ -7411,7 +7440,7 @@
          * @param {string|null} activeClassifier - Currently active classifier model ID
          * @param {boolean} litellmFallback - Whether LiteLLM fallback is enabled
          */
-        function updateCodeIntelSection(models, classifierEnabled, activeClassifier, litellmFallback) {
+        function updateCodeIntelSection(models, classifierEnabled, activeClassifier, explorerEnabled, activeExplorer, litellmFallback) {
             if (!aiCodeIntelSection) return;
 
             // --- Classifier sub-section ---
@@ -7443,6 +7472,38 @@
                         aiClassifierSelect.appendChild(option);
                     });
                     aiClassifierSelect.disabled = false;
+                }
+            }
+
+            // --- Explorer sub-section ---
+            const explorerModels = models.filter(m => m.explorer);
+
+            if (aiExplorerToggle) {
+                aiExplorerToggle.checked = explorerEnabled;
+            }
+
+            if (aiExplorerSelect) {
+                aiExplorerSelect.innerHTML = '';
+
+                if (explorerModels.length === 0) {
+                    const option = document.createElement('option');
+                    option.value = '';
+                    option.textContent = 'No explorer models configured';
+                    option.disabled = true;
+                    aiExplorerSelect.appendChild(option);
+                    aiExplorerSelect.disabled = true;
+                } else {
+                    explorerModels.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.id;
+                        option.textContent = model.display_name + (model.available ? '' : ' (unavailable)');
+                        option.disabled = !model.available;
+                        if (model.id === activeExplorer) {
+                            option.selected = true;
+                        }
+                        aiExplorerSelect.appendChild(option);
+                    });
+                    aiExplorerSelect.disabled = false;
                 }
             }
 
@@ -7510,6 +7571,20 @@
         }
 
         /**
+         * Handle explorer toggle or model selection change.
+         */
+        function handleExplorerChange(enabled, modelId) {
+            console.log('[WebView] Changing explorer:', { enabled, modelId });
+            if (aiExplorerSelect) aiExplorerSelect.disabled = true;
+            if (aiExplorerToggle) aiExplorerToggle.disabled = true;
+            vscode.postMessage({
+                command: 'setExplorer',
+                enabled: enabled,
+                modelId: enabled ? (modelId || null) : null,
+            });
+        }
+
+        /**
          * Handle LiteLLM fallback toggle change.
          */
         function handleLiteLLMToggle(enabled) {
@@ -7535,6 +7610,22 @@
             }
             console.log('[WebView] Classifier set successfully:', data.message);
             if (aiClassifierToggle) aiClassifierToggle.checked = data.classifier_enabled;
+        }
+
+        /**
+         * Handle result of setting explorer.
+         */
+        function handleSetExplorerResult(data) {
+            if (aiExplorerSelect) aiExplorerSelect.disabled = false;
+            if (aiExplorerToggle) aiExplorerToggle.disabled = false;
+
+            if (data.error) {
+                console.error('[WebView] Failed to set explorer:', data.error);
+                fetchAiStatus();
+                return;
+            }
+            console.log('[WebView] Explorer set successfully:', data.message);
+            if (aiExplorerToggle) aiExplorerToggle.checked = data.explorer_enabled;
         }
 
         /**
@@ -7581,6 +7672,18 @@
             aiClassifierSelect.addEventListener('change', (e) => {
                 if (aiClassifierToggle && aiClassifierToggle.checked) {
                     handleClassifierChange(true, e.target.value);
+                }
+            });
+        }
+        if (aiExplorerToggle) {
+            aiExplorerToggle.addEventListener('change', (e) => {
+                handleExplorerChange(e.target.checked, aiExplorerSelect?.value || null);
+            });
+        }
+        if (aiExplorerSelect) {
+            aiExplorerSelect.addEventListener('change', (e) => {
+                if (aiExplorerToggle && aiExplorerToggle.checked) {
+                    handleExplorerChange(true, e.target.value);
                 }
             });
         }
@@ -8434,4 +8537,3 @@
     </script>
 </body>
 </html>
-

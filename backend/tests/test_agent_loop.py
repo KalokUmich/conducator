@@ -429,6 +429,49 @@ class TestAgentLoop:
         combined = " ".join(text_blocks)
         assert "SCATTER WARNING" in combined
 
+    @pytest.mark.asyncio
+    async def test_evidence_retry_cap(self, workspace):
+        """Evidence retries are capped at max_evidence_retries to prevent dead loops.
+
+        Simulates a model that always gives vague answers without file:line refs.
+        Without the cap, the agent loop would retry indefinitely until budget runs out.
+        When the cap is hit, the answer is enriched with files the agent accessed.
+        """
+        vague_answer = (
+            "The authentication system works by checking user credentials against "
+            "the database. It uses a service layer pattern where the controller "
+            "delegates to a service which calls the repository."
+        )
+        # First response: a tool call to ensure tool_calls_made >= 2 and files_accessed >= 1
+        provider = MockProvider([
+            ToolUseResponse(
+                text="Let me look.",
+                tool_calls=[ToolCall(id="t1", name="grep", input={"pattern": "auth"})],
+                stop_reason="tool_use",
+            ),
+            ToolUseResponse(
+                text="Let me read.",
+                tool_calls=[ToolCall(id="t2", name="read_file", input={"path": "app/auth.py"})],
+                stop_reason="tool_use",
+            ),
+            # Three consecutive vague answers — only 2 retries allowed
+            ToolUseResponse(text=vague_answer, stop_reason="end_turn"),
+            ToolUseResponse(text=vague_answer, stop_reason="end_turn"),
+            ToolUseResponse(text=vague_answer, stop_reason="end_turn"),
+        ])
+        agent = AgentLoopService(
+            provider=provider,
+            max_iterations=10,
+            max_evidence_retries=2,
+        )
+        result = await agent.run("How does auth work?", str(workspace))
+
+        # After 2 retries, the answer should be enriched with file refs
+        assert vague_answer in result.answer
+        assert "Files examined during analysis" in result.answer
+        # Should have used exactly: 2 tool calls + 3 answer attempts = 5 LLM calls
+        assert result.iterations == 5
+
 
 # ---------------------------------------------------------------------------
 # Message format conversion tests

@@ -575,6 +575,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     console.log('[Conductor] Received setClassifier message from WebView:', message.enabled, message.modelId);
                     this._handleSetClassifier(message.enabled, message.modelId);
                     return;
+                case 'setExplorer':
+                    console.log('[Conductor] Received setExplorer message from WebView:', message.enabled, message.modelId);
+                    this._handleSetExplorer(message.enabled, message.modelId);
+                    return;
                 case 'setLiteLLMFallback':
                     console.log('[Conductor] Received setLiteLLMFallback message from WebView:', message.enabled);
                     this._handleSetLiteLLMFallback(message.enabled);
@@ -1714,6 +1718,47 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             console.error('[Conductor] Failed to set classifier:', msg);
             this._view?.webview.postMessage({
                 command: 'setClassifierResult',
+                data: { error: `Cannot connect to backend: ${msg}` },
+            });
+            this._handleGetAiStatus();
+        }
+    }
+
+    /**
+     * Handle request to set the explorer (sub-agent) model and enable/disable state.
+     */
+    private async _handleSetExplorer(enabled: boolean, modelId: string | null): Promise<void> {
+        try {
+            console.log('[Conductor] Setting explorer:', { enabled, modelId });
+            const response = await fetch(`${getBackendUrl()}/ai/explorer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled, model_id: modelId }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.warn('[Conductor] Set explorer failed:', response.status, errorText);
+                this._view?.webview.postMessage({
+                    command: 'setExplorerResult',
+                    data: { error: `Failed to set explorer: ${response.status}` },
+                });
+                this._handleGetAiStatus();
+                return;
+            }
+
+            const data = await response.json();
+            console.log('[Conductor] Explorer set successfully:', data);
+            this._view?.webview.postMessage({
+                command: 'setExplorerResult',
+                data,
+            });
+            this._handleGetAiStatus();
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[Conductor] Failed to set explorer:', msg);
+            this._view?.webview.postMessage({
+                command: 'setExplorerResult',
                 data: { error: `Cannot connect to backend: ${msg}` },
             });
             this._handleGetAiStatus();
@@ -3681,7 +3726,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             // Stream from the existing /api/context/query/stream endpoint
             const streamUrl = `${backendUrl}/api/context/query/stream`;
             const abortController = new AbortController();
-            const sseTimeoutMs = 5 * 60 * 1000; // 5 minutes
+            const sseTimeoutMs = 10 * 60 * 1000; // 10 minutes (multi-agent code review can take 5-8 min)
             const sseTimeoutId = setTimeout(() => abortController.abort(), sseTimeoutMs);
             const response = await fetch(streamUrl, {
                 method: 'POST',

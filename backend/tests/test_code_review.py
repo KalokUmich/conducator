@@ -1034,3 +1034,253 @@ class TestSynthesis:
         )
 
         assert result == ""
+
+
+# =========================================================================
+# Output Repair Loop
+# =========================================================================
+
+
+class TestOutputRepairLoop:
+    """Test _repair_output — reformats unparseable agent text via LLM."""
+
+    @pytest.mark.asyncio
+    async def test_repair_recovers_findings(self):
+        from app.code_review.agents import _repair_output, AGENT_SPECS
+        spec = AGENT_SPECS[0]  # correctness
+
+        mock_provider = MagicMock()
+        # Simulate the model returning valid JSON on the repair call
+        mock_provider.call_model.return_value = json.dumps([{
+            "title": "Recovered finding",
+            "severity": "warning",
+            "confidence": 0.8,
+            "file": "app/auth.py",
+            "start_line": 10,
+            "end_line": 20,
+            "evidence": ["found in repair"],
+            "risk": "Some risk",
+            "suggested_fix": "Fix it",
+        }])
+
+        findings = await _repair_output("Some markdown text with findings...", spec, mock_provider)
+        assert len(findings) == 1
+        assert findings[0].title == "Recovered finding"
+        mock_provider.call_model.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_repair_returns_empty_on_failure(self):
+        from app.code_review.agents import _repair_output, AGENT_SPECS
+        spec = AGENT_SPECS[0]
+
+        mock_provider = MagicMock()
+        mock_provider.call_model.side_effect = Exception("API error")
+
+        findings = await _repair_output("Some text", spec, mock_provider)
+        assert findings == []
+
+    @pytest.mark.asyncio
+    async def test_repair_returns_empty_when_model_returns_garbage(self):
+        from app.code_review.agents import _repair_output, AGENT_SPECS
+        spec = AGENT_SPECS[0]
+
+        mock_provider = MagicMock()
+        mock_provider.call_model.return_value = "Still not valid JSON sorry"
+
+        findings = await _repair_output("Some text", spec, mock_provider)
+        assert findings == []
+
+
+# =========================================================================
+# Evidence Gate
+# =========================================================================
+
+
+class TestEvidenceGate:
+    """Test _evidence_gate — downgrades under-evidenced Critical findings."""
+
+    def test_critical_with_good_evidence_stays_critical(self):
+        from app.code_review.agents import _evidence_gate
+        from app.agent_loop.service import AgentResult
+
+        f = ReviewFinding(
+            title="Real bug",
+            category=FindingCategory.CORRECTNESS,
+            severity=Severity.CRITICAL,
+            confidence=0.9,
+            file="app/auth.py",
+            start_line=42,
+            evidence=["evidence 1", "evidence 2", "evidence 3"],
+        )
+        result = AgentResult(tool_calls_made=5)
+        gated = _evidence_gate([f], result)
+        assert gated[0].severity == Severity.CRITICAL
+
+    def test_critical_without_line_downgraded(self):
+        from app.code_review.agents import _evidence_gate
+        from app.agent_loop.service import AgentResult
+
+        f = ReviewFinding(
+            title="Vague bug",
+            category=FindingCategory.CORRECTNESS,
+            severity=Severity.CRITICAL,
+            confidence=0.9,
+            file="app/auth.py",
+            start_line=0,  # no line
+            evidence=["e1", "e2"],
+        )
+        result = AgentResult(tool_calls_made=5)
+        gated = _evidence_gate([f], result)
+        assert gated[0].severity == Severity.WARNING
+        assert any("no line number" in e for e in gated[0].evidence)
+
+    def test_critical_with_few_tool_calls_downgraded(self):
+        from app.code_review.agents import _evidence_gate
+        from app.agent_loop.service import AgentResult
+
+        f = ReviewFinding(
+            title="Lazy finding",
+            category=FindingCategory.CORRECTNESS,
+            severity=Severity.CRITICAL,
+            confidence=0.9,
+            file="app/auth.py",
+            start_line=10,
+            evidence=["e1", "e2"],
+        )
+        result = AgentResult(tool_calls_made=1)  # too few
+        gated = _evidence_gate([f], result)
+        assert gated[0].severity == Severity.WARNING
+        assert any("tool calls" in e for e in gated[0].evidence)
+
+    def test_warning_not_affected(self):
+        from app.code_review.agents import _evidence_gate
+        from app.agent_loop.service import AgentResult
+
+        f = ReviewFinding(
+            title="Some warning",
+            category=FindingCategory.CORRECTNESS,
+            severity=Severity.WARNING,
+            file="",
+            start_line=0,
+            evidence=[],
+        )
+        result = AgentResult(tool_calls_made=0)
+        gated = _evidence_gate([f], result)
+        assert gated[0].severity == Severity.WARNING  # unchanged
+
+    def test_critical_without_enough_evidence_downgraded(self):
+        from app.code_review.agents import _evidence_gate
+        from app.agent_loop.service import AgentResult
+
+        f = ReviewFinding(
+            title="Weak finding",
+            category=FindingCategory.CORRECTNESS,
+            severity=Severity.CRITICAL,
+            file="app/auth.py",
+            start_line=10,
+            evidence=["only one"],  # needs 2
+        )
+        result = AgentResult(tool_calls_made=5)
+        gated = _evidence_gate([f], result)
+        assert gated[0].severity == Severity.WARNING
+
+
+# =========================================================================
+# Severity Arbitration
+# =========================================================================
+
+
+class TestSeverityArbitration:
+    """Test _arbitrate_severities — strong model reviews severity labels."""
+
+    @pytest.mark.asyncio
+    async def test_arbitration_upgrades_severity(self):
+        from app.code_review.service import _arbitrate_severities
+
+        mock_provider = MagicMock()
+        mock_provider.call_model.return_value = json.dumps([
+            {"index": 0, "severity": "critical", "reason": "swallowed exception breaks DLQ"},
+        ])
+
+        findings = [
+            ReviewFinding(
+                title="Exception swallowed",
+                category=FindingCategory.RELIABILITY,
+                severity=Severity.WARNING,
+                file="app/callback.py",
+                start_line=30,
+                agent="reliability",
+            ),
+        ]
+
+        result = await _arbitrate_severities(mock_provider, findings, {})
+        assert result[0].severity == Severity.CRITICAL
+        assert any("arbitration" in e for e in result[0].evidence)
+
+    @pytest.mark.asyncio
+    async def test_arbitration_no_change(self):
+        from app.code_review.service import _arbitrate_severities
+
+        mock_provider = MagicMock()
+        mock_provider.call_model.return_value = json.dumps([
+            {"index": 0, "severity": "warning", "reason": "ok"},
+        ])
+
+        findings = [
+            ReviewFinding(
+                title="Some issue",
+                category=FindingCategory.CORRECTNESS,
+                severity=Severity.WARNING,
+                file="app/foo.py",
+            ),
+        ]
+
+        result = await _arbitrate_severities(mock_provider, findings, {})
+        assert result[0].severity == Severity.WARNING
+        # No arbitration note added when unchanged
+        assert not any("arbitration" in e for e in result[0].evidence)
+
+    @pytest.mark.asyncio
+    async def test_arbitration_fallback_on_error(self):
+        from app.code_review.service import _arbitrate_severities
+
+        mock_provider = MagicMock()
+        mock_provider.call_model.side_effect = Exception("Model error")
+
+        findings = [
+            ReviewFinding(
+                title="Some issue",
+                category=FindingCategory.CORRECTNESS,
+                severity=Severity.WARNING,
+            ),
+        ]
+
+        result = await _arbitrate_severities(mock_provider, findings, {})
+        assert result[0].severity == Severity.WARNING  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_arbitration_with_empty_findings(self):
+        from app.code_review.service import _arbitrate_severities
+
+        mock_provider = MagicMock()
+        result = await _arbitrate_severities(mock_provider, [], {})
+        assert result == []
+        mock_provider.call_model.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_arbitration_invalid_json_returns_unchanged(self):
+        from app.code_review.service import _arbitrate_severities
+
+        mock_provider = MagicMock()
+        mock_provider.call_model.return_value = "Not JSON at all"
+
+        findings = [
+            ReviewFinding(
+                title="Issue",
+                category=FindingCategory.CORRECTNESS,
+                severity=Severity.CRITICAL,
+            ),
+        ]
+
+        result = await _arbitrate_severities(mock_provider, findings, {})
+        assert result[0].severity == Severity.CRITICAL  # unchanged

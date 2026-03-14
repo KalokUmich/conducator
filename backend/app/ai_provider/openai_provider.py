@@ -37,6 +37,8 @@ class OpenAIProvider(AIProvider):
         api_key: str,
         model: Optional[str] = None,
         organization: Optional[str] = None,
+        base_url: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize the OpenAI provider.
 
@@ -44,10 +46,16 @@ class OpenAIProvider(AIProvider):
             api_key: OpenAI API key for authentication.
             model: OpenAI model to use. Defaults to gpt-4o.
             organization: Optional organization ID.
+            base_url: Optional custom base URL for OpenAI-compatible APIs
+                (e.g. Alibaba DashScope, Moonshot Kimi).
+            extra_body: Optional extra parameters passed to every API call
+                (e.g. ``{"enable_thinking": True}`` for DashScope).
         """
         self.api_key = api_key
         self.model = model or self.DEFAULT_MODEL
         self.organization = organization
+        self.base_url = base_url
+        self.extra_body = extra_body or {}
         self._client: Optional[object] = None
 
     def _get_client(self) -> object:
@@ -62,9 +70,11 @@ class OpenAIProvider(AIProvider):
         if self._client is None:
             try:
                 import openai
-                kwargs = {"api_key": self.api_key}
+                kwargs: Dict[str, Any] = {"api_key": self.api_key}
                 if self.organization:
                     kwargs["organization"] = self.organization
+                if self.base_url:
+                    kwargs["base_url"] = self.base_url
                 self._client = openai.OpenAI(**kwargs)
             except ImportError:
                 raise ImportError(
@@ -112,10 +122,10 @@ class OpenAIProvider(AIProvider):
         client = self._get_client()
         combined_messages = "\n".join(messages)
 
-        response = client.chat.completions.create(
-            model=self.model,
-            max_tokens=1024,
-            messages=[
+        create_kwargs: dict = {
+            "model": self.model,
+            "max_tokens": 1024,
+            "messages": [
                 {
                     "role": "user",
                     "content": (
@@ -124,9 +134,15 @@ class OpenAIProvider(AIProvider):
                     ),
                 }
             ],
-        )
+        }
+        if self.extra_body:
+            create_kwargs["extra_body"] = self.extra_body
+        response = client.chat.completions.create(**create_kwargs)
 
-        return response.choices[0].message.content
+        content = response.choices[0].message.content or ""
+        if not content:
+            content = getattr(response.choices[0].message, "reasoning_content", None) or ""
+        return content
 
     def summarize_structured(self, messages: List[ChatMessage]) -> DecisionSummary:
         """Generate a structured decision summary from chat messages.
@@ -149,16 +165,19 @@ class OpenAIProvider(AIProvider):
         # Generate prompt using shared template
         prompt = get_summary_prompt(messages)
 
-        response = client.chat.completions.create(
-            model=self.model,
-            max_tokens=2048,
-            messages=[
+        struct_kwargs: dict = {
+            "model": self.model,
+            "max_tokens": 2048,
+            "messages": [
                 {
                     "role": "user",
                     "content": prompt,
                 }
             ],
-        )
+        }
+        if self.extra_body:
+            struct_kwargs["extra_body"] = self.extra_body
+        response = client.chat.completions.create(**struct_kwargs)
 
         response_text = response.choices[0].message.content.strip()
 
@@ -186,14 +205,18 @@ class OpenAIProvider(AIProvider):
         prompt: str,
         max_tokens: int = 2048,
         system: str | None = None,
+        assistant_prefix: str | None = None,
     ) -> str:
         """Call the OpenAI model with a raw prompt.
 
         Args:
-            prompt:     The user-turn prompt to send to the model.
-            max_tokens: Maximum tokens in the response.
-            system:     Optional system instruction prepended as a
-                        ``role: "system"`` message.
+            prompt:           The user-turn prompt to send to the model.
+            max_tokens:       Maximum tokens in the response.
+            system:           Optional system instruction prepended as a
+                              ``role: "system"`` message.
+            assistant_prefix: Optional string to prefill the assistant response.
+                              Appended as an ``assistant`` message to nudge the
+                              model toward a specific output format.
 
         Returns:
             str: The model's response text.
@@ -207,6 +230,8 @@ class OpenAIProvider(AIProvider):
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        if assistant_prefix:
+            messages.append({"role": "assistant", "content": assistant_prefix})
 
         response = client.chat.completions.create(
             model=self.model,
@@ -214,7 +239,10 @@ class OpenAIProvider(AIProvider):
             messages=messages,
         )
 
-        return response.choices[0].message.content.strip()
+        text = response.choices[0].message.content.strip()
+        if assistant_prefix:
+            return assistant_prefix + text
+        return text
 
     def chat_with_tools(
         self,
@@ -254,6 +282,8 @@ class OpenAIProvider(AIProvider):
         }
         if openai_tools:
             create_kwargs["tools"] = openai_tools
+        if self.extra_body:
+            create_kwargs["extra_body"] = self.extra_body
 
         response = client.chat.completions.create(**create_kwargs)
 
@@ -261,6 +291,14 @@ class OpenAIProvider(AIProvider):
         msg = choice.message
 
         text = msg.content or ""
+        # Qwen / DeepSeek reasoning models may put output in reasoning_content
+        # instead of content.  Fall back so the agent loop sees the answer.
+        if not text:
+            text = getattr(msg, "reasoning_content", None) or ""
+            if not text:
+                # Some SDK versions surface it via model_extra
+                extra = getattr(msg, "model_extra", None) or {}
+                text = extra.get("reasoning_content", "") or ""
         tool_calls = []
         if msg.tool_calls:
             for tc in msg.tool_calls:

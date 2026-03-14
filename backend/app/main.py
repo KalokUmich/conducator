@@ -100,21 +100,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Classifier provider ready.")
         else:
             logger.info("No classifier model configured — using keyword classification.")
+
+        # Explorer provider (sub-agent model with thinking enabled for Alibaba)
+        explorer_provider = resolver.get_explorer_provider()
+        if explorer_provider:
+            logger.info("Explorer (sub-agent) provider ready.")
+        else:
+            logger.info("No explorer model configured — sub-agents will use classifier or main provider.")
     except Exception as exc:
         logger.warning("Failed to initialize AI provider resolver: %s", exc)
         classifier_provider = None
+        explorer_provider = None
     app.state.agent_provider = agent_provider
     app.state.classifier_provider = classifier_provider
+    app.state.explorer_provider = explorer_provider
 
-    # Auto-enable classifier if a classifier model is available
+    # Auto-enable classifier / explorer if models are available
     active_classifier_id = None
-    if classifier_provider is not None:
-        status = resolver.get_status()
-        for m in status.models:
+    active_explorer_id = None
+    _resolver_status = None
+    if classifier_provider is not None or explorer_provider is not None:
+        _resolver_status = resolver.get_status()
+    if classifier_provider is not None and _resolver_status:
+        for m in _resolver_status.models:
             if m.classifier and m.available:
                 active_classifier_id = m.id
                 break
+    if explorer_provider is not None and _resolver_status:
+        for m in _resolver_status.models:
+            if m.explorer and m.available:
+                active_explorer_id = m.id
+                break
     app.state.active_classifier_model_id = active_classifier_id
+    app.state.active_explorer_model_id = active_explorer_id
 
     # ---- Session Trace Writer ----
     from .agent_loop.trace import TraceWriter

@@ -122,8 +122,10 @@ class AgentLoopService:
         budget_config: Optional[BudgetConfig] = None,
         trace_writer: Optional[TraceWriter] = None,
         classifier_provider: Optional[AIProvider] = None,
+        explorer_provider: Optional[AIProvider] = None,
         _skip_review_delegation: bool = False,
         llm_semaphore: Optional[asyncio.Semaphore] = None,
+        max_evidence_retries: int = 2,
     ) -> None:
         self._provider = provider
         self._max_iterations = max_iterations
@@ -131,8 +133,10 @@ class AgentLoopService:
         self._budget_config = budget_config
         self._trace_writer = trace_writer
         self._classifier_provider = classifier_provider
+        self._explorer_provider = explorer_provider
         self._skip_review_delegation = _skip_review_delegation
         self._llm_semaphore = llm_semaphore
+        self._max_evidence_retries = max_evidence_retries
 
     async def run(
         self,
@@ -298,6 +302,7 @@ class AgentLoopService:
 
         messages = self._initial_messages(query, classification)
         total_tool_calls = 0
+        evidence_retries = 0
         response: Optional[ToolUseResponse] = None
 
         # Token budget controller — tracks cumulative token usage
@@ -512,25 +517,38 @@ class AgentLoopService:
                     remaining_iterations=remaining,
                 )
                 if not ev.passed:
-                    logger.info(
-                        "Evidence check failed at iteration %d "
-                        "(refs=%d, tools=%d, files=%d) — requesting retry",
-                        iteration + 1, ev.file_refs, ev.tool_calls_made,
-                        len(budget.files_accessed),
-                    )
-                    # Push back: re-add the answer as assistant, then
-                    # inject evidence guidance as a user message
-                    messages.append({
-                        "role": "assistant",
-                        "content": [{"text": answer}],
-                    })
-                    messages.append({
-                        "role": "user",
-                        "content": [{"text": ev.guidance}],
-                    })
-                    iter_trace.budget_signal = budget.get_signal().value
-                    trace.add_iteration(iter_trace)
-                    continue  # back to the loop for another LLM call
+                    evidence_retries += 1
+                    if evidence_retries > self._max_evidence_retries:
+                        logger.warning(
+                            "Evidence check failed %d times (max %d) — "
+                            "enriching answer with collected file refs",
+                            evidence_retries, self._max_evidence_retries,
+                        )
+                        # Enrich the answer with files the agent already accessed
+                        answer = _enrich_answer_with_refs(
+                            answer, budget.files_accessed,
+                        )
+                    else:
+                        logger.info(
+                            "Evidence check failed at iteration %d "
+                            "(refs=%d, tools=%d, files=%d, retry=%d/%d) — requesting retry",
+                            iteration + 1, ev.file_refs, ev.tool_calls_made,
+                            len(budget.files_accessed),
+                            evidence_retries, self._max_evidence_retries,
+                        )
+                        # Push back: re-add the answer as assistant, then
+                        # inject evidence guidance as a user message
+                        messages.append({
+                            "role": "assistant",
+                            "content": [{"text": answer}],
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": [{"text": ev.guidance}],
+                        })
+                        iter_trace.budget_signal = budget.get_signal().value
+                        trace.add_iteration(iter_trace)
+                        continue  # back to the loop for another LLM call
 
                 iter_trace.budget_signal = budget.get_signal().value
                 trace.add_iteration(iter_trace)
@@ -732,6 +750,8 @@ class AgentLoopService:
                     if budget.iteration_count >= budget.config.max_iterations
                     else "Token budget exhausted"
                 )
+                # Enrich with collected file refs so the answer is still useful
+                answer = _enrich_answer_with_refs(answer, budget.files_accessed)
                 logger.warning(
                     "Budget FORCE_CONCLUDE at iteration %d: %s "
                     "(input tokens: %s/%s)",
@@ -881,7 +901,7 @@ class AgentLoopService:
         try:
             service = CodeReviewService(
                 provider=self._provider,
-                classifier_provider=self._classifier_provider,
+                explorer_provider=self._explorer_provider or self._classifier_provider,
                 trace_writer=self._trace_writer,
             )
 
@@ -1020,7 +1040,9 @@ You have access to:
 1. The raw code evidence each agent collected (file paths, code snippets, tool outputs).
 2. Each agent's preliminary summary (from a lightweight model — may be incomplete or imprecise).
 
-Your job is to produce the DEFINITIVE answer by re-analyzing the raw evidence yourself:
+Your job is to produce the DEFINITIVE answer by re-analyzing the raw evidence yourself.
+
+## Analysis Rules
 1. **Read the evidence carefully.** The preliminary summaries are hints, not gospel. \
 If the raw code contradicts a summary, trust the code.
 2. **Merge both perspectives** into one coherent answer. Find the narrative that \
@@ -1028,8 +1050,35 @@ connects implementation details with user-visible behavior.
 3. **Fill gaps**: if one perspective found steps the other missed, include them.
 4. **Resolve conflicts**: if perspectives disagree, cite the stronger evidence.
 5. **Cite sources**: reference specific file:line locations from the evidence.
-6. **Structure clearly**: use numbered steps, headings, or a flow diagram as appropriate.
-7. Keep the answer concise but complete. Do not repeat yourself.\
+
+## Required Output Format
+Structure your answer using ALL of the following sections, in order:
+
+### Flow Overview
+One short paragraph (3-5 sentences) summarising the end-to-end flow in plain English.
+
+### Step-by-Step Breakdown
+Numbered list. Each step must include:
+- What happens (action / decision)
+- Which component / class / function is responsible (`file:line` where known)
+- Any important side-effects (DB write, event publish, async handoff, etc.)
+
+### Sequence Diagram
+A Mermaid sequence diagram capturing the key actors and messages. Use this block:
+
+```mermaid
+sequenceDiagram
+    ...
+```
+
+Keep the diagram focused: max ~15 arrows. Omit trivial getters/setters. \
+Label async calls with `-->>` and synchronous calls with `->>`.
+
+### Key Files
+Bulleted list of the most important files involved, with a one-line description each.
+
+### Gaps & Uncertainties
+Anything the evidence did not conclusively show. If everything was confirmed, write "None."\
 """
 
     async def _run_multi_perspective_stream(
@@ -1061,16 +1110,19 @@ connects implementation details with user-visible behavior.
             "text": "Multi-perspective exploration: code implementation + tests/interfaces",
         })
 
-        # Budget: each sub-agent gets 80% of the normal budget
+        # Budget: each sub-agent gets 60% of the normal budget.
+        # Two agents run in parallel so the effective total stays well below 2×
+        # the single-agent limit, leaving headroom for synthesis.
         base_budget = self._budget_config or BudgetConfig()
-        sub_max_iters = max(int(self._max_iterations * 0.8), 10)
+        sub_max_iters = max(int(self._max_iterations * 0.6), 10)
         sub_budget = BudgetConfig(
-            max_input_tokens=int(base_budget.max_input_tokens * 0.8),
+            max_input_tokens=int(base_budget.max_input_tokens * 0.6),
             max_iterations=sub_max_iters,
         )
 
-        # Use the lighter model for exploration (same as code review sub-agents)
-        sub_provider = self._classifier_provider or self._provider
+        # Use the explorer model for sub-agents (thinking enabled for Alibaba);
+        # fall back to classifier, then main provider.
+        sub_provider = self._explorer_provider or self._classifier_provider or self._provider
 
         # Create two sub-agents with different perspectives
         async def _run_perspective(perspective: dict) -> AgentResult:
@@ -1215,7 +1267,7 @@ connects implementation details with user-visible behavior.
                 None,
                 lambda: self._provider.call_model(
                     prompt=synthesis_prompt,
-                    max_tokens=4096,
+                    max_tokens=6144,  # raised from 4096 — Mermaid diagram needs headroom
                     system=self._SYNTHESIS_PROMPT,
                 ),
             )
@@ -1454,6 +1506,23 @@ def _summarize_result(tool_name: str, result) -> str:
         if "diff" in data:
             return f"{len(data['diff'])} chars of diff"
     return "ok"
+
+
+def _enrich_answer_with_refs(answer: str, files_accessed: set) -> str:
+    """Append a 'Files examined' section when the LLM omitted citations.
+
+    Called when the evidence-check retry cap is hit — the agent DID
+    investigate (tool calls, file reads) but the LLM never formatted
+    citations in the expected ``file:line`` style.  Rather than
+    accepting a bare answer, we append the evidence the agent already
+    collected so the reader can trace what was examined.
+    """
+    if not files_accessed:
+        return answer
+    refs = sorted(files_accessed)
+    section = "\n\n---\n**Files examined during analysis:**\n"
+    section += "\n".join(f"- `{f}`" for f in refs)
+    return answer + section
 
 
 def _extract_context(tc, result, query: str) -> List[ContextChunk]:

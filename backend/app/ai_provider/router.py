@@ -44,6 +44,7 @@ class ModelStatusResponse(BaseModel):
     display_name: str
     available: bool
     classifier: bool = False
+    explorer: bool = False
     litellm: bool = False
 
 
@@ -57,6 +58,8 @@ class AIStatusResponse(BaseModel):
     default_model: str
     classifier_enabled: bool = False
     active_classifier: Optional[str] = None
+    explorer_enabled: bool = False
+    active_explorer: Optional[str] = None
     litellm_fallback: bool = False
 
 
@@ -209,10 +212,12 @@ async def get_ai_status() -> AIStatusResponse:
 
     status = resolver.get_status()
 
-    # Determine classifier status from app state
+    # Determine classifier / explorer status from app state
     from app.main import app
     classifier_provider = getattr(app.state, "classifier_provider", None)
     active_classifier_id = getattr(app.state, "active_classifier_model_id", None)
+    explorer_provider = getattr(app.state, "explorer_provider", None)
+    active_explorer_id = getattr(app.state, "active_explorer_model_id", None)
 
     # Read litellm_fallback from config
     from app.config import get_config
@@ -239,6 +244,7 @@ async def get_ai_status() -> AIStatusResponse:
                 display_name=m.display_name,
                 available=m.available,
                 classifier=m.classifier,
+                explorer=m.explorer,
                 litellm=m.litellm,
             )
             for m in status.models
@@ -246,6 +252,8 @@ async def get_ai_status() -> AIStatusResponse:
         default_model=status.default_model,
         classifier_enabled=classifier_provider is not None,
         active_classifier=active_classifier_id,
+        explorer_enabled=explorer_provider is not None,
+        active_explorer=active_explorer_id,
         litellm_fallback=litellm_fallback,
     )
 
@@ -376,6 +384,83 @@ async def set_classifier(request: SetClassifierRequest) -> SetClassifierResponse
             classifier_enabled=True,
             active_classifier=active_id,
             message=f"Classifier enabled with model: {active_id}",
+        )
+
+
+class SetExplorerRequest(BaseModel):
+    """Request model for POST /ai/explorer endpoint."""
+    enabled: bool
+    model_id: Optional[str] = None
+
+
+class SetExplorerResponse(BaseModel):
+    """Response model for POST /ai/explorer endpoint."""
+    success: bool
+    explorer_enabled: bool
+    active_explorer: Optional[str] = None
+    message: str
+
+
+@router.post("/explorer", response_model=SetExplorerResponse)
+async def set_explorer(request: SetExplorerRequest) -> SetExplorerResponse:
+    """Enable/disable the code-explorer sub-agent model and optionally select the model."""
+    from app.main import app
+
+    resolver = get_resolver()
+    if resolver is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI provider resolver not initialized.",
+        )
+
+    if not request.enabled:
+        app.state.explorer_provider = None
+        app.state.active_explorer_model_id = None
+        return SetExplorerResponse(
+            success=True,
+            explorer_enabled=False,
+            active_explorer=None,
+            message="Explorer disabled.",
+        )
+
+    # Enabling — resolve the model
+    if request.model_id:
+        provider = resolver.get_explorer_provider_for_model(request.model_id)
+        if provider is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot use '{request.model_id}' as explorer: not found, not enabled, or provider unhealthy.",
+            )
+        app.state.explorer_provider = provider
+        app.state.active_explorer_model_id = request.model_id
+        return SetExplorerResponse(
+            success=True,
+            explorer_enabled=True,
+            active_explorer=request.model_id,
+            message=f"Explorer enabled with model: {request.model_id}",
+        )
+    else:
+        # Auto-select first available explorer model
+        provider = resolver.get_explorer_provider()
+        if provider is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No explorer-capable model available.",
+            )
+        # Find which model was selected
+        active_id = None
+        res_status = resolver.get_status()
+        for m in res_status.models:
+            if m.explorer and m.available:
+                active_id = m.id
+                break
+        app.state.explorer_provider = provider
+        app.state.active_explorer_model_id = active_id
+        return SetExplorerResponse(
+            success=True,
+            explorer_enabled=True,
+            active_explorer=active_id,
+            message=f"Explorer enabled with model: {active_id}",
         )
 
 

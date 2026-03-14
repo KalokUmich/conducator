@@ -6,6 +6,7 @@ in parallel and merges their findings.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -50,6 +51,7 @@ class AgentSpec:
     budget_tokens: int                # max input tokens
     max_iterations: int
     risk_dimensions: List[str]        # which risk dimensions trigger this agent
+    strategy_hint: str = ""           # per-agent investigation strategy
 
     def should_run(self, risk_profile: RiskProfile, always_run: bool = False) -> bool:
         """Decide if this agent should be dispatched based on risk."""
@@ -62,6 +64,34 @@ class AgentSpec:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Budget anchors — sub-agents get SUB_FRACTION of the main agent's defaults.
+# Per-agent weights express relative complexity (correctness = heaviest).
+# The PR-size multiplier in service.py is applied on top of these values.
+#
+#   budget_tokens = _MAIN_TOKENS × _SUB_FRACTION × weight
+#   max_iterations = _MAIN_ITERS  × _SUB_FRACTION × weight  (rounded)
+#
+# Agent weights:
+#   correctness  1.00  — cross-file data-flow tracing, heaviest tool set
+#   concurrency  0.85  — shared-state analysis, still deep but narrower scope
+#   security     0.75  — taint tracing + AST search, focused scope
+#   reliability  0.70  — call-chain + git history, moderate depth
+#   test_coverage 0.55 — file listing + test lookup, lightest
+# ---------------------------------------------------------------------------
+_MAIN_TOKENS: int = 800_000   # mirrors AgentLoopService / BudgetConfig default
+_MAIN_ITERS:  int = 40        # mirrors AgentLoopService default
+_SUB_FRACTION: float = 0.7    # sub-agents get 70% of the main budget
+
+
+def _sub_budget(weight: float) -> int:
+    return int(_MAIN_TOKENS * _SUB_FRACTION * weight)
+
+
+def _sub_iters(weight: float) -> int:
+    return max(int(_MAIN_ITERS * _SUB_FRACTION * weight), 8)
+
+
 # Agent registry — each agent focuses on one dimension
 AGENT_SPECS: List[AgentSpec] = [
     AgentSpec(
@@ -72,9 +102,14 @@ AGENT_SPECS: List[AgentSpec] = [
             "get_callers", "get_callees", "trace_variable",
             "get_dependencies",
         ],
-        budget_tokens=400_000,
-        max_iterations=20,
+        budget_tokens=_sub_budget(1.00),   # 560,000
+        max_iterations=_sub_iters(1.00),   # 28
         risk_dimensions=["correctness"],
+        strategy_hint=(
+            "Mixed strategy: scan all diffs for suspicious patterns first, "
+            "then deep-dive the top 2-3 suspects with trace_variable and get_callees. "
+            "Budget 3-4 tool calls for scanning, 6-8 for deep investigation."
+        ),
     ),
     AgentSpec(
         name="concurrency",
@@ -84,9 +119,14 @@ AGENT_SPECS: List[AgentSpec] = [
             "get_callers", "get_callees", "trace_variable",
             "ast_search",
         ],
-        budget_tokens=350_000,
-        max_iterations=18,
+        budget_tokens=_sub_budget(0.85),   # 476,000
+        max_iterations=_sub_iters(0.85),   # 23
         risk_dimensions=["concurrency"],
+        strategy_hint=(
+            "Depth-first: identify shared-state operations, then trace each "
+            "to check atomicity. Use ast_search for check-then-act patterns. "
+            "Spend most tool calls proving or disproving one race at a time."
+        ),
     ),
     AgentSpec(
         name="security",
@@ -95,9 +135,14 @@ AGENT_SPECS: List[AgentSpec] = [
             "git_diff", "trace_variable",
             "find_references", "git_blame", "ast_search",
         ],
-        budget_tokens=300_000,
-        max_iterations=15,
+        budget_tokens=_sub_budget(0.75),   # 420,000
+        max_iterations=_sub_iters(0.75),   # 21
         risk_dimensions=["security"],
+        strategy_hint=(
+            "Depth-first: trace data from external input (HTTP, queue, file) "
+            "through to storage/output. Use trace_variable for taint analysis. "
+            "For each flow, verify sanitization/validation at every boundary."
+        ),
     ),
     AgentSpec(
         name="reliability",
@@ -106,9 +151,14 @@ AGENT_SPECS: List[AgentSpec] = [
             "git_diff", "get_callers",
             "find_references", "git_log", "git_show",
         ],
-        budget_tokens=300_000,
-        max_iterations=15,
+        budget_tokens=_sub_budget(0.70),   # 392,000
+        max_iterations=_sub_iters(0.70),   # 19
         risk_dimensions=["reliability", "operational"],
+        strategy_hint=(
+            "Breadth-first: check every exception handler, resource acquisition, "
+            "and error path in the changed files. Use get_callers to verify "
+            "callers handle errors. Brief checks across many paths > deep dive on one."
+        ),
     ),
     AgentSpec(
         name="test_coverage",
@@ -117,9 +167,14 @@ AGENT_SPECS: List[AgentSpec] = [
             "git_diff", "find_tests",
             "test_outline", "find_references", "list_files",
         ],
-        budget_tokens=250_000,
-        max_iterations=12,
+        budget_tokens=_sub_budget(0.55),   # 308,000
+        max_iterations=_sub_iters(0.55),   # 15
         risk_dimensions=[],   # always runs (via always_run flag)
+        strategy_hint=(
+            "Breadth-first: for each changed file, use find_tests to locate "
+            "existing tests. Use test_outline on found test files to assess "
+            "coverage quality. Focus on untested critical paths, not line counts."
+        ),
     ),
 ]
 
@@ -129,69 +184,122 @@ AGENT_SPECS: List[AgentSpec] = [
 # ---------------------------------------------------------------------------
 
 _AGENT_PROMPT_TEMPLATE = """\
-You are a **{agent_name} reviewer** performing a focused code review on a PR.
+You are a **{agent_name} reviewer** performing a focused code review.
 
-## PR Info
-- Diff spec: `{diff_spec}`
-- Total files: {file_count} ({total_lines} lines changed)
-- Risk profile: {risk_summary}
+## HARD CONSTRAINT — The Provability Test
 
-## Files in scope
-{file_list}
+Before assigning any severity, answer: "Can I prove this from the CODE ALONE,
+or does my conclusion depend on an unverified business/design assumption?"
+
+- **Code-provable defect**: The code's own structure guarantees incorrect behavior
+  regardless of design intent. Example: a check-then-act race where two concurrent
+  requests both pass a non-atomic validation — broken no matter what the designer intended.
+- **Assumption-dependent concern**: Severity depends on what the designer meant.
+  Example: "token not consumed on failure" — if design intends one-time-use, it's a bug;
+  if design intends retry-until-success, it's correct. You cannot know which.
+
+**Rule: assumption-dependent concerns are capped at warning.** Qualify them:
+"If the intended design is X, then Y is a defect." Never state them as definitive bugs.
+Prefer code-structural defects over business-semantic assumptions.
+
+## Severity levels
+
+- **critical**: Code-provable defect that WILL cause incorrect behavior, data loss, or
+  security breach. Construct a concrete trigger scenario from code facts only. "Missing
+  tests" is NEVER critical.
+- **warning**: (a) Code-provable risk where trigger is not fully proven reachable, OR
+  (b) assumption-dependent concern where likely intent suggests a defect. Missing tests
+  for critical paths belong here.
+- **nit**: Style, naming, minor improvement, or speculative concern.
+- **praise**: Notably good code — clear design, thorough error handling, etc.
 
 ## Your review focus: {focus_description}
 
-## Diffs (pre-fetched)
-The diffs for files in your scope are provided below. Analyze them directly.
+## Investigation strategy
+{strategy_hint}
+
+<pr_context>
+diff_spec: {diff_spec}
+files: {file_count} ({total_lines} lines changed)
+risk: {risk_summary}
+</pr_context>
+
+<file_list>
+{file_list}
+</file_list>
+
+<diffs>
 {diffs_section}
+</diffs>
 
-## Instructions
-1. Analyze the diffs above for issues in your focus area
-2. Use **read_file** with line ranges around changes for broader context
-3. Use additional tools (find_references, get_callers, trace_variable, etc.) to trace impact
-4. Do NOT call git_diff_files — the file list and diffs are already provided above
-
-## Severity criteria — follow strictly
-- **critical**: A provable bug that WILL cause incorrect behavior, data loss, or security
-  breach in production. You must be able to construct a concrete scenario (specific input
-  or sequence of events) that triggers the bug. "Missing tests" is NEVER critical.
-  "Theoretical attack requiring compromised config" is NEVER critical.
-- **warning**: A real code smell or risky pattern that COULD cause issues under specific
-  conditions. You have evidence the condition is reachable but cannot fully prove it
-  triggers in practice. Missing tests for critical paths belong here.
-- **nit**: Style, naming, minor improvement, or a speculative concern without strong evidence.
-- **praise**: Notably good code — clear design, thorough error handling, etc.
+## Investigation instructions
+1. Analyze the diffs above for issues in your focus area.
+2. Use **read_file** with line ranges for broader context around changes.
+3. Use additional tools (find_references, get_callers, trace_variable, etc.) to trace impact.
+4. The file list and diffs are already provided — skip git_diff_files.
+5. When you have enough evidence, stop investigating and produce your findings JSON.
 
 ## Quality rules
 - Report at most **5 findings**. Prioritize by real-world impact.
-- Each finding must cite specific line numbers from the diff or surrounding code.
-- Do NOT report the same root cause multiple times from different angles.
-- Do NOT inflate severity. If you are unsure, downgrade by one level.
-- Set confidence honestly: 0.9+ only if you traced the full code path and are certain.
-  0.7-0.8 for well-evidenced but not fully traced. Below 0.6 = do not report.
-- "Missing test coverage" alone is a warning at most, never critical.
-- Do NOT assume config/infra is compromised. Review the code as written.
+- Each finding must cite specific file:line from the diff or surrounding code.
+- One finding per root cause — merge related angles into a single finding.
+- When uncertain about severity, downgrade by one level.
+- Set confidence honestly: 0.9+ only if you traced the full path and are certain;
+  0.7-0.8 for well-evidenced but not fully traced; below 0.6 = omit.
+- Assume config/infra works as deployed. Review the code as written.
 
-## Output format
-After reviewing, output your findings as a JSON array:
+## Output format — MANDATORY
+
+Your ONLY deliverable is a JSON array. Output it as your final message with no
+commentary before or after.
+
+### Example 1 — code-provable Critical
 ```json
 [
   {{
-    "title": "Brief issue title",
-    "severity": "critical|warning|nit|praise",
-    "confidence": 0.0-1.0,
-    "file": "path/to/file.py",
-    "start_line": 42,
-    "end_line": 55,
-    "evidence": ["evidence point 1", "evidence point 2"],
-    "risk": "What could go wrong and why",
-    "suggested_fix": "How to fix it"
+    "title": "Non-atomic check-then-act race in token validation",
+    "severity": "critical",
+    "confidence": 0.92,
+    "file": "src/auth/TokenService.java",
+    "start_line": 266,
+    "end_line": 330,
+    "evidence": [
+      "checkToken() at line 266 performs GET, consumeToken() at line 330 performs DELETE",
+      "Two concurrent Lambda retries can both pass checkToken() before either consumes"
+    ],
+    "risk": "Duplicate processing: two callbacks execute the same business logic",
+    "suggested_fix": "Replace separate check+consume with a single atomic GETDEL operation"
   }}
 ]
 ```
 
-If you find no issues in your focus area, return an empty array `[]`.
-Be precise. Only report issues you have evidence for. Avoid speculation."""
+### Example 2 — assumption-dependent Warning
+```json
+[
+  {{
+    "title": "Webhook token not consumed on technical failure paths",
+    "severity": "warning",
+    "confidence": 0.75,
+    "file": "src/callback/CallbackService.java",
+    "start_line": 309,
+    "end_line": 319,
+    "evidence": [
+      "catch block at line 309-319 logs error but does not call consumeToken()",
+      "Token remains valid in Redis for the full 12h TTL"
+    ],
+    "risk": "If the intended security model is strict one-time-use, technical failures leave the token replayable",
+    "suggested_fix": "If one-time-use is intended: move consumeToken() into a finally block"
+  }}
+]
+```
+
+If you find no issues, output exactly: `[]`
+
+RULES:
+- severity MUST be one of: "critical", "warning", "nit", "praise"
+- confidence MUST be a number between 0.0 and 1.0
+- evidence MUST be an array of strings
+- If your token budget is running low, output your findings JSON IMMEDIATELY"""
 
 
 _FOCUS_DESCRIPTIONS = {
@@ -315,6 +423,7 @@ def _build_agent_query(
         file_list=file_list,
         focus_description=_FOCUS_DESCRIPTIONS.get(spec.name, "General code quality"),
         diffs_section=diffs_section,
+        strategy_hint=spec.strategy_hint or "Investigate the highest-impact issues first.",
     )
 
 
@@ -322,47 +431,35 @@ def _build_agent_query(
 # Finding extraction
 # ---------------------------------------------------------------------------
 
-# Match a JSON array in the agent's answer
-_JSON_ARRAY_RE = re.compile(r"\[[\s\S]*?\](?=\s*(?:```|$))", re.MULTILINE)
+# Regex patterns for JSON extraction (ordered by specificity)
+# 1. JSON array inside a markdown code block
+_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```")
+# 2. Bare JSON array (greedy — find the longest valid array)
+_JSON_BARE_RE = re.compile(r"\[[\s\S]*\]")
+# 3. Individual JSON objects (fallback for models that forget the array wrapper)
+_JSON_OBJECT_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}")
+
+_SEVERITY_MAP = {
+    "critical": Severity.CRITICAL,
+    "warning": Severity.WARNING,
+    "nit": Severity.NIT,
+    "praise": Severity.PRAISE,
+}
 
 
-def _parse_findings(answer: str, spec: AgentSpec) -> List[ReviewFinding]:
-    """Extract structured findings from an agent's answer text.
-
-    The agent is prompted to output a JSON array. We extract it
-    with regex to handle cases where the agent wraps it in markdown.
-    """
-    findings: List[ReviewFinding] = []
-
-    # Try to find a JSON array in the answer
-    match = _JSON_ARRAY_RE.search(answer)
-    if not match:
-        return findings
-
+def _raw_to_finding(raw: dict, spec: AgentSpec) -> Optional[ReviewFinding]:
+    """Convert a raw dict to a ReviewFinding, or None if invalid."""
+    if not isinstance(raw, dict):
+        return None
+    # Must have at least a title or file to be considered a finding
+    if not raw.get("title") and not raw.get("file"):
+        return None
+    severity_str = str(raw.get("severity", "warning")).lower()
     try:
-        raw_findings = json.loads(match.group())
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse findings JSON from %s agent", spec.name)
-        return findings
-
-    if not isinstance(raw_findings, list):
-        return findings
-
-    severity_map = {
-        "critical": Severity.CRITICAL,
-        "warning": Severity.WARNING,
-        "nit": Severity.NIT,
-        "praise": Severity.PRAISE,
-    }
-
-    for raw in raw_findings:
-        if not isinstance(raw, dict):
-            continue
-        severity_str = str(raw.get("severity", "warning")).lower()
-        findings.append(ReviewFinding(
+        return ReviewFinding(
             title=raw.get("title", "Untitled finding"),
             category=spec.category,
-            severity=severity_map.get(severity_str, Severity.WARNING),
+            severity=_SEVERITY_MAP.get(severity_str, Severity.WARNING),
             confidence=float(raw.get("confidence", 0.7)),
             file=raw.get("file", ""),
             start_line=int(raw.get("start_line", 0)),
@@ -371,9 +468,212 @@ def _parse_findings(answer: str, spec: AgentSpec) -> List[ReviewFinding]:
             risk=raw.get("risk", ""),
             suggested_fix=raw.get("suggested_fix", ""),
             agent=spec.name,
-        ))
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _try_parse_json_array(text: str) -> Optional[list]:
+    """Attempt to parse *text* as a JSON array, return None on failure."""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def _parse_findings(
+    answer: str,
+    spec: AgentSpec,
+    *,
+    warn_on_empty: bool = True,
+) -> List[ReviewFinding]:
+    """Extract structured findings from an agent's answer text.
+
+    Tries multiple extraction strategies (in order):
+    1. JSON array inside a ```json ... ``` code block
+    2. Bare JSON array anywhere in the text
+    3. Individual JSON objects (for models that omit the array wrapper)
+
+    This robustness is needed because Qwen Flash models sometimes produce
+    slightly malformed output (e.g. commentary after the JSON, missing
+    array brackets, or extra whitespace).
+
+    Args:
+        warn_on_empty: If *False*, suppress the "Failed to parse" warning.
+            Used when parsing context chunks where missing JSON is expected.
+    """
+    findings: List[ReviewFinding] = []
+
+    # Strategy 1: JSON in a markdown code block (most reliable)
+    for m in _JSON_BLOCK_RE.finditer(answer):
+        raw_list = _try_parse_json_array(m.group(1))
+        if raw_list is not None:
+            for raw in raw_list:
+                f = _raw_to_finding(raw, spec)
+                if f:
+                    findings.append(f)
+            if findings:
+                return findings
+
+    # Strategy 2: Bare JSON array (try all matches, pick the one with findings)
+    for m in _JSON_BARE_RE.finditer(answer):
+        raw_list = _try_parse_json_array(m.group())
+        if raw_list is not None:
+            for raw in raw_list:
+                f = _raw_to_finding(raw, spec)
+                if f:
+                    findings.append(f)
+            if findings:
+                return findings
+
+    # Strategy 3: Individual JSON objects (last resort)
+    for m in _JSON_OBJECT_RE.finditer(answer):
+        try:
+            raw = json.loads(m.group())
+            f = _raw_to_finding(raw, spec)
+            if f:
+                findings.append(f)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    if findings:
+        logger.info(
+            "Parsed %d findings from %s agent via individual JSON objects",
+            len(findings), spec.name,
+        )
+
+    if not findings and warn_on_empty:
+        logger.warning("Failed to parse findings JSON from %s agent", spec.name)
 
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Output repair — ask model to reformat unparseable answer as JSON
+# ---------------------------------------------------------------------------
+
+_REPAIR_PROMPT = """\
+The following text was produced by a code review agent, but it is NOT valid JSON.
+Extract the findings and reformat them as a JSON array.
+
+## Rules
+- Output ONLY a JSON array. No commentary, no markdown fences, no explanation.
+- Each element must have: title, severity, confidence, file, start_line, end_line, evidence, risk, suggested_fix
+- severity must be one of: "critical", "warning", "nit", "praise"
+- confidence must be a number 0.0–1.0
+- evidence must be an array of strings
+- If the text contains no reviewable findings, output: []
+
+## Example
+
+<input_text>
+Looking at the code, I found two issues:
+1. The cache key in utils.py line 45 doesn't include the user ID, so users can see each other's data. This is a serious security issue.
+2. Minor: the variable name `x` on line 12 is unclear.
+</input_text>
+
+<expected_output>
+[{{"title":"Cache key missing user ID allows cross-user data leak","severity":"critical","confidence":0.85,"file":"utils.py","start_line":45,"end_line":45,"evidence":["cache key at line 45 does not include user_id"],"risk":"Users can see other users cached data","suggested_fix":"Include user_id in cache key: cache_key = f'{{user_id}}:{{resource}}'"}},{{"title":"Unclear variable name","severity":"nit","confidence":0.9,"file":"utils.py","start_line":12,"end_line":12,"evidence":["variable named x at line 12"],"risk":"Reduced readability","suggested_fix":"Rename x to a descriptive name"}}]
+</expected_output>
+
+## Text to reformat
+<input_text>
+{answer}
+</input_text>
+"""
+
+
+async def _repair_output(
+    answer: str,
+    spec: AgentSpec,
+    provider: AIProvider,
+) -> List[ReviewFinding]:
+    """Attempt to recover findings by asking the model to reformat the answer.
+
+    Called when the agent produced non-empty text but ``_parse_findings``
+    could not extract valid JSON.  One extra LLM call (cheap — short prompt,
+    short response).
+
+    Returns:
+        List of successfully parsed findings (may be empty).
+    """
+    prompt = _REPAIR_PROMPT.format(answer=answer[:3000])  # cap input
+    try:
+        loop = asyncio.get_event_loop()
+        repaired = await loop.run_in_executor(
+            None,
+            lambda: provider.call_model(
+                prompt=prompt, max_tokens=2048, assistant_prefix="["
+            ),
+        )
+        findings = _parse_findings(repaired, spec, warn_on_empty=False)
+        if findings:
+            logger.info(
+                "Repair loop recovered %d findings for %s agent",
+                len(findings), spec.name,
+            )
+        return findings
+    except Exception as exc:
+        logger.warning("Repair loop failed for %s agent: %s", spec.name, exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Evidence gate — downgrade under-evidenced Critical findings
+# ---------------------------------------------------------------------------
+
+# Minimum requirements for a Critical finding to keep its severity
+_CRITICAL_MIN_EVIDENCE = 2       # at least 2 evidence items
+_CRITICAL_REQUIRE_FILE = True    # must have file reference
+_CRITICAL_REQUIRE_LINE = True    # must have start_line > 0
+
+
+def _evidence_gate(findings: List[ReviewFinding], agent_result: "AgentResult") -> List[ReviewFinding]:
+    """Validate evidence quality for Critical findings.
+
+    Critical findings must meet a minimum evidence bar:
+      1. At least ``_CRITICAL_MIN_EVIDENCE`` evidence strings.
+      2. Must reference a specific file.
+      3. Must reference a specific line number.
+      4. Agent must have made ≥3 tool calls (i.e. actually investigated).
+
+    Findings that fail are downgraded to Warning with a note.
+    """
+    tool_calls = agent_result.tool_calls_made if agent_result else 0
+
+    gated: List[ReviewFinding] = []
+    for f in findings:
+        if f.severity != Severity.CRITICAL:
+            gated.append(f)
+            continue
+
+        reasons: List[str] = []
+
+        if len(f.evidence) < _CRITICAL_MIN_EVIDENCE:
+            reasons.append(
+                f"only {len(f.evidence)} evidence items (need {_CRITICAL_MIN_EVIDENCE})"
+            )
+        if _CRITICAL_REQUIRE_FILE and not f.file:
+            reasons.append("no file reference")
+        if _CRITICAL_REQUIRE_LINE and f.start_line == 0:
+            reasons.append("no line number")
+        if tool_calls < 3:
+            reasons.append(f"only {tool_calls} tool calls (need ≥3)")
+
+        if reasons:
+            logger.info(
+                "Evidence gate: downgrading '%s' from critical → warning (%s)",
+                f.title, "; ".join(reasons),
+            )
+            f.severity = Severity.WARNING
+            f.evidence.append(f"[auto-downgraded: {'; '.join(reasons)}]")
+
+        gated.append(f)
+
+    return gated
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +725,46 @@ async def run_review_agent(
         )
 
         findings = _parse_findings(result.answer, spec)
+
+        # If no findings were parsed but the agent produced context chunks,
+        # try to extract findings from individual context chunks too.
+        # This helps when FORCE_CONCLUDE cuts off the agent before it
+        # produces a final JSON block — partial findings may be scattered
+        # across accumulated text.
+        if not findings and result.context_chunks:
+            for chunk in result.context_chunks:
+                chunk_findings = _parse_findings(
+                    chunk.content, spec, warn_on_empty=False,
+                )
+                findings.extend(chunk_findings)
+            if findings:
+                logger.info(
+                    "Recovered %d findings from context chunks for %s agent",
+                    len(findings), spec.name,
+                )
+
+        # --- Improvement 1: Output Repair Loop ---
+        # If no findings but the agent produced text, ask the model to
+        # reformat the answer as JSON (one cheap extra call).
+        if not findings and result.answer and len(result.answer) > 50:
+            logger.info(
+                "Agent '%s' produced %d chars but no parseable findings — "
+                "attempting repair loop",
+                spec.name, len(result.answer),
+            )
+            findings = await _repair_output(result.answer, spec, provider)
+
+        if not findings and result.answer:
+            logger.warning(
+                "Agent '%s' produced %d chars of text but no parseable findings "
+                "(even after repair). First 200 chars: %s",
+                spec.name, len(result.answer), result.answer[:200],
+            )
+
+        # --- Improvement 3: Evidence Gate ---
+        # Downgrade Critical findings that lack sufficient evidence.
+        if findings:
+            findings = _evidence_gate(findings, result)
 
         tokens = 0
         if result.budget_summary:

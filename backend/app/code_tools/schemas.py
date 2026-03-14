@@ -170,6 +170,41 @@ class DetectPatternsParams(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Tool name → Pydantic param model mapping
+#
+# Used by execute_tool() to validate and coerce raw LLM params before
+# dispatching.  Pydantic v2 coerces e.g. "240" → int(240) automatically,
+# which fixes non-Claude models that return numbers as strings.
+# ---------------------------------------------------------------------------
+
+TOOL_PARAM_MODELS: Dict[str, type] = {
+    "grep": GrepParams,
+    "read_file": ReadFileParams,
+    "list_files": ListFilesParams,
+    "find_symbol": FindSymbolParams,
+    "find_references": FindReferencesParams,
+    "file_outline": FileOutlineParams,
+    "get_dependencies": GetDependenciesParams,
+    "get_dependents": GetDependentsParams,
+    "git_log": GitLogParams,
+    "git_diff": GitDiffParams,
+    "git_diff_files": GitDiffFilesParams,
+    "ast_search": AstSearchParams,
+    "get_callees": GetCalleesParams,
+    "get_callers": GetCallersParams,
+    "git_blame": GitBlameParams,
+    "git_show": GitShowParams,
+    "find_tests": FindTestsParams,
+    "test_outline": TestOutlineParams,
+    "trace_variable": TraceVariableParams,
+    "compressed_view": CompressedViewParams,
+    "module_summary": ModuleSummaryParams,
+    "expand_symbol": ExpandSymbolParams,
+    "detect_patterns": DetectPatternsParams,
+}
+
+
+# ---------------------------------------------------------------------------
 # Tool result schemas
 # ---------------------------------------------------------------------------
 
