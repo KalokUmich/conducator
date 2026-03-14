@@ -222,11 +222,33 @@ class OpenAISecretsConfig(BaseModel):
     organization: Optional[str] = None
 
 
+class AlibabaSecretsConfig(BaseModel):
+    """Alibaba Cloud DashScope API credentials.
+
+    Uses an OpenAI-compatible endpoint at DashScope.
+    Get your API key from: https://dashscope.console.aliyun.com/
+    """
+    api_key:  str = ""
+    base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+
+class MoonshotSecretsConfig(BaseModel):
+    """Moonshot AI (Kimi) API credentials.
+
+    Uses an OpenAI-compatible endpoint.
+    Get your API key from: https://platform.moonshot.ai/
+    """
+    api_key:  str = ""
+    base_url: str = "https://api.moonshot.ai/v1"
+
+
 class AIProvidersSecretsConfig(BaseModel):
     """Credentials for all AI providers."""
     anthropic:   AnthropicSecretsConfig   = Field(default_factory=AnthropicSecretsConfig)
     aws_bedrock: AWSBedrockSecretsConfig  = Field(default_factory=AWSBedrockSecretsConfig)
     openai:      OpenAISecretsConfig      = Field(default_factory=OpenAISecretsConfig)
+    alibaba:     AlibabaSecretsConfig     = Field(default_factory=AlibabaSecretsConfig)
+    moonshot:    MoonshotSecretsConfig    = Field(default_factory=MoonshotSecretsConfig)
 
 
 class AIProviderSettingsConfig(BaseModel):
@@ -234,6 +256,8 @@ class AIProviderSettingsConfig(BaseModel):
     anthropic_enabled:      bool = False
     aws_bedrock_enabled:    bool = False
     openai_enabled:         bool = False
+    alibaba_enabled:        bool = False
+    moonshot_enabled:       bool = False
     litellm_fallback:       bool = False
 
 
@@ -244,6 +268,10 @@ class AIModelConfig(BaseModel):
       - ``classifier``: If True, this model can be used as a lightweight
         pre-classification model before the agent loop starts.
         (Typically a small/fast model like Haiku.)
+      - ``explorer``: If True, this model can be used as a code explorer
+        (sub-agent) for iterative tool-calling loops.  Explorer models
+        have thinking/reasoning disabled to maximise content output and
+        reduce token waste.  (Typically a fast/cheap model like Flash or Haiku.)
       - ``litellm``: If True, this model can be used via LiteLLM fallback.
         When the native provider fails, the resolver will try LiteLLM
         for models that have this flag set.
@@ -254,6 +282,7 @@ class AIModelConfig(BaseModel):
     display_name: str  = ""
     enabled:      bool = True
     classifier:   bool = False
+    explorer:     bool = False
     litellm:      bool = False
 
 
@@ -440,6 +469,8 @@ def load_config(
         anthropic_enabled=aps_data.get("anthropic_enabled", False),
         aws_bedrock_enabled=aps_data.get("aws_bedrock_enabled", False),
         openai_enabled=aps_data.get("openai_enabled", False),
+        alibaba_enabled=aps_data.get("alibaba_enabled", False),
+        moonshot_enabled=aps_data.get("moonshot_enabled", False),
         litellm_fallback=aps_data.get("litellm_fallback", False),
     )
 
@@ -447,6 +478,8 @@ def load_config(
     anth_sec = ap_sec.get("anthropic", {})
     bdr_sec = ap_sec.get("aws_bedrock", {})
     oai_sec = ap_sec.get("openai", {})
+    ali_sec = ap_sec.get("alibaba", {})
+    moon_sec = ap_sec.get("moonshot", {})
     ai_providers_cfg = AIProvidersSecretsConfig(
         anthropic=AnthropicSecretsConfig(api_key=anth_sec.get("api_key", "")),
         aws_bedrock=AWSBedrockSecretsConfig(
@@ -458,6 +491,14 @@ def load_config(
         openai=OpenAISecretsConfig(
             api_key=oai_sec.get("api_key", ""),
             organization=oai_sec.get("organization"),
+        ),
+        alibaba=AlibabaSecretsConfig(
+            api_key=ali_sec.get("api_key", ""),
+            base_url=ali_sec.get("base_url", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+        ),
+        moonshot=MoonshotSecretsConfig(
+            api_key=moon_sec.get("api_key", ""),
+            base_url=moon_sec.get("base_url", "https://api.moonshot.ai/v1"),
         ),
     )
 

@@ -187,14 +187,16 @@ class ClaudeDirectProvider(AIProvider):
         prompt: str,
         max_tokens: int = 2048,
         system: str | None = None,
+        assistant_prefix: str | None = None,
     ) -> str:
         """Call the Claude model with a raw prompt.
 
         Args:
-            prompt:     The user-turn prompt to send to the model.
-            max_tokens: Maximum tokens in the response.
-            system:     Optional system instruction passed as the ``system``
-                        parameter of the Messages API.
+            prompt:           The user-turn prompt to send to the model.
+            max_tokens:       Maximum tokens in the response.
+            system:           Optional system instruction passed as the ``system``
+                              parameter of the Messages API.
+            assistant_prefix: Optional string to prefill the assistant response.
 
         Returns:
             str: The model's response text.
@@ -204,16 +206,23 @@ class ClaudeDirectProvider(AIProvider):
         """
         client = self._get_client()
 
+        messages: list = [{"role": "user", "content": prompt}]
+        if assistant_prefix:
+            messages.append({"role": "assistant", "content": assistant_prefix})
+
         kwargs: dict = {
             "model":      self.model,
             "max_tokens": max_tokens,
-            "messages":   [{"role": "user", "content": prompt}],
+            "messages":   messages,
         }
         if system:
             kwargs["system"] = system
 
         response = client.messages.create(**kwargs)
-        return response.content[0].text.strip()
+        text = response.content[0].text.strip()
+        if assistant_prefix:
+            return assistant_prefix + text
+        return text
 
     def chat_with_tools(
         self,

@@ -16,14 +16,21 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# Patterns that indicate the answer cites specific code evidence
+# Patterns that indicate the answer cites specific code evidence.
+# Models differ in citation style:
+#   Claude:  file.py:42
+#   Qwen:    **Line:** 175  /  **File:** X.java + **Line:** 173-180
+#            [Line 42]  /  [Lines 42-50]
 _FILE_LINE_PATTERN = re.compile(
     r"""
-    (?:                             # Match any of:
-        [\w./\\-]+\.[\w]+:\d+       #   file.py:42 or path/to/file.ts:100
-      | L\d+                        #   L42, L100
-      | line\s+\d+                  #   line 42
-      | lines?\s+\d+\s*[-–]\s*\d+  #   lines 42-50
+    (?:                                    # Match any of:
+        [\w./\\-]+\.[\w]+:\d+              #   file.py:42 or path/to/file.ts:100
+      | L\d+                               #   L42, L100
+      | line\s+\d+                         #   line 42
+      | lines?\s+\d+\s*[-–]\s*\d+         #   lines 42-50
+      | \*{0,2}Line:?\*{0,2}\s*\d+        #   **Line:** 175  /  Line: 175  /  Line 175
+      | \*{0,2}Lines?:?\*{0,2}\s*\d+\s*[-–]\s*\d+  #  **Line:** 173-180
+      | \[Lines?\s+\d+(?:\s*[-–]\s*\d+)?\] #   [Line 42] / [Lines 42-50]
     )
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -117,8 +124,15 @@ def check_evidence(
     guidance = (
         "⚠ EVIDENCE CHECK FAILED — do NOT provide your answer yet.\n"
         + "\n".join(f"  • {p}" for p in problems)
-        + "\n\nGo back and investigate. Then rewrite your answer with "
-        "specific file:line citations for every claim."
+        + "\n\nCall read_file or compressed_view on the most relevant files "
+        "to gather concrete evidence. Then provide your answer with "
+        "EXPLICIT file:line citations.\n\n"
+        "REQUIRED FORMAT — your answer MUST include references like:\n"
+        "  • `src/main/java/com/example/Service.java:42`\n"
+        "  • `src/service/handler.py:115-120`\n"
+        "  • `controllers/UserController.ts:78`\n"
+        "Write the file path and line number joined by a colon. "
+        "Do NOT write file and line on separate lines."
     )
 
     return EvidenceCheck(

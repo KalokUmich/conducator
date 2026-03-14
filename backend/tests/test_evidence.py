@@ -115,3 +115,63 @@ class TestCheckEvidence:
         answer = "x" * 99
         ev = check_evidence(answer, tool_calls_made=0, files_accessed=0, remaining_iterations=10)
         assert ev.passed is True
+
+    # ---- Qwen-style citation patterns ----
+
+    def test_qwen_bold_line_ref(self):
+        """Qwen-style **Line:** 175 citation."""
+        answer = (
+            "The method has a potential null pointer issue.\n"
+            "**File:** ShareCodeCheckerServiceImpl.java\n"
+            "**Line:** 175\n"
+            "The code calls request.isValid() without a null check."
+        )
+        ev = check_evidence(answer, tool_calls_made=5, files_accessed=3, remaining_iterations=5)
+        assert ev.passed is True
+        assert ev.file_refs >= 1
+
+    def test_qwen_bold_line_range(self):
+        """Qwen-style **Line:** 173-180 citation."""
+        answer = (
+            "Missing input validation in the callback handler.\n"
+            "**File:** ShareCodeCheckerServiceImpl.java\n"
+            "**Line:** 173-180\n"
+            "The method does not validate the request object before use."
+        )
+        ev = check_evidence(answer, tool_calls_made=5, files_accessed=3, remaining_iterations=5)
+        assert ev.passed is True
+        assert ev.file_refs >= 1
+
+    def test_qwen_bracket_line_ref(self):
+        """Qwen-style [Line 42] citation."""
+        answer = (
+            "The error occurs because the share code is not validated [Line 174] "
+            "before being passed to updateShareCodeStatus [Line 177]. This is a "
+            "potential null pointer exception that needs to be addressed."
+        )
+        ev = check_evidence(answer, tool_calls_made=5, files_accessed=3, remaining_iterations=5)
+        assert ev.passed is True
+        assert ev.file_refs >= 2
+
+    def test_qwen_bracket_lines_range(self):
+        """Qwen-style [Lines 42-50] citation."""
+        answer = (
+            "The processLambdaCallback method [Lines 173-181] does not handle "
+            "the case where request.getShareCode() returns null, which could cause "
+            "downstream errors in the updateShareCodeStatus helper method."
+        )
+        ev = check_evidence(answer, tool_calls_made=5, files_accessed=3, remaining_iterations=5)
+        assert ev.passed is True
+        assert ev.file_refs >= 1
+
+    def test_qwen_plain_line_colon(self):
+        """Qwen-style Line: 175 (no bold) citation."""
+        answer = (
+            "The null check is missing.\n"
+            "File: ShareCodeCheckerServiceImpl.java\n"
+            "Line: 175\n"
+            "The request parameter is used directly without validation."
+        )
+        ev = check_evidence(answer, tool_calls_made=5, files_accessed=3, remaining_iterations=5)
+        assert ev.passed is True
+        assert ev.file_refs >= 1

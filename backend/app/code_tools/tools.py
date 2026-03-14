@@ -29,6 +29,7 @@ from .schemas import (
     SymbolLocation,
     TestMatch,
     TestOutlineEntry,
+    TOOL_PARAM_MODELS,
     ToolResult,
 )
 
@@ -3340,11 +3341,59 @@ TOOL_REGISTRY = {
 }
 
 
+def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Pre-repair common LLM mistakes before Pydantic validation.
+
+    Handles structural errors that Pydantic coercion alone cannot fix,
+    e.g. Qwen packing two values into one field: ``"start_line": "298, 422"``.
+    """
+    params = dict(params)  # shallow copy to avoid mutating caller's dict
+
+    # --- Pattern 1: comma-separated integers in a single field ---------------
+    # e.g. start_line="298, 422" → start_line=298, end_line=422
+    _LINE_RANGE_TOOLS = {"read_file", "git_blame"}
+    if tool_name in _LINE_RANGE_TOOLS:
+        for src_key, dst_key in [("start_line", "end_line")]:
+            val = params.get(src_key)
+            if isinstance(val, str) and "," in val:
+                parts = [p.strip() for p in val.split(",") if p.strip()]
+                if len(parts) >= 2:
+                    params[src_key] = parts[0]
+                    # Only fill dst if the caller didn't already provide it
+                    if dst_key not in params or params[dst_key] is None:
+                        params[dst_key] = parts[1]
+                elif len(parts) == 1:
+                    params[src_key] = parts[0]
+
+    # --- Pattern 2: strip leading/trailing whitespace from string values ------
+    for key, val in params.items():
+        if isinstance(val, str):
+            params[key] = val.strip()
+
+    return params
+
+
 def execute_tool(tool_name: str, workspace: str, params: Dict[str, Any]) -> ToolResult:
     """Execute a tool by name with the given parameters."""
     fn = TOOL_REGISTRY.get(tool_name)
     if fn is None:
         return ToolResult(tool_name=tool_name, success=False, error=f"Unknown tool: {tool_name}")
+
+    # Pre-repair common structural mistakes from weaker LLMs (e.g. Qwen)
+    params = _repair_tool_params(tool_name, params)
+
+    # Validate & coerce params through the Pydantic model for this tool.
+    # This fixes non-Claude models (e.g. Qwen) that return numbers as strings
+    # ("240" → int 240) and provides friendly validation errors instead of
+    # cryptic TypeErrors deep inside tool implementations.
+    param_model = TOOL_PARAM_MODELS.get(tool_name)
+    if param_model:
+        try:
+            validated = param_model.model_validate(params)
+            params = validated.model_dump(exclude_none=True)
+        except Exception as ve:
+            logger.warning("Tool %s param validation failed: %s", tool_name, ve)
+            return ToolResult(tool_name=tool_name, success=False, error=f"Invalid parameters: {ve}")
 
     try:
         return fn(workspace=workspace, **params)

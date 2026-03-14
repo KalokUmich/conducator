@@ -51,6 +51,8 @@ ai_provider_settings:
   anthropic_enabled: true
   aws_bedrock_enabled: true
   openai_enabled: true
+  alibaba_enabled: false       # Alibaba DashScope (Qwen models, OpenAI-compatible)
+  moonshot_enabled: false       # Moonshot AI (Kimi models, OpenAI-compatible)
 
 # =============================================================================
 # AI Models Configuration
@@ -91,6 +93,53 @@ ai_models:
     provider: "openai"
     model_name: "gpt-4o-mini"
     display_name: "GPT-4o Mini"
+    enabled: true
+
+  # ---- Alibaba / Qwen (DashScope, OpenAI-compatible) ----
+  # Requires alibaba_enabled: true and a DashScope API key in secrets
+  - id: "qwen3-max"
+    provider: "alibaba"
+    model_name: "qwen3-max"
+    display_name: "Qwen3 Max (DashScope)"
+    enabled: true
+
+  - id: "qwen3.5-plus"
+    provider: "alibaba"
+    model_name: "qwen3.5-plus"
+    display_name: "Qwen3.5 Plus (DashScope)"
+    enabled: true
+
+  - id: "qwen3.5-flash"
+    provider: "alibaba"
+    model_name: "qwen3.5-flash"
+    display_name: "Qwen3.5 Flash (DashScope)"
+    enabled: true
+    classifier: true  # very fast + cheap — ideal for query pre-classification
+
+  - id: "qwen3-coder-plus"
+    provider: "alibaba"
+    model_name: "qwen3-coder-plus"
+    display_name: "Qwen3 Coder Plus (DashScope)"
+    enabled: true
+
+  - id: "qwen3-coder-flash"
+    provider: "alibaba"
+    model_name: "qwen3-coder-flash"
+    display_name: "Qwen3 Coder Flash (DashScope)"
+    enabled: true
+
+  # ---- Moonshot / Kimi (OpenAI-compatible) ----
+  # Requires moonshot_enabled: true and a Moonshot API key in secrets
+  - id: "kimi-k2.5"
+    provider: "moonshot"
+    model_name: "kimi-k2.5"
+    display_name: "Kimi K2.5 (Moonshot)"
+    enabled: true
+
+  - id: "kimi-k2-thinking"
+    provider: "moonshot"
+    model_name: "kimi-k2-thinking"
+    display_name: "Kimi K2 Thinking (Moonshot)"
     enabled: true
 
 # =============================================================================

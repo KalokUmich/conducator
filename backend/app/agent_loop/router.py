@@ -119,6 +119,12 @@ def _get_classifier_provider():
     return getattr(app.state, "classifier_provider", None)
 
 
+def _get_explorer_provider():
+    """Get the sub-agent model used for code exploration (thinking disabled for Alibaba)."""
+    from app.main import app
+    return getattr(app.state, "explorer_provider", None)
+
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -132,6 +138,7 @@ async def context_query(
     agent_provider=Depends(_get_agent_provider),
     trace_writer=Depends(_get_trace_writer),
     classifier_provider=Depends(_get_classifier_provider),
+    explorer_provider=Depends(_get_explorer_provider),
 ) -> ContextQueryResponse:
     """Run an agent loop to find relevant code context and answer a question."""
     if agent_provider is None:
@@ -152,6 +159,7 @@ async def context_query(
         max_iterations=req.max_iterations,
         trace_writer=trace_writer,
         classifier_provider=classifier_provider,
+        explorer_provider=explorer_provider,
     )
 
     result: AgentResult = await agent.run(
@@ -203,6 +211,7 @@ async def context_query_stream(
     agent_provider=Depends(_get_agent_provider),
     trace_writer=Depends(_get_trace_writer),
     classifier_provider=Depends(_get_classifier_provider),
+    explorer_provider=Depends(_get_explorer_provider),
 ):
     """SSE streaming version of context_query.
 
@@ -235,6 +244,7 @@ async def context_query_stream(
         max_iterations=req.max_iterations,
         trace_writer=trace_writer,
         classifier_provider=classifier_provider,
+        explorer_provider=explorer_provider,
     )
 
     async def event_generator():

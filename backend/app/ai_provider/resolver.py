@@ -25,7 +25,9 @@ from typing import Any, Dict, List, Optional
 
 from app.config import (
     AIModelConfig,
+    AlibabaSecretsConfig,
     ConductorConfig,
+    MoonshotSecretsConfig,
 )
 
 from .base import AIProvider
@@ -42,6 +44,8 @@ class ProviderType(str, Enum):
     ANTHROPIC = "anthropic"
     AWS_BEDROCK = "aws_bedrock"
     OPENAI = "openai"
+    ALIBABA = "alibaba"
+    MOONSHOT = "moonshot"
 
 
 @dataclass
@@ -61,6 +65,7 @@ class ModelStatus:
     display_name: str
     available: bool  # Provider is healthy and model is enabled
     classifier: bool = False  # Can be used as a query pre-classifier
+    explorer: bool = False    # Can be used as a code-explorer sub-agent
     litellm: bool = False     # Can be used via LiteLLM fallback
 
 
@@ -125,6 +130,8 @@ class ProviderResolver:
             ProviderType.ANTHROPIC: self.provider_settings.anthropic_enabled,
             ProviderType.AWS_BEDROCK: self.provider_settings.aws_bedrock_enabled,
             ProviderType.OPENAI: self.provider_settings.openai_enabled,
+            ProviderType.ALIBABA: self.provider_settings.alibaba_enabled,
+            ProviderType.MOONSHOT: self.provider_settings.moonshot_enabled,
         }
         return enabled_map.get(provider_type, False)
 
@@ -137,10 +144,28 @@ class ProviderResolver:
                        self.providers_config.aws_bedrock.secret_access_key)
         elif provider_type == ProviderType.OPENAI:
             return bool(self.providers_config.openai.api_key)
+        elif provider_type == ProviderType.ALIBABA:
+            return bool(self.providers_config.alibaba.api_key)
+        elif provider_type == ProviderType.MOONSHOT:
+            return bool(self.providers_config.moonshot.api_key)
         return False
 
-    def _create_provider(self, provider_type: ProviderType, model_name: str) -> Optional[AIProvider]:
-        """Create a provider instance for the given type and model."""
+    def _create_provider(
+        self,
+        provider_type: ProviderType,
+        model_name: str,
+        *,
+        enable_thinking: Optional[bool] = None,
+    ) -> Optional[AIProvider]:
+        """Create a provider instance for the given type and model.
+
+        Args:
+            provider_type: Which provider backend to use.
+            model_name: The model ID / name to pass to the provider.
+            enable_thinking: Override for Alibaba ``enable_thinking``.
+                - ``None`` (default): use the provider default (True for Alibaba).
+                - ``True`` / ``False``: explicitly enable / disable thinking.
+        """
         try:
             if provider_type == ProviderType.ANTHROPIC:
                 return ClaudeDirectProvider(
@@ -162,6 +187,25 @@ class ProviderResolver:
                     api_key=cfg.api_key,
                     model=model_name,
                     organization=cfg.organization or None,
+                )
+            elif provider_type == ProviderType.ALIBABA:
+                cfg = self.providers_config.alibaba
+                # Default: thinking enabled for Alibaba (classifier / main / explorer).
+                # Pass enable_thinking=False explicitly to disable if needed.
+                thinking = enable_thinking if enable_thinking is not None else True
+                extra_body = {"enable_thinking": thinking}
+                return OpenAIProvider(
+                    api_key=cfg.api_key,
+                    model=model_name,
+                    base_url=cfg.base_url,
+                    extra_body=extra_body,
+                )
+            elif provider_type == ProviderType.MOONSHOT:
+                cfg = self.providers_config.moonshot
+                return OpenAIProvider(
+                    api_key=cfg.api_key,
+                    model=model_name,
+                    base_url=cfg.base_url,
                 )
             else:
                 logger.warning(f"Unknown provider type: {provider_type}")
@@ -193,6 +237,12 @@ class ProviderResolver:
             credentials["api_key"] = self.providers_config.openai.api_key
             if self.providers_config.openai.organization:
                 credentials["organization"] = self.providers_config.openai.organization
+        elif provider_type == ProviderType.ALIBABA:
+            credentials["api_key"] = self.providers_config.alibaba.api_key
+            credentials["base_url"] = self.providers_config.alibaba.base_url
+        elif provider_type == ProviderType.MOONSHOT:
+            credentials["api_key"] = self.providers_config.moonshot.api_key
+            credentials["base_url"] = self.providers_config.moonshot.base_url
         return credentials
 
     def _create_litellm_fallback(
@@ -242,6 +292,8 @@ class ProviderResolver:
                 ProviderType.ANTHROPIC: "claude-sonnet-4-20250514",
                 ProviderType.AWS_BEDROCK: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
                 ProviderType.OPENAI: "gpt-4o",
+                ProviderType.ALIBABA: "qwen-plus",
+                ProviderType.MOONSHOT: "kimi-k2.5",
             }
             model_name = default_models.get(provider_type, "")
         else:
@@ -416,6 +468,7 @@ class ProviderResolver:
                     self._provider_health.get(model.provider, False)
                 ),
                 classifier=model.classifier,
+                explorer=model.explorer,
                 litellm=model.litellm,
             )
             for model in self.models_config
@@ -475,6 +528,59 @@ class ProviderResolver:
         provider = self._create_provider(model.provider, model.model_name)
         if provider:
             logger.info("Classifier provider set to: %s (%s)", model.id, model.provider)
+        return provider
+
+    def get_explorer_provider(self) -> Optional[AIProvider]:
+        """Get a provider for code-explorer sub-agents.
+
+        Returns the first enabled model with ``explorer: true`` whose
+        provider is healthy.  For Alibaba models, thinking is explicitly
+        **enabled** so the model can reason deeply about code structure
+        before emitting tool calls — this significantly improves the
+        quality of provability judgements in code review findings.
+
+        Returns:
+            An AIProvider suitable for sub-agent / explorer work, or None.
+        """
+        for model in self.models_config:
+            if (
+                model.explorer
+                and model.enabled
+                and self._provider_health.get(model.provider, False)
+            ):
+                # Explorer sub-agents: enable thinking for Alibaba models
+                # so the model reasons about code structure before acting.
+                # This improves finding quality (e.g. provability of defects).
+                provider = self._create_provider(
+                    model.provider,
+                    model.model_name,
+                    enable_thinking=True,
+                )
+                if provider:
+                    logger.info("Explorer provider: %s (%s)", model.id, model.provider)
+                    return provider
+        return None
+
+    def get_explorer_provider_for_model(self, model_id: str) -> Optional[AIProvider]:
+        """Get an explorer provider for a specific model ID.
+
+        Returns None if the model is not found, not enabled, not marked as
+        explorer, or its provider is not healthy.
+        """
+        model = self._find_model(model_id)
+        if not model:
+            return None
+        if not model.explorer or not model.enabled:
+            return None
+        if not self._provider_health.get(model.provider, False):
+            return None
+        provider = self._create_provider(
+            model.provider,
+            model.model_name,
+            enable_thinking=False,
+        )
+        if provider:
+            logger.info("Explorer provider set to: %s (%s)", model.id, model.provider)
         return provider
 
     def set_active_model(self, model_id: str) -> bool:

@@ -103,6 +103,11 @@ def _get_classifier_provider():
     return getattr(app.state, "classifier_provider", None)
 
 
+def _get_explorer_provider():
+    from app.main import app
+    return getattr(app.state, "explorer_provider", None)
+
+
 def _get_trace_writer():
     from app.main import app
     return getattr(app.state, "trace_writer", None)
@@ -119,6 +124,7 @@ async def code_review(
     git_workspace=Depends(_get_git_workspace_service),
     agent_provider=Depends(_get_agent_provider),
     classifier_provider=Depends(_get_classifier_provider),
+    explorer_provider=Depends(_get_explorer_provider),
     trace_writer=Depends(_get_trace_writer),
 ) -> CodeReviewResponse:
     """Run a multi-agent code review on a PR diff.
@@ -143,7 +149,7 @@ async def code_review(
 
     service = CodeReviewService(
         provider=agent_provider,
-        classifier_provider=classifier_provider,
+        explorer_provider=explorer_provider or classifier_provider,
         trace_writer=trace_writer,
     )
 
@@ -162,6 +168,7 @@ async def code_review_stream(
     git_workspace=Depends(_get_git_workspace_service),
     agent_provider=Depends(_get_agent_provider),
     classifier_provider=Depends(_get_classifier_provider),
+    explorer_provider=Depends(_get_explorer_provider),
     trace_writer=Depends(_get_trace_writer),
 ):
     """SSE streaming version of code review.
@@ -184,7 +191,7 @@ async def code_review_stream(
 
     service = CodeReviewService(
         provider=agent_provider,
-        classifier_provider=classifier_provider,
+        explorer_provider=explorer_provider or classifier_provider,
         trace_writer=trace_writer,
     )
 

@@ -73,6 +73,152 @@ def _post_filter(findings: list[ReviewFinding]) -> list[ReviewFinding]:
 
 
 # ---------------------------------------------------------------------------
+# Severity arbitration — strong model reviews severity assignments
+# ---------------------------------------------------------------------------
+
+_ARBITRATION_PROMPT = """\
+You are a senior staff engineer reviewing severity labels assigned by automated code review agents.
+
+Below are {count} findings. For each, decide if the severity is correct.
+
+## The provability test — apply to EVERY finding
+For each finding, ask: "Is this provable from the code alone, or does it depend on an
+unverified business/design assumption?"
+
+- **Code-provable**: The code's structure guarantees incorrect behavior regardless of
+  design intent. Example: a non-atomic check-then-act race — broken no matter what
+  the designer intended.
+- **Assumption-dependent**: Severity depends on what the designer meant. Example:
+  "token not consumed on failure" — could be a bug OR correct retry behavior.
+
+**Rule: assumption-dependent findings MUST be at most warning.** Note "depends on
+design intent" in your reason.
+
+## Severity definitions
+- **critical**: Code-provable defect. Concrete trigger scenario from code facts only.
+- **warning**: Code-provable risk (trigger unproven) OR assumption-dependent concern.
+- **nit**: Minor improvement or speculative concern.
+
+<findings>
+{findings_json}
+</findings>
+
+## Instructions
+For each finding, think step by step in <reasoning> tags, then give your verdict.
+After all reasoning, output a single JSON array in <result> tags.
+
+Format for the JSON array (one object per finding, same order):
+- "index": 0-based index
+- "severity": "critical" | "warning" | "nit" | "praise"
+- "reason": brief explanation — "code-provable", "ok", "assumption-dependent", or "trigger not proven"
+
+Example response structure:
+<reasoning>
+Finding 0: "Token race condition" — The code does GET at line 266 then DELETE at line 330.
+Two concurrent requests can both pass the GET. This is code-provable. Keep critical.
+</reasoning>
+<result>
+[{{"index": 0, "severity": "critical", "reason": "code-provable: non-atomic GET then DELETE"}}]
+</result>
+"""
+
+
+async def _arbitrate_severities(
+    provider: AIProvider,
+    findings: List[ReviewFinding],
+    file_diffs: Dict[str, str],
+) -> List[ReviewFinding]:
+    """Let the strong model review and adjust severity of each finding.
+
+    This is a single cheap LLM call that can upgrade/downgrade severity
+    based on deeper reasoning than individual sub-agents can achieve.
+    """
+    if not findings:
+        return findings
+
+    # Build a compact JSON representation of findings for the model
+    findings_data = []
+    for i, f in enumerate(findings):
+        loc = f.file
+        if f.start_line:
+            loc += f":{f.start_line}"
+        entry = {
+            "index": i,
+            "title": f.title,
+            "severity": f.severity.value,
+            "confidence": f.confidence,
+            "file": loc,
+            "risk": f.risk,
+            "evidence": f.evidence[:3],
+            "agent": f.agent,
+        }
+        # Include a snippet of the relevant diff if available
+        if f.file and f.file in file_diffs:
+            entry["diff_snippet"] = file_diffs[f.file][:1500]
+        findings_data.append(entry)
+
+    prompt = _ARBITRATION_PROMPT.format(
+        count=len(findings),
+        findings_json=json.dumps(findings_data, indent=2),
+    )
+
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: provider.call_model(prompt=prompt, max_tokens=2048),
+        )
+
+        # Extract JSON from <result> tags (CoT parsing — Opt 3)
+        result_match = re.search(r"<result>\s*(.*?)\s*</result>", response, re.DOTALL)
+        json_text = result_match.group(1) if result_match else response
+
+        # Parse the response as JSON array
+        adjustments = json.loads(json_text)
+        if not isinstance(adjustments, list):
+            logger.warning("Severity arbitration: response is not a list")
+            return findings
+
+        severity_map = {
+            "critical": Severity.CRITICAL,
+            "warning": Severity.WARNING,
+            "nit": Severity.NIT,
+            "praise": Severity.PRAISE,
+        }
+
+        changes = 0
+        for adj in adjustments:
+            idx = adj.get("index")
+            new_sev_str = str(adj.get("severity", "")).lower()
+            reason = adj.get("reason", "")
+
+            if idx is None or idx < 0 or idx >= len(findings):
+                continue
+            new_sev = severity_map.get(new_sev_str)
+            if new_sev is None:
+                continue
+
+            old_sev = findings[idx].severity
+            if new_sev != old_sev:
+                logger.info(
+                    "Severity arbitration: '%s' %s → %s (reason: %s)",
+                    findings[idx].title, old_sev.value, new_sev.value, reason,
+                )
+                findings[idx].severity = new_sev
+                findings[idx].evidence.append(
+                    f"[severity adjusted by arbitration: {old_sev.value}→{new_sev.value}: {reason}]"
+                )
+                changes += 1
+
+        logger.info("Severity arbitration: %d adjustment(s) out of %d findings", changes, len(findings))
+        return findings
+
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.warning("Severity arbitration failed (findings unchanged): %s", exc)
+        return findings
+
+
+# ---------------------------------------------------------------------------
 # Dynamic budget calculation
 # ---------------------------------------------------------------------------
 
@@ -180,30 +326,35 @@ def _prefetch_diffs(workspace_path: str, diff_spec: str) -> Dict[str, str]:
 class CodeReviewService:
     """Orchestrates multi-agent code review.
 
-    Sub-agents use a lightweight model (same as the query classifier) for
-    the iterative tool-calling loop.  This keeps TPM low and latency
-    fast.  The main provider is available for any future heavy-lifting
-    (e.g. a final synthesis pass).
+    Sub-agents use an *explorer* model (e.g. Haiku 4.5 or Qwen Plus
+    **with thinking enabled**) for the iterative tool-calling loop.
+    Thinking mode lets the model reason deeply about code structure
+    before emitting tool calls, which significantly improves the
+    quality and provability of findings.
+
+    The main ``provider`` (strong model) is reserved for the final
+    synthesis pass.
 
     Args:
         provider: Main AI provider (strong model, e.g. Sonnet 4.6).
             Reserved for orchestration / synthesis.
-        classifier_provider: Lightweight model (e.g. Haiku 4.5) used by
-            sub-agents for the iterative review loop.  Falls back to
-            ``provider`` when not supplied.
+        explorer_provider: Explorer model used by sub-agents.
+            For Alibaba models, thinking is enabled so the model
+            reasons about code structure before acting.  Falls back
+            to ``provider`` when not supplied.
         trace_writer: Optional trace persistence for session metrics.
     """
 
     def __init__(
         self,
         provider: AIProvider,
-        classifier_provider: Optional[AIProvider] = None,
+        explorer_provider: Optional[AIProvider] = None,
         trace_writer=None,
     ) -> None:
         self._provider = provider
-        self._classifier_provider = classifier_provider
-        # Sub-agents prefer the lightweight model; fall back to the main one
-        self._sub_agent_provider = classifier_provider or provider
+        self._explorer_provider = explorer_provider
+        # Sub-agents prefer the explorer model; fall back to the main one
+        self._sub_agent_provider = explorer_provider or provider
         self._trace_writer = trace_writer
 
     async def review(
@@ -357,13 +508,20 @@ class CodeReviewService:
             )
             ranked = ranked[:_MAX_FINDINGS]
 
-        # Step 7: Determine merge recommendation
+        # Step 7: Severity arbitration — strong model reviews severity
+        ranked = await _arbitrate_severities(
+            provider=self._provider,
+            findings=ranked,
+            file_diffs=file_diffs,
+        )
+
+        # Step 8: Determine merge recommendation (after arbitration)
         merge_rec = _merge_recommendation(ranked)
 
         # Build PR summary (structured fallback)
         pr_summary = _build_summary(pr_context, risk_profile, ranked, merge_rec)
 
-        # Step 8: Synthesis pass — strong model produces polished review
+        # Step 9: Synthesis pass — strong model produces polished review
         synthesis = await _synthesize_findings(
             provider=self._provider,  # strong model (e.g. Sonnet 4.6)
             pr_context=pr_context,
@@ -414,11 +572,16 @@ Your job is to produce a **single, coherent, publication-quality code review** i
 
 4. **Consolidate duplicates.** If multiple agents flagged the same root cause, merge into one finding with the strongest evidence.
 
-5. **Actionable fixes.** Each finding must include a concrete, implementable suggested fix — following Google's standard of "show, don't tell" (not "consider adding error handling" — instead "wrap the `process()` call at line 42 in a try/except that logs the error and returns a 500 response").
+5. **Provability test for severity.** Before assigning severity, ask: "Is this provable from the code alone, or does it depend on an unverified business/design assumption?"
+   - **Code-provable** → eligible for critical (if concrete trigger scenario exists) or warning.
+   - **Assumption-dependent** → at most warning, and must include a qualifier like "if the intended design is X".
+   - **Never re-escalate** a finding that an agent or arbitrator already downgraded — you may only keep or further downgrade.
 
-6. **Proportional tone.** Small PRs with minor issues should get brief reviews. Don't write 500 words about a nit. Match review depth to actual risk. Follow Google's principle: "a reviewer's first responsibility is to keep the codebase healthy, but be courteous and explain reasoning."
+6. **Actionable fixes.** Each finding must include a concrete, implementable suggested fix — following Google's standard of "show, don't tell" (not "consider adding error handling" — instead "wrap the `process()` call at line 42 in a try/except that logs the error and returns a 500 response").
 
-7. **Praise good patterns.** If the code demonstrates good practices (proper error handling, thorough tests, clean abstractions, good naming), briefly acknowledge it — Google culture encourages recognizing good work.
+7. **Proportional tone.** Small PRs with minor issues should get brief reviews. Don't write 500 words about a nit. Match review depth to actual risk. Follow Google's principle: "a reviewer's first responsibility is to keep the codebase healthy, but be courteous and explain reasoning."
+
+8. **Praise good patterns.** If the code demonstrates good practices (proper error handling, thorough tests, clean abstractions, good naming), briefly acknowledge it — Google culture encourages recognizing good work.
 
 ## Output format
 
@@ -496,27 +659,28 @@ async def _synthesize_findings(
             diff_snippets.append(f"### {f.file}\n```diff\n{snippet}\n```")
             total_diff_chars += len(snippet)
 
-    # Build the prompt
+    # Build the prompt with XML-tagged data sections
     prompt = f"""\
-## PR Metadata
-- Diff spec: {pr_context.diff_spec}
-- Files changed: {pr_context.file_count}
-- Lines: +{pr_context.total_additions}/-{pr_context.total_deletions} ({pr_context.total_changed_lines} total)
-- Max risk: {risk_profile.max_risk().value}
-- Risk dimensions: correctness={risk_profile.correctness.value}, security={risk_profile.security.value}, concurrency={risk_profile.concurrency.value}, reliability={risk_profile.reliability.value}, operational={risk_profile.operational.value}
+<pr_context>
+diff_spec: {pr_context.diff_spec}
+files_changed: {pr_context.file_count}
+lines: +{pr_context.total_additions}/-{pr_context.total_deletions} ({pr_context.total_changed_lines} total)
+max_risk: {risk_profile.max_risk().value}
+risk_dimensions: correctness={risk_profile.correctness.value}, security={risk_profile.security.value}, concurrency={risk_profile.concurrency.value}, reliability={risk_profile.reliability.value}, operational={risk_profile.operational.value}
+preliminary_recommendation: {merge_rec}
+</pr_context>
 
-## Files Changed
+<file_list>
 {chr(10).join(f'- {f.path} (+{f.additions}/-{f.deletions}, {f.category.value})' for f in pr_context.files[:30])}
+</file_list>
 
-## Agent Findings ({len(findings)} total)
+<findings count="{len(findings)}">
 {chr(10).join(findings_text) if findings_text else 'No issues found by any agent.'}
+</findings>
 
-## Preliminary Recommendation: {merge_rec}
-
-## Relevant Diffs
+<diffs>
 {chr(10).join(diff_snippets) if diff_snippets else 'No diff snippets available.'}
-
-Please produce the final synthesized code review following the output format specified in your instructions.
+</diffs>
 """
 
     logger.info(

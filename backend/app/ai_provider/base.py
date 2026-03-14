@@ -133,6 +133,7 @@ class AIProvider(ABC):
         prompt: str,
         max_tokens: int = 2048,
         system: str | None = None,
+        assistant_prefix: str | None = None,
     ) -> str:
         """Call the AI model with a raw prompt and return the response text.
 
@@ -140,10 +141,16 @@ class AIProvider(ABC):
         the pipeline for classification, summarization, and code explanation.
 
         Args:
-            prompt:     The user-turn prompt to send to the model.
-            max_tokens: Maximum tokens in the response (default: 2048).
-            system:     Optional system-role instruction prepended before the
-                        user message.  Supported by all three providers.
+            prompt:           The user-turn prompt to send to the model.
+            max_tokens:       Maximum tokens in the response (default: 2048).
+            system:           Optional system-role instruction prepended before
+                              the user message.  Supported by all three providers.
+            assistant_prefix: Optional string to prepend as the start of the
+                              assistant response (prefilling).  The model will
+                              continue generating from this prefix.  Useful for
+                              forcing structured output (e.g. ``"["`` for JSON
+                              arrays).  The prefix is **not** included in the
+                              returned text.
 
         Returns:
             str: The model's response text.

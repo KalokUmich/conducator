@@ -575,8 +575,8 @@ class TestProviderResolver:
 
             assert status.summary_enabled is True
             assert status.active_provider == "aws_bedrock"
-            # All 3 provider types are listed
-            assert len(status.providers) == 3
+            # All 5 provider types are listed
+            assert len(status.providers) == 5
             bedrock_status = [p for p in status.providers if p.name == "aws_bedrock"][0]
             assert bedrock_status.healthy is True
 
@@ -681,7 +681,7 @@ class TestAIStatusEndpoint:
             data = response.json()
             assert data["summary_enabled"] is True
             assert data["active_provider"] == "aws_bedrock"
-            assert len(data["providers"]) == 3
+            assert len(data["providers"]) == 5
             bedrock_provider = [p for p in data["providers"] if p["name"] == "aws_bedrock"][0]
             assert bedrock_provider["healthy"] is True
 
@@ -721,7 +721,7 @@ class TestAIStatusEndpoint:
             data = response.json()
             assert data["summary_enabled"] is True
             assert data["active_provider"] is None
-            assert len(data["providers"]) == 3
+            assert len(data["providers"]) == 5
             bedrock_provider = [p for p in data["providers"] if p["name"] == "aws_bedrock"][0]
             assert bedrock_provider["healthy"] is False
 
@@ -1912,7 +1912,7 @@ class TestAIStatusEndpointHealthChecks:
             data = response.json()
             assert data["summary_enabled"] is True
             assert data["active_provider"] == "anthropic"
-            assert len(data["providers"]) == 3
+            assert len(data["providers"]) == 5
 
             # Find provider statuses
             bedrock_status = next(p for p in data["providers"] if p["name"] == "aws_bedrock")
@@ -1962,7 +1962,7 @@ class TestAIStatusEndpointHealthChecks:
             # Bedrock has priority and is healthy
             assert data["active_provider"] == "aws_bedrock"
             # All provider types are listed
-            assert len(data["providers"]) == 3
+            assert len(data["providers"]) == 5
             # The active provider should be in the list and healthy
             bedrock_status = next((p for p in data["providers"] if p["name"] == "aws_bedrock"), None)
             assert bedrock_status is not None
@@ -2008,7 +2008,7 @@ class TestAIStatusEndpointHealthChecks:
             data = response.json()
             assert data["summary_enabled"] is True
             assert data["active_provider"] is None
-            assert len(data["providers"]) == 3
+            assert len(data["providers"]) == 5
             # Both configured providers should be unhealthy
             bedrock_status = next(p for p in data["providers"] if p["name"] == "aws_bedrock")
             anthropic_status = next(p for p in data["providers"] if p["name"] == "anthropic")

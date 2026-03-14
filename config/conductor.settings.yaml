@@ -101,6 +101,8 @@ ai_provider_settings:
   anthropic_enabled: true
   aws_bedrock_enabled: true
   openai_enabled: true
+  alibaba_enabled: true
+  moonshot_enabled: false
   # When true, if a native provider fails its health check, the resolver
   # automatically retries via LiteLLM as a fallback.  Requires: pip install litellm
   litellm_fallback: false
@@ -137,6 +139,7 @@ ai_models:
     display_name: "Claude Haiku 4.5 (Bedrock EU)"
     enabled: true
     classifier: true  # fast + cheap — good for query pre-classification
+    explorer: true    # good sub-agent — strong instruction following, no thinking override needed
     litellm: true
 
   - id: "claude-3-haiku-bedrock"
@@ -240,6 +243,55 @@ ai_models:
     enabled: true
     classifier: true
     litellm: true
+
+  # ---- Alibaba / Qwen (DashScope, OpenAI-compatible) ----
+  - id: "qwen3-max"
+    provider: "alibaba"
+    model_name: "qwen3-max"
+    display_name: "Qwen3 Max (DashScope)"
+    enabled: true
+
+  - id: "qwen3.5-plus"
+    provider: "alibaba"
+    model_name: "qwen3.5-plus"
+    display_name: "Qwen3.5 Plus (DashScope)"
+    enabled: true
+    explorer: true
+
+  - id: "qwen3.5-flash"
+    provider: "alibaba"
+    model_name: "qwen3.5-flash"
+    display_name: "Qwen3.5 Flash (DashScope)"
+    enabled: true
+    classifier: true  # very fast + cheap — ideal for query pre-classification
+    explorer: true    # sub-agent — thinking DISABLED to maximise content output
+
+  - id: "qwen3-coder-plus"
+    provider: "alibaba"
+    model_name: "qwen3-coder-plus"
+    display_name: "Qwen3 Coder Plus (DashScope)"
+    enabled: true
+
+  - id: "qwen3-coder-flash"
+    provider: "alibaba"
+    model_name: "qwen3-coder-flash"
+    display_name: "Qwen3 Coder Flash (DashScope)"
+    enabled: true
+    classifier: true  # very fast + cheap — ideal for code change classification
+    explorer: true    # sub-agent — thinking DISABLED to maximise content output
+
+  # ---- Moonshot / Kimi (OpenAI-compatible) ----
+  - id: "kimi-k2.5"
+    provider: "moonshot"
+    model_name: "kimi-k2.5"
+    display_name: "Kimi K2.5 (Moonshot)"
+    enabled: true
+
+  - id: "kimi-k2-thinking"
+    provider: "moonshot"
+    model_name: "kimi-k2-thinking"
+    display_name: "Kimi K2 Thinking (Moonshot)"
+    enabled: true
 
 # =============================================================================
 # Prompt Configuration

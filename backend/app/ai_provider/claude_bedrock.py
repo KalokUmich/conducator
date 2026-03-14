@@ -636,16 +636,18 @@ class ClaudeBedrockProvider(AIProvider):
         prompt: str,
         max_tokens: int = 2048,
         system: str | None = None,
+        assistant_prefix: str | None = None,
     ) -> str:
         """Call the Claude model via Bedrock with a raw prompt.
 
         Uses the Converse API for compatibility with all model types.
 
         Args:
-            prompt:     The user-turn prompt to send to the model.
-            max_tokens: Maximum tokens in the response.
-            system:     Optional system instruction (maps to the Converse
-                        ``system`` parameter as a text block).
+            prompt:           The user-turn prompt to send to the model.
+            max_tokens:       Maximum tokens in the response.
+            system:           Optional system instruction (maps to the Converse
+                              ``system`` parameter as a text block).
+            assistant_prefix: Optional string to prefill the assistant response.
 
         Returns:
             str: The model's response text.
@@ -655,21 +657,31 @@ class ClaudeBedrockProvider(AIProvider):
         """
         client = self._get_client()
 
+        messages: list = [
+            {
+                "role": "user",
+                "content": [{"text": prompt}],
+            }
+        ]
+        if assistant_prefix:
+            messages.append({
+                "role": "assistant",
+                "content": [{"text": assistant_prefix}],
+            })
+
         kwargs: dict = {
             "modelId": self.model_id,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"text": prompt}],
-                }
-            ],
+            "messages": messages,
             "inferenceConfig": {"maxTokens": max_tokens},
         }
         if system:
             kwargs["system"] = [{"text": system}]
 
         response = client.converse(**kwargs)
-        return response["output"]["message"]["content"][0]["text"].strip()
+        text = response["output"]["message"]["content"][0]["text"].strip()
+        if assistant_prefix:
+            return assistant_prefix + text
+        return text
 
     def chat_with_tools(
         self,
