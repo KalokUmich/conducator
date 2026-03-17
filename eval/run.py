@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """CLI entrypoint for the code review eval system.
 
-Usage:
+Two modes:
+
+  Pipeline mode (default):
+    Runs CodeReviewService (10-step multi-agent pipeline) against eval cases.
     python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
+
+  Gold-standard mode (--gold):
+    Invokes Claude Code CLI directly (own tools, own strategies).
+    Produces the quality ceiling baseline for comparison.
+    python eval/run.py --gold --save-baseline
+    python eval/run.py --gold --gold-model opus --filter "requests-001"
+
+Examples:
     python eval/run.py --filter "requests-001"
     python eval/run.py --no-judge
     python eval/run.py --save-baseline
+    python eval/run.py --gold --save-baseline
+    python eval/run.py --compare-gold
     python eval/run.py --provider bedrock --model us.anthropic.claude-sonnet-4-5-20250929-v1:0
-
-Providers:
-    anthropic  — Anthropic Messages API (requires ANTHROPIC_API_KEY)
-    bedrock    — AWS Bedrock Converse API (requires AWS credentials)
-    openai     — OpenAI Chat Completions (requires OPENAI_API_KEY)
 """
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -29,9 +38,16 @@ if str(_EVAL_DIR) not in sys.path:
 
 # Backend imports (runner adds backend/ to sys.path)
 from runner import CaseConfig, RunResult, run_case  # noqa: E402
+from gold_runner import GoldRunResult, run_gold_case  # noqa: E402
 from scorer import CaseScore, score_case  # noqa: E402
 from judge import judge_case  # noqa: E402
-from report import EvalReport, build_report, print_report, save_baseline  # noqa: E402
+from report import (  # noqa: E402
+    EvalReport, build_report, print_report,
+    save_baseline, save_gold_baseline, load_latest_gold_baseline,
+)
+
+# Directory for saving full gold traces (alongside gold_baselines/)
+_GOLD_TRACES_DIR = Path(__file__).resolve().parent / "gold_traces"
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,12 +89,31 @@ def parse_args() -> argparse.Namespace:
         "--max-agents", type=int, default=5,
         help="Max parallel agents per review (default: 5)",
     )
+
+    # Gold-standard baseline options
+    gold_group = parser.add_argument_group("gold-standard baseline")
+    gold_group.add_argument(
+        "--gold", action="store_true",
+        help="Run in gold-standard mode (Claude Code CLI, own tools)",
+    )
+    gold_group.add_argument(
+        "--gold-model", type=str, default="opus",
+        help="Claude Code model alias for gold runs (default: opus)",
+    )
+    gold_group.add_argument(
+        "--gold-max-budget", type=float, default=5.0,
+        help="Max USD spend per gold case (default: 5.0)",
+    )
+    gold_group.add_argument(
+        "--compare-gold", action="store_true",
+        help="Compare pipeline results against the latest gold baseline",
+    )
+
     return parser.parse_args()
 
 
 def create_provider(provider_name: str, model: str = None):
     """Create an AIProvider instance based on CLI args."""
-    # Import here after sys.path is set up by runner
     _backend = str(Path(__file__).resolve().parent.parent / "backend")
     if _backend not in sys.path:
         sys.path.insert(0, _backend)
@@ -155,6 +190,10 @@ def load_cases(eval_dir: Path, filter_str: str = None) -> list:
     return all_cases
 
 
+# ---------------------------------------------------------------------------
+# Pipeline mode runner
+# ---------------------------------------------------------------------------
+
 async def run_single_case(
     case: CaseConfig,
     source_dir: str,
@@ -165,7 +204,7 @@ async def run_single_case(
     use_judge: bool,
     judge_provider=None,
 ) -> tuple:
-    """Run a single case and return (CaseScore, judge_verdict_dict or None)."""
+    """Run a single case through the pipeline and return (CaseScore, judge_verdict)."""
     print(f"  Running {case.id} ({case.difficulty})... ", end="", flush=True)
 
     run_result = await run_case(
@@ -207,6 +246,99 @@ async def run_single_case(
     return score, judge_verdict
 
 
+# ---------------------------------------------------------------------------
+# Gold-standard mode runner
+# ---------------------------------------------------------------------------
+
+def _save_gold_trace(case_id: str, trace, timestamp: str) -> str:
+    """Save the full gold trace to a JSON file for later analysis.
+
+    Returns path to the saved file.
+    """
+    _GOLD_TRACES_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = _GOLD_TRACES_DIR / f"{case_id}_{timestamp}.json"
+    data = trace.to_dict() if trace else {}
+    data["case_id"] = case_id
+    filepath.write_text(json.dumps(data, indent=2, default=str) + "\n")
+    return str(filepath)
+
+
+async def run_single_gold_case(
+    case: CaseConfig,
+    source_dir: str,
+    patch_dir: str,
+    model: str,
+    max_budget_usd: float,
+    use_judge: bool,
+    judge_provider=None,
+) -> tuple:
+    """Run a single case with Claude Code CLI and return (CaseScore, judge_verdict, trace)."""
+    print(f"  [gold] Running {case.id} ({case.difficulty})... ", end="", flush=True)
+
+    gold_result = await run_gold_case(
+        case=case,
+        source_dir=source_dir,
+        patch_dir=patch_dir,
+        model=model,
+        max_budget_usd=max_budget_usd,
+    )
+
+    if gold_result.error:
+        print(f"ERROR: {gold_result.error}")
+        return CaseScore(case_id=case.id, error=gold_result.error), None, None
+
+    review = gold_result.review_result
+    findings = review.findings if review else []
+    files_reviewed = review.files_reviewed if review else []
+    trace = gold_result.trace
+
+    score = score_case(case, findings, files_reviewed)
+
+    # Print summary
+    duration_str = f"{gold_result.duration_seconds:.0f}s" if gold_result.duration_seconds else ""
+    tool_count = trace.total_tool_calls if trace else 0
+    cost_str = f"${trace.cost_usd:.3f}" if trace and trace.cost_usd else ""
+    print(
+        f"composite={score.composite:.3f} "
+        f"(recall={score.recall:.2f}, findings={len(findings)}, "
+        f"tools={tool_count}, {duration_str}, {cost_str})"
+    )
+
+    # Print tool usage summary
+    if trace and trace.tool_uses:
+        tool_counts = {}
+        for tu in trace.tool_uses:
+            tool_counts[tu.tool_name] = tool_counts.get(tu.tool_name, 0) + 1
+        top_tools = sorted(tool_counts.items(), key=lambda x: -x[1])[:5]
+        tools_str = ", ".join(f"{name}:{count}" for name, count in top_tools)
+        print(f"    Tools: {tools_str}")
+
+    if trace and trace.files_read:
+        print(f"    Files read: {len(trace.files_read)}")
+
+    # LLM judge
+    judge_verdict = None
+    if use_judge and judge_provider and review:
+        print(f"    Judging {case.id}... ", end="", flush=True)
+        verdict = judge_case(
+            provider=judge_provider,
+            case_title=case.title,
+            case_description=case.description,
+            expected_findings=case.expected_findings,
+            findings=findings,
+            synthesis=review.synthesis,
+        )
+        judge_verdict = verdict.to_dict()
+        judge_verdict["case_id"] = case.id
+        print(f"avg={verdict.average:.1f}")
+
+    return score, judge_verdict, trace
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 async def run_all(args: argparse.Namespace) -> None:
     """Main async entry point."""
     eval_dir = Path(__file__).resolve().parent
@@ -216,68 +348,113 @@ async def run_all(args: argparse.Namespace) -> None:
         print("No cases found. Check repos.yaml and cases/ directory.")
         return
 
-    print(f"Loaded {len(cases)} case(s)")
-    print(f"Provider: {args.provider}, Model: {args.model or 'default'}")
+    is_gold = args.gold
+    mode_label = "gold-standard (Claude Code CLI)" if is_gold else "pipeline"
+    print(f"Loaded {len(cases)} case(s) — mode: {mode_label}")
+
+    if is_gold:
+        print(f"Gold model: {args.gold_model}, max budget: ${args.gold_max_budget}/case")
+    else:
+        print(f"Provider: {args.provider}, Model: {args.model or 'default'}")
     print()
-
-    # Create providers
-    provider = create_provider(args.provider, args.model)
-    explorer_provider = None
-    if args.explorer_model:
-        explorer_provider = create_provider(args.provider, args.explorer_model)
-
-    judge_provider = provider if not args.no_judge else None
 
     scores = []
     verdicts = []
+    traces = []  # gold mode only
 
-    # Run cases (sequential or parallel)
-    if args.parallelism <= 1:
+    if is_gold:
+        # Gold mode: invoke Claude Code CLI (no AIProvider needed)
+        # Judge still needs a provider if enabled
+        judge_provider = None
+        if not args.no_judge:
+            judge_provider = create_provider(args.provider, args.model)
+
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
         for case, source_dir, patch_dir in cases:
-            score, verdict = await run_single_case(
+            score, verdict, trace = await run_single_gold_case(
                 case, source_dir, patch_dir,
-                provider, explorer_provider, args.max_agents,
+                args.gold_model,
+                args.gold_max_budget,
                 not args.no_judge, judge_provider,
             )
             scores.append(score)
             if verdict:
                 verdicts.append(verdict)
+            if trace:
+                trace_path = _save_gold_trace(case.id, trace, ts)
+                traces.append(trace_path)
+
+        if traces:
+            print(f"\nGold traces saved: {len(traces)} files in {_GOLD_TRACES_DIR}/")
     else:
-        # Run in batches
-        for i in range(0, len(cases), args.parallelism):
-            batch = cases[i:i + args.parallelism]
-            tasks = [
-                run_single_case(
+        # Pipeline mode
+        provider = create_provider(args.provider, args.model)
+        explorer_provider = None
+        if args.explorer_model:
+            explorer_provider = create_provider(args.provider, args.explorer_model)
+        judge_provider = provider if not args.no_judge else None
+
+        if args.parallelism <= 1:
+            for case, source_dir, patch_dir in cases:
+                score, verdict = await run_single_case(
                     case, source_dir, patch_dir,
                     provider, explorer_provider, args.max_agents,
                     not args.no_judge, judge_provider,
                 )
-                for case, source_dir, patch_dir in batch
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    print(f"  Case failed with exception: {result}")
-                    scores.append(CaseScore(case_id="unknown", error=str(result)))
-                else:
-                    score, verdict = result
-                    scores.append(score)
-                    if verdict:
-                        verdicts.append(verdict)
+                scores.append(score)
+                if verdict:
+                    verdicts.append(verdict)
+        else:
+            for i in range(0, len(cases), args.parallelism):
+                batch = cases[i:i + args.parallelism]
+                tasks = [
+                    run_single_case(
+                        case, source_dir, patch_dir,
+                        provider, explorer_provider, args.max_agents,
+                        not args.no_judge, judge_provider,
+                    )
+                    for case, source_dir, patch_dir in batch
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        print(f"  Case failed with exception: {result}")
+                        scores.append(CaseScore(case_id="unknown", error=str(result)))
+                    else:
+                        score, verdict = result
+                        scores.append(score)
+                        if verdict:
+                            verdicts.append(verdict)
+
+    # Load gold baseline for comparison (pipeline mode only)
+    gold_baseline = None
+    if args.compare_gold and not is_gold:
+        gold_baseline = load_latest_gold_baseline()
+        if not gold_baseline:
+            print("WARNING: --compare-gold set but no gold baseline found in gold_baselines/",
+                  file=sys.stderr)
 
     # Build and print report
     report = build_report(
         scores=scores,
         judge_verdicts=verdicts or None,
-        provider=args.provider,
-        model=args.model or "default",
+        provider="claude-code" if is_gold else args.provider,
+        model=args.gold_model if is_gold else (args.model or "default"),
+        mode="gold" if is_gold else "pipeline",
+        gold_baseline=gold_baseline,
     )
     print_report(report)
 
-    # Save baseline if requested
+    # Save baseline
     if args.save_baseline:
-        path = save_baseline(report)
-        print(f"Baseline saved: {path}")
+        if is_gold:
+            path = save_gold_baseline(report)
+            print(f"Gold baseline saved: {path}")
+        else:
+            path = save_baseline(report)
+            print(f"Baseline saved: {path}")
 
     # Exit with error code if regressions detected
     if report.has_regressions:

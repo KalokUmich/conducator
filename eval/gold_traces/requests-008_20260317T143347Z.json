@@ -1,0 +1,79 @@
+{
+  "tool_uses": [
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "git diff HEAD~1..HEAD",
+        "description": "Show the diff introduced by the latest commit"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_ztup49a0/requests/adapters.py",
+        "offset": 450,
+        "limit": 80
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "chunked",
+        "path": "/tmp/eval_ws_ztup49a0/requests/adapters.py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "chunked",
+        "path": "/tmp/eval_ws_ztup49a0",
+        "output_mode": "content",
+        "glob": "**/test*\""
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "Content-Length",
+        "path": "/tmp/eval_ws_ztup49a0/requests",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_ztup49a0/requests/models.py",
+        "offset": 540,
+        "limit": 60
+      },
+      "result_summary": ""
+    }
+  ],
+  "files_read": [
+    "/tmp/eval_ws_ztup49a0/requests/adapters.py",
+    "/tmp/eval_ws_ztup49a0/requests/models.py"
+  ],
+  "grep_patterns": [
+    "chunked",
+    "chunked",
+    "Content-Length"
+  ],
+  "bash_commands": [
+    "git diff HEAD~1..HEAD"
+  ],
+  "total_tool_calls": 6,
+  "final_text": "The bug is clear. Here's the analysis:\n\n**Original logic (correct):**\n```python\nchunked = not (request.body is None or \"Content-Length\" in request.headers)\n```\nThis means: use chunked encoding only when there IS a body AND Content-Length is NOT already set. This is standard HTTP behavior \u2014 if the body length is unknown, use chunked transfer encoding.\n\n**New logic (broken):**\n```python\nchunked = request.body is None or \"Content-Length\" in request.headers\n```\nThis completely inverts the semantics in three destructive ways:\n\n1. **Body is None \u2192 `chunked=True`**: Tries chunked encoding on bodyless requests (GET, HEAD, DELETE without body). This can cause servers to hang waiting for chunked body data.\n2. **Body present + Content-Length set \u2192 `chunked=True`**: Sends both `Content-Length` and `Transfer-Encoding: chunked`, which is explicitly forbidden by HTTP/1.1 (RFC 7230 \u00a73.3.3). Servers will reject or misparse.\n3. **Body present + no Content-Length (streaming) \u2192 `chunked=False`**: The one case that actually NEEDS chunked encoding now doesn't get it, causing urllib3 to either fail or send malformed data.\n\n```json\n[\n  {\n    \"title\": \"Inverted chunked transfer-encoding logic breaks all HTTP requests with bodies\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.99,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 469,\n    \"end_line\": 470,\n    \"evidence\": [\n      \"Original: chunked = not (request.body is None or \\\"Content-Length\\\" in request.headers)\",\n      \"Changed to: chunked = request.body is None or \\\"Content-Length\\\" in request.headers\",\n      \"Comment says 'Invert chunked logic' confirming intentional inversion\",\n      \"chunked=True is passed to conn.urlopen() at line 498\"\n    ],\n    \"risk\": \"All POST/PUT/PATCH requests with known Content-Length will be sent with conflicting chunked encoding (violates RFC 7230 \u00a73.3.3), causing server errors, rejected requests, or data corruption. Streaming uploads without Content-Length will NOT use chunked encoding, causing failures. Bodyless requests (GET/HEAD) will incorrectly request chunked transfer, potentially causing servers to hang waiting for body data.\",\n    \"suggested_fix\": \"Revert line 470 to: chunked = not (request.body is None or \\\"Content-Length\\\" in request.headers)\"\n  },\n  {\n    \"title\": \"Bodyless requests (GET/HEAD) incorrectly sent with chunked=True\",\n    \"category\": \"reliability\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.97,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 470,\n    \"end_line\": 470,\n    \"evidence\": [\n      \"chunked = request.body is None or \\\"Content-Length\\\" in request.headers\",\n      \"When request.body is None (GET, HEAD, DELETE without body), chunked evaluates to True\",\n      \"models.py:582-587 shows bodyless non-GET/HEAD methods get Content-Length: 0, so body is None + Content-Length present \u2192 chunked=True\",\n      \"conn.urlopen(..., chunked=chunked) at line 498 will attempt chunked encoding on bodyless requests\"\n    ],\n    \"risk\": \"Simple GET requests will be sent with Transfer-Encoding: chunked, which many HTTP servers and proxies will reject or misinterpret, causing widespread request failures across all applications using this library.\",\n    \"suggested_fix\": \"Revert line 470 to: chunked = not (request.body is None or \\\"Content-Length\\\" in request.headers)\"\n  },\n  {\n    \"title\": \"Streaming uploads with unknown length no longer use chunked encoding\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.97,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 470,\n    \"end_line\": 470,\n    \"evidence\": [\n      \"chunked = request.body is None or \\\"Content-Length\\\" in request.headers\",\n      \"models.py:549-552 shows that when body length is unknown, Transfer-Encoding: chunked header is set but Content-Length is NOT set\",\n      \"With the new logic: body is not None AND Content-Length not in headers \u2192 chunked=False\",\n      \"This means streaming bodies (generators, file-like objects without known length) will NOT use chunked encoding\"\n    ],\n    \"risk\": \"Streaming uploads (generators, file-like objects without deterministic length) will fail because urllib3 won't use chunked encoding, leading to malformed requests or data truncation. The Transfer-Encoding header set in models.py becomes a lie.\",\n    \"suggested_fix\": \"Revert line 470 to: chunked = not (request.body is None or \\\"Content-Length\\\" in request.headers)\"\n  }\n]\n```",
+  "model": "",
+  "cost_usd": 0.15625224999999998,
+  "input_tokens": 6,
+  "output_tokens": 2184,
+  "duration_ms": 57896,
+  "session_id": "acaca577-923f-4b6f-ba98-752ccf852d32",
+  "case_id": "requests-008"
+}

@@ -7,7 +7,7 @@
 <a name="english"></a>
 ## English
 
-Conductor backend is a FastAPI application providing real-time chat, agentic code intelligence (LLM agent loop + 21 code tools + token budget controller + 3-layer prompts), Git workspace management, file sharing, DuckDB-backed audit logs and TODOs, and multi-provider AI (Bedrock / Anthropic / OpenAI).
+Conductor backend is a FastAPI application providing real-time chat, agentic code intelligence (LLM agent loop + 24 code tools + token budget controller + 3-layer prompts), Git workspace management, file sharing, DuckDB-backed audit logs and TODOs, and multi-provider AI (Bedrock / Anthropic / OpenAI).
 
 ### Quick Start
 
@@ -68,7 +68,7 @@ Docs:
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/context/query` | LLM agent loop — iteratively calls 21 code tools (up to 25 iterations, 500K token budget) |
+| POST | `/api/context/query` | LLM agent loop — iteratively calls 24 code tools (up to 25 iterations, 500K token budget) |
 | POST | `/api/context/query/stream` | SSE streaming — real-time tool call progress events |
 | POST | `/api/context/explain-rich` | Deep code explanation via agent (replaces XML-prompt pipeline) |
 | POST | `/api/context/explain-rich/stream` | SSE streaming for explain-rich |
@@ -136,7 +136,7 @@ Docs:
 
 `POST /api/context/query` runs an LLM agent loop (up to **25 iterations**, **500K token budget**). The Query Classifier categorises the query into one of 7 types, selects an optimal 8-12 tool subset, and injects a 3-layer system prompt (Core Identity + Strategy + Runtime Guidance). A token-based Budget Controller emits NORMAL / WARN_CONVERGE / FORCE_CONCLUDE signals. An Evidence Evaluator rejects weak answers before finalising. Session Traces are saved as JSON for offline analysis.
 
-**21 code tools:**
+**24 code tools:**
 
 | Tool | Description |
 |------|-------------|
@@ -148,19 +148,20 @@ Docs:
 | `file_outline` | All definitions in a file with line numbers |
 | `get_dependencies` | Files this file imports |
 | `get_dependents` | Files that import this file |
-| `git_log` | Recent commits, optionally per-file |
+| `git_log` | Recent commits, optionally per-file; `search=` param filters by commit message |
 | `git_diff` | Diff between two git refs |
 | `ast_search` | Structural AST search via ast-grep (`$VAR`, `$$$MULTI` patterns) |
 | `get_callees` | Functions called within a function body |
 | `get_callers` | Functions that call a given function (cross-file) |
 | `git_blame` | Per-line authorship with commit hash, author, date |
-| `git_show` | Full commit details (message + diff) |
+| `git_show` | Full commit details (message + diff) — also reads pre-change file at `HEAD~1:path` |
 | `find_tests` | Test functions covering a given function/class |
 | `test_outline` | Test file structure with mocks, assertions, fixtures |
 | `trace_variable` | Data flow tracing: alias detection, arg→param mapping, sink/source patterns |
 | `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
 | `module_summary` | Module-level summary: services, models, functions, file list (~95% savings) |
 | `expand_symbol` | Expand a symbol from compressed view to full source code |
+| `run_test` | Execute a test file or specific test function; returns pass/fail + output (optional verification) |
 
 ### AI Provider Notes
 
@@ -240,7 +241,7 @@ Key test files (agentic code intelligence):
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `tests/test_code_tools.py` | 98 | All 21 code tools + dispatcher + multi-language |
+| `tests/test_code_tools.py` | 98 | All 24 code tools + dispatcher + multi-language |
 | `tests/test_agent_loop.py` | 39 | Agent loop + message format + workspace layout + 3-layer prompt |
 | `tests/test_budget_controller.py` | 20 | Token budget signals, tracking, edge cases |
 | `tests/test_session_trace.py` | 15 | SessionTrace, IterationTrace, save/load |
@@ -272,7 +273,7 @@ Additional test files:
 A standalone eval system in `eval/` (excluded from Docker) measures `CodeReviewService` quality against known bugs planted in real open-source repos. 12 cases against requests v2.31.0 (4 easy, 5 medium, 3 hard).
 
 ```bash
-# Run all cases
+# Pipeline mode: run CodeReviewService against all 12 cases
 python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
 
 # Single case
@@ -283,20 +284,33 @@ python eval/run.py --no-judge
 
 # Save baseline for regression detection
 python eval/run.py --save-baseline
+
+# Gold-standard mode: invoke Claude Code CLI directly (quality ceiling)
+python eval/run.py --gold --save-baseline
+python eval/run.py --gold --gold-model opus --gold-max-budget 5.0
+
+# Compare pipeline run against gold baseline
+python eval/run.py --compare-gold
 ```
 
-Scoring: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%). Optional LLM-as-Judge evaluates completeness, reasoning, actionability, and false positive quality (1-5 scale). Baselines saved as JSON; regressions flagged at >10% composite drop.
+**Two baseline types:**
+- **Pipeline baseline** (`eval/baselines/`) — your own previous runs; detect regressions
+- **Gold baseline** (`eval/gold_baselines/`) — Claude Code CLI (Opus) direct run; quality ceiling
+
+Gold runner invokes `claude -p --output-format stream-json --dangerously-skip-permissions`, strips `ANTHROPIC_API_KEY` (uses subscription), and saves full `GoldTrace` (tool calls, files read, cost) to `eval/gold_traces/`.
+
+Scoring: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%). Optional LLM-as-Judge evaluates completeness, reasoning, actionability, and false positive quality (1-5 scale). Regressions flagged at >10% composite drop; CLI exits with code 1 for CI integration.
 
 **Adding a new repo:** clone at a specific version → remove `.git` → add to `eval/repos.yaml` → create `eval/cases/<repo>/cases.yaml` and patches.
 
-See `eval/README.md` for full documentation.
+See `docs/GUIDE.md` section 11 for full documentation.
 
 ---
 
 <a name="中文"></a>
 ## 中文
 
-Conductor 后端基于 FastAPI，提供实时聊天、**智能代码分析**（LLM 驱动的 Agent Loop + 13 个代码工具）、Git 工作区管理、文件共享、DuckDB 审计日志与 TODO 管理，以及多 Provider AI 集成（Bedrock / Anthropic / OpenAI）。
+Conductor 后端基于 FastAPI，提供实时聊天、**智能代码分析**（LLM 驱动的 Agent Loop + 24 个代码工具 + Token 预算控制器 + 三层 Prompt）、Git 工作区管理、文件共享、DuckDB 审计日志与 TODO 管理，以及多 Provider AI 集成（Bedrock / Anthropic / OpenAI）。
 
 ### 快速启动
 
@@ -357,7 +371,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 | Method | Path | 说明 |
 |---|---|---|
-| POST | `/api/context/query` | LLM Agent Loop — 迭代调用 13 个代码工具回答代码查询 |
+| POST | `/api/context/query` | LLM Agent Loop — 迭代调用 24 个代码工具回答代码查询（最多 25 轮 / 500K token） |
 | GET | `/api/code-tools/available` | 列出所有可用代码工具 |
 | POST | `/api/code-tools/execute/{tool_name}` | 直接执行单个代码工具 |
 
@@ -420,25 +434,34 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ### 智能代码分析
 
-`POST /api/context/query` 运行 LLM Agent Loop（最多 15 轮迭代）。Agent 迭代调用代码工具探索代码库，回答代码导航问题，**无需预先构建向量索引**。
+`POST /api/context/query` 运行 LLM Agent Loop（最多 25 轮迭代，500K token 预算）。QueryClassifier 将查询分类为 7 种类型，选出最优 8-12 工具子集，注入三层 System Prompt（核心身份 + 策略 + 运行时指导）。BudgetController 发出 NORMAL / WARN_CONVERGE / FORCE_CONCLUDE 信号。EvidenceEvaluator 在最终输出前拒绝证据不足的答案。Session Trace 以 JSON 保存供离线分析。
 
-**13 个代码工具：**
+**24 个代码工具：**
 
 | 工具 | 说明 |
 |------|------|
 | `grep` | 正则搜索（ripgrep） |
 | `read_file` | 读取文件（可指定行范围） |
 | `list_files` | 目录树（支持深度/glob 过滤） |
-| `find_symbol` | AST 符号定义搜索（tree-sitter） |
+| `find_symbol` | AST 符号定义搜索（tree-sitter），含角色分类 |
 | `find_references` | 符号用法搜索（grep + AST 验证） |
 | `file_outline` | 列出文件中所有定义及行号 |
 | `get_dependencies` | 该文件导入的文件列表 |
 | `get_dependents` | 导入该文件的文件列表 |
-| `git_log` | 最近 commit（可按文件过滤） |
+| `git_log` | 最近 commit（可按文件过滤）；`search=` 参数按 commit 消息搜索 |
 | `git_diff` | 两个 git ref 之间的 diff |
 | `ast_search` | 结构化 AST 搜索，via ast-grep（`$VAR`、`$$$MULTI` 模式） |
 | `get_callees` | 函数体内调用的函数列表 |
 | `get_callers` | 跨文件调用该函数的调用方列表 |
+| `git_blame` | 每行代码的作者信息（commit hash、作者、日期） |
+| `git_show` | 完整 commit 详情（消息 + diff）；可查看变更前的文件 |
+| `find_tests` | 查找覆盖指定函数/类的测试函数 |
+| `test_outline` | 测试文件结构（mock、断言、fixture） |
+| `trace_variable` | 数据流追踪：别名检测、参数传递映射、source/sink 识别 |
+| `compressed_view` | 文件签名 + 调用关系 + 副作用（节省约 80% token） |
+| `module_summary` | 模块级摘要：服务、模型、函数、文件列表（节省约 95% token） |
+| `expand_symbol` | 将压缩视图中的符号展开为完整源码 |
+| `run_test` | 执行测试文件或指定测试函数；返回通过/失败 + 输出（可选验证步骤） |
 
 ### AI Provider 说明
 
@@ -457,40 +480,38 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ### 测试
 
-共 **670 个测试**。
+共 **900+ 个测试**。
 
 ```bash
 cd backend
 python -m pytest tests/ -v
 python -m pytest tests/ -q
+pytest --cov=. --cov-report=html   # 覆盖率报告
 ```
 
-分布：
-- `tests/test_ai_provider.py`: 131
-- `tests/test_repo_graph.py`: 67
-- `tests/test_prompt_builder.py`: 64
-- `tests/test_code_tools.py`: 52
-- `tests/test_git_workspace.py`: 48
-- `tests/test_config_new.py`: 48
-- `tests/test_workspace_files.py`: 39
-- `tests/test_auth.py`: 38
-- `tests/test_chat.py`: 29
-- `tests/test_auto_apply_policy.py`: 28
-- `tests/test_mock_agent.py`: 26
-- `tests/test_style_loader.py`: 22
-- `tests/test_langextract.py`: 21
-- `tests/test_agent_loop.py`: 21
-- `tests/test_room_settings.py`: 18
-- `tests/test_audit.py`: 14
-- `tests/test_config_paths.py`: 3
-- `tests/test_main.py`: 1
+智能代码分析模块主要测试文件：
+
+| 文件 | 测试数 | 覆盖内容 |
+|------|--------|----------|
+| `test_code_tools.py` | 98 | 全部 24 个工具 + 调度器 + 多语言 |
+| `test_agent_loop.py` | 39 | Agent Loop + 三层 Prompt + 工作区布局 |
+| `test_budget_controller.py` | 20 | Token 预算信号、追踪、边界情况 |
+| `test_session_trace.py` | 15 | SessionTrace JSON 保存/加载 |
+| `test_evidence.py` | 14 | 证据评估器质量门控 |
+| `test_symbol_role.py` | 24 | 符号角色分类 + 装饰器检测 |
+| `test_output_policy.py` | 19 | 每工具截断策略、预算自适应 |
+| `test_query_classifier.py` | 26 | 关键词 + LLM 分类、动态工具集 |
+| `test_compressed_tools.py` | 24 | compressed_view、module_summary、expand_symbol |
+| `test_langextract.py` | 57 | Bedrock Provider、Catalog、Service、Router |
+| `test_repo_graph.py` | 72 | Parser + 依赖图 + PageRank + Service |
+| `test_config_new.py` | 27 | Config + Secrets |
 
 ### 代码评审评估
 
 独立的 `eval/` 目录（通过 `.dockerignore` 排除在 Docker 镜像之外）提供 `CodeReviewService` 质量评估系统。在真实开源仓库中植入已知 bug，衡量评审质量。目前有 12 个用例（基于 requests v2.31.0）。
 
 ```bash
-# 运行所有用例
+# Pipeline 模式：运行我们的 CodeReviewService
 python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
 
 # 单个用例
@@ -499,12 +520,25 @@ python eval/run.py --filter "requests-001"
 # 仅确定性评分（不使用 LLM Judge）
 python eval/run.py --no-judge
 
-# 保存基线用于回归检测
+# 保存 Pipeline 基线用于回归检测
 python eval/run.py --save-baseline
+
+# Gold 模式：直接调用 Claude Code CLI（质量天花板基线）
+python eval/run.py --gold --save-baseline
+python eval/run.py --gold --gold-model opus --gold-max-budget 5.0
+
+# 将 Pipeline 结果与 Gold 基线对比
+python eval/run.py --compare-gold
 ```
 
-评分维度：召回率 (35%)、精确率 (20%)、严重程度准确性 (15%)、定位准确性 (10%)、修复建议 (10%)、上下文深度 (10%)。可选 LLM Judge 评估完整性、推理质量、可操作性和误报质量（1-5 分）。基线以 JSON 格式保存，综合分数下降 >10% 触发回归警告。
+**两种基线：**
+- **Pipeline 基线**（`eval/baselines/`）— 自身上次的运行结果，用于检测回归
+- **Gold 基线**（`eval/gold_baselines/`）— Claude Code CLI（Opus）直接运行的结果，代表质量天花板
+
+Gold Runner 直接调用 `claude -p --output-format stream-json --dangerously-skip-permissions`，自动去除 `ANTHROPIC_API_KEY`（使用月费订阅而非 API 额度），并将完整调查轨迹（工具调用、读取文件、费用等）保存至 `eval/gold_traces/`。
+
+评分维度：召回率 (35%)、精确率 (20%)、严重程度准确性 (15%)、定位准确性 (10%)、修复建议 (10%)、上下文深度 (10%)。可选 LLM Judge 评估完整性、推理质量、可操作性和误报质量（1-5 分）。综合分数下降 >10% 触发回归警告，CLI 返回退出码 1 便于 CI 集成。
 
 **添加新仓库：** 克隆指定版本 → 删除 `.git` → 添加到 `eval/repos.yaml` → 创建 `eval/cases/<repo>/cases.yaml` 和补丁文件。
 
-详见 `eval/README.md`。
+详见 `docs/GUIDE.md` 第 11 节。

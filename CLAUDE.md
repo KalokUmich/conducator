@@ -11,6 +11,17 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 
 ## Commands
 
+### Quick Start (Makefile)
+```bash
+# From project root
+make setup                         # create venv + install all dependencies
+make run-backend                   # start backend (dev mode, auto-reload)
+make test                          # run all tests (backend + extension)
+make package                       # compile and package extension as .vsix
+make clean                         # remove all generated files
+make help                          # show all available commands
+```
+
 ### Backend (Python/FastAPI)
 ```bash
 cd backend
@@ -21,6 +32,10 @@ pytest -k "test_repo_graph"       # repo graph tests
 pytest -k "test_agent_loop"       # agent loop tests
 pytest -k "test_code_tools"       # code tools tests
 pytest --cov=. --cov-report=html   # coverage report
+
+# Run specific test file
+pytest tests/test_code_tools.py -v
+pytest tests/test_agent_loop.py::test_specific_function -v
 ```
 
 ### Extension (TypeScript/VS Code)
@@ -32,6 +47,13 @@ npm run watch                      # watch mode
 npm test                           # run extension tests
 npm run lint                       # ESLint
 vsce package                       # build .vsix
+
+# Run individual test files
+node --test out/tests/conductorStateMachine.test.js
+node --test out/tests/workspaceIndexer.test.js
+
+# Debug in VS Code
+# Open extension/ or repo root, press F5, select "Run VS Code Extension"
 ```
 
 ### Eval (Code Review Quality)
@@ -55,6 +77,12 @@ python run.py --provider bedrock --model us.anthropic.claude-sonnet-4-5-20250929
 
 # Use lighter model for sub-agents + parallel cases
 python run.py --provider anthropic --explorer-model claude-haiku-4-5-20251001 --parallelism 3
+
+# Gold-standard baseline: Claude Code CLI with own tools (quality ceiling)
+python run.py --gold --gold-model opus --save-baseline
+
+# Compare pipeline results against gold baseline
+python run.py --provider anthropic --compare-gold
 ```
 
 ## Architecture
@@ -113,7 +141,7 @@ backend/
 ├── requirements.txt
 └── tests/
     ├── conftest.py                  # Centralized stubs (cocoindex, litellm, etc.)
-    ├── test_code_tools.py           # 98 tests — all 21 code tools + dispatcher + multi-language
+    ├── test_code_tools.py           # 98 tests — all 24 code tools + dispatcher + multi-language
     ├── test_code_review.py          # Code review pipeline tests
     ├── test_agent_loop.py           # 39 tests — agent loop + message format + workspace layout + 3-layer prompt
     ├── test_query_classifier.py     # 26 tests — keyword + LLM classification, dynamic tool sets, filter_tools
@@ -138,24 +166,45 @@ extension/src/
 │   ├── collabPanel.ts         # Main WebView panel
 │   └── workspacePanel.ts      # 5-step workspace creation wizard
 ├── services/
-│   ├── sessionFSM.ts          # Session state machine
-│   ├── webSocketService.ts    # WebSocket client
-│   ├── fileSystemProvider.ts  # conductor:// URI scheme
-│   ├── workspaceClient.ts     # /workspace/ HTTP client
-│   └── fileUploadService.ts   # Upload/download proxy
+│   ├── conductorStateMachine.ts    # FSM states and transitions
+│   ├── conductorController.ts      # FSM driver (start/join/stop)
+│   ├── conductorFileSystemProvider.ts  # conductor:// URI scheme
+│   ├── workspaceClient.ts          # /workspace/ HTTP client
+│   ├── workspaceIndexer.ts         # AST symbol extraction + incremental indexing
+│   ├── todoScanner.ts              # Workspace TODO/FIXME scanner
+│   ├── stackTraceParser.ts         # Stack trace parsing
+│   ├── diffPreview.ts              # Diff preview + apply for ChangeSets
+│   ├── backendHealthCheck.ts       # Backend liveness probe
+│   └── conductorDb.ts              # SQLite DB wrapper (.conductor/)
 └── commands/
     └── index.ts               # VS Code command handlers
 ```
+
+#### Extension Session Lifecycle (FSM)
+
+The extension uses a finite state machine to manage session state:
+
+| State | Description |
+|-------|-------------|
+| `Idle` | No active session; backend reachable |
+| `BackendDisconnected` | Backend unreachable; limited join-only mode |
+| `ReadyToHost` | Backend healthy; user can start a session |
+| `Hosting` | Host session active; workspace indexed |
+| `Joining` | Connecting to a remote session |
+| `Joined` | Guest session active |
+
+States persist across VS Code reloads via `globalState`.
 
 ### Eval Structure
 
 ```
 eval/                              # Standalone — excluded from Docker via .dockerignore
-├── run.py                         # CLI entrypoint (--filter, --no-judge, --save-baseline, --provider, --model, --parallelism)
-├── runner.py                      # Workspace setup (copytree → git init → git apply → git commit) + CodeReviewService execution
+├── run.py                         # CLI entrypoint (--filter, --no-judge, --save-baseline, --gold, --compare-gold)
+├── runner.py                      # Pipeline runner: workspace setup + CodeReviewService execution
+├── gold_runner.py                 # Gold-standard runner: invokes Claude Code CLI with own tools + full trace
 ├── scorer.py                      # Deterministic scoring: recall, precision, severity, location, recommendation, context
 ├── judge.py                       # LLM-as-Judge: completeness, reasoning quality, actionability, false positive quality (1-5)
-├── report.py                      # Report generation + baseline comparison + regression detection (10% threshold)
+├── report.py                      # Report generation + self-baseline regression + gold-standard comparison
 ├── repos.yaml                     # Repo manifest (name → source_dir, version, language)
 ├── repos/                         # Plain source trees (no .git) — runner creates temp git repos
 │   └── requests/                  # requests v2.31.0 (5.2 MB)
@@ -166,7 +215,9 @@ eval/                              # Standalone — excluded from Docker via .do
 │           ├── 001-missing-timeout.patch
 │           ├── ...
 │           └── 012-response-hook-swallowed.patch
-└── baselines/                     # Timestamped JSON baselines for regression detection
+├── baselines/                     # Self-baselines: timestamped JSON for regression detection
+├── gold_baselines/                # Gold-standard baselines: Claude Code quality ceiling
+└── gold_traces/                   # Full Claude Code traces (tool calls, files read, strategies)
 ```
 
 #### Adding a New Repo
@@ -236,7 +287,7 @@ AgentLoopService.run_stream(query, workspace_path)
 AgentResult (answer + context_chunks + budget_summary)
 ```
 
-**21 code tools** in `code_tools/tools.py`:
+**24 code tools** in `code_tools/tools.py`:
 
 | Tool | Description |
 |------|-------------|
@@ -248,7 +299,7 @@ AgentResult (answer + context_chunks + budget_summary)
 | `file_outline` | Get all definitions in a file with line numbers |
 | `get_dependencies` | Files this file imports (dependency graph) |
 | `get_dependents` | Files that import this file (reverse dependencies) |
-| `git_log` | Recent commits, optionally per-file |
+| `git_log` | Recent commits, optionally per-file, with commit message search |
 | `git_diff` | Diff between two git refs |
 | `ast_search` | Structural AST search via ast-grep (`$VAR`, `$$$MULTI` patterns) |
 | `get_callees` | Functions/methods called within a specific function body |
@@ -261,6 +312,7 @@ AgentResult (answer + context_chunks + budget_summary)
 | `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
 | `module_summary` | Module-level summary: services, models, functions, file list (~95% savings) |
 | `expand_symbol` | Expand a symbol from compressed view to full source code |
+| `run_test` | Run a specific test file/function as a verification step (optional) |
 
 **AI Provider `chat_with_tools()`** — implemented in all 3 providers:
 - `ClaudeBedrockProvider` — Bedrock Converse API `toolConfig`
@@ -410,7 +462,30 @@ settings = load_settings()                  # loads YAML files (settings + secre
 - ast-grep tests require `ast-grep-cli` installed in the venv
 - Run new tests: `pytest tests/test_code_tools.py tests/test_agent_loop.py tests/test_budget_controller.py tests/test_langextract.py -v`
 
-## Environment Variables
+## Configuration
+
+### Backend Configuration Files
+
+Configuration is split into settings (non-sensitive) and secrets (sensitive):
+
+```
+config/
+├── conductor.settings.yaml          # Non-sensitive settings (committed)
+├── conductor.settings.yaml.example  # Settings template
+├── conductor.secrets.yaml           # Secrets (gitignored, required)
+└── conductor.secrets.yaml.example   # Secrets template
+```
+
+**Setup:**
+```bash
+# Copy example files and fill in your credentials
+cp config/conductor.secrets.yaml.example config/conductor.secrets.yaml
+# Edit conductor.secrets.yaml with your API keys
+```
+
+The backend loads both files at startup via `app.config.load_settings()`.
+
+### Environment Variables
 
 ```bash
 # Backend
@@ -422,6 +497,7 @@ GIT_WORKSPACE_ROOT=/tmp/conductor_workspaces
 AWS_ACCESS_KEY_ID=...            # Bedrock provider
 AWS_SECRET_ACCESS_KEY=...        # Bedrock provider
 AWS_DEFAULT_REGION=us-east-1     # Bedrock provider
+ANTHROPIC_API_KEY=sk-ant-...     # Anthropic direct provider
 OPENAI_API_KEY=sk-...            # OpenAI provider
 
 # Extension (VS Code settings)
@@ -431,6 +507,7 @@ conductor.enableWorkspace=true
 
 ## Recent Changes
 
+- **Gold-Standard Baseline** — `eval/gold_runner.py` invokes Claude Code CLI directly (`claude -p --output-format stream-json`) to review eval cases. Claude Code uses its own tools (Read, Grep, Bash, Glob, etc.) without being constrained by our pipeline. Full traces (tool calls, files read, grep patterns, bash commands, cost) saved to `eval/gold_traces/` for analyzing skill gaps between our pipeline and Claude Code's approach. Two baseline types: self-baselines (regression detection) and gold-standard (quality ceiling). CLI: `python eval/run.py --gold --save-baseline`, `python eval/run.py --compare-gold`.
 - **Code Review Eval System** — `eval/` standalone eval suite for measuring `CodeReviewService` quality against planted bugs in real repos. 12 cases against requests v2.31.0 (4 easy, 5 medium, 3 hard) covering timeout, auth leak, SSL bypass, redirect loop, etc. Deterministic scorer (6 dimensions, weighted composite) + LLM-as-Judge (4 criteria, 1-5). Baseline save/load with 10% regression detection. CLI: `python eval/run.py --provider anthropic --filter "requests-001" --no-judge --save-baseline`.
 - **Multi-Agent Code Review** — `code_review/` module implements a 10-step PR review pipeline: diff parsing → risk classification → dynamic budget → impact graph → parallel specialized agents → dedup → adversarial verification → severity arbitration → ranking → synthesis. Reuses `AgentLoopService` with per-agent prompts and budgets. Endpoints at `/api/code-review/review` (+ SSE stream).
 - **Evidence Evaluator** — `evidence.py` in `agent_loop/` checks answer quality before finalizing: requires file:line refs or code blocks, ≥2 tool calls, ≥1 file accessed. If evidence insufficient and budget remains, rejects the answer and forces the LLM to investigate further. 14 tests.
@@ -440,9 +517,9 @@ conductor.enableWorkspace=true
 - **Config Cleanup** — removed RAG remnants: `EmbeddingSecrets`, `VoyageSecrets`, `MistralSecrets`, `CohereSecrets`, `AwsSecrets`, `OpenAISecrets`, `_inject_embedding_env_vars()`. Cleaned `CodeSearchSettings` to only `repo_map_enabled`/`repo_map_top_n`. Removed RAG router from `main.py`.
 - **Token-Based Budget Controller** — `BudgetController` in `agent_loop/budget.py` replaces iteration-only budget management with token tracking. Tracks cumulative input/output tokens per session via `TokenUsage` extracted from all 3 providers (Bedrock Converse, Anthropic Messages, OpenAI). Three signals: NORMAL → WARN_CONVERGE (70% threshold or diminishing returns) → FORCE_CONCLUDE (90% or max iterations). LLM sees token budget context each turn. `budget_summary` dict in `AgentResult` for downstream analysis. 20 tests.
 - **TokenUsage on ToolUseResponse** — `TokenUsage` dataclass added to `ai_provider/base.py`. All 3 providers now extract `input_tokens`, `output_tokens`, `total_tokens`, and cache token counts from API responses and attach to `ToolUseResponse.usage`.
-- **Agentic Code Intelligence** — replaced RAG pipeline (CocoIndex + embeddings + reranking) with LLM agent loop + 21 code tools. The agent iteratively navigates code to answer questions.
+- **Agentic Code Intelligence** — replaced RAG pipeline (CocoIndex + embeddings + reranking) with LLM agent loop + 24 code tools. The agent iteratively navigates code to answer questions.
 - **3-Layer System Prompt** — `prompts.py` restructured from monolithic ~7500-token prompt into 3 layers: Core Identity (~100 lines, always included), Strategy (~30 lines, selected by query type), Runtime Guidance (dynamic budget/scatter). ~4000 tokens per call.
-- **Query Classifier** — `query_classifier.py` classifies into 7 types with keyword matching (default) or optional LLM pre-classification (Haiku). Configurable via `classifier.use_llm` / `classifier.model_id` in settings YAML. Each type defines a dynamic tool_set (8-12 of 21 tools). 26 tests.
+- **Query Classifier** — `query_classifier.py` classifies into 7 types with keyword matching (default) or optional LLM pre-classification (Haiku). Configurable via `classifier.use_llm` / `classifier.model_id` in settings YAML. Each type defines a dynamic tool_set (8-12 of 24 tools). 26 tests.
 - **Dynamic Tool Set** — LLM only sees tools relevant to query type (e.g. root_cause gets git tools, architecture gets module_summary). Reduces hallucinated tool calls and token waste. `filter_tools()` helper in schemas.py.
 - **Accumulated Text Trimming** — agent loop keeps only last 3 thinking turns to prevent context window bloat from intermediate reasoning.
 - **Budget Hard Constraints** — WARN_CONVERGE now refuses new broad searches (grep, find_symbol) and only allows verification calls (expand_symbol, read_file with line ranges).
@@ -452,7 +529,7 @@ conductor.enableWorkspace=true
   - `expand_symbol` — expand a symbol from compressed view to full source. Workspace-wide search with substring matching.
   - 24 tests in `test_compressed_tools.py`.
 - **Language Support Hardening** — `find_tests` and `test_outline` now support Java (JUnit/Mockito), Go (testing.T/testify), Rust (#[test]), and C/C++. 10 new language-specific tests.
-- **Code Tools** (`code_tools/`) — 21 tool implementations including data flow tracing, git semantic analysis, test association, ast-grep structural search, function-level call graph, and compressed view tools
+- **Code Tools** (`code_tools/`) — 24 tool implementations including data flow tracing, git semantic analysis, test association, ast-grep structural search, function-level call graph, and compressed view tools
 - **Data Flow Tracing** (`trace_variable`) — tracks a variable across function boundaries: alias detection (transitive), argument→parameter mapping via callee resolution, sink patterns (ORM `.filter()`, SQL `execute()`, JPA `findBy*()`, HTTP body, return), source patterns (HTTP request, annotations, config, DB result). Agent chains hops to trace e.g. `loan_id` from HTTP request to SQL WHERE clause.
 - **Git Semantic Tools** — `git_blame` (per-line authorship) + `git_show` (full commit details with diff) for understanding why code was written
 - **Test Association Tools** — `find_tests` (find tests for a function/class) + `test_outline` (test structure with mocks, assertions, fixtures)

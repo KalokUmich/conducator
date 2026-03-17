@@ -55,6 +55,7 @@ class GetDependentsParams(BaseModel):
 class GitLogParams(BaseModel):
     file: Optional[str] = Field(None, description="Relative file path to filter log.")
     n: int = Field(default=10, ge=1, le=50, description="Number of commits to show.")
+    search: Optional[str] = Field(None, description="Search commit messages for this text (git log --grep).")
 
 
 class GitDiffParams(BaseModel):
@@ -169,6 +170,24 @@ class DetectPatternsParams(BaseModel):
     max_results: int = Field(default=50, ge=1, le=200)
 
 
+class RunTestParams(BaseModel):
+    test_file: str = Field(
+        ...,
+        description="Relative path to the test file to run (e.g. 'tests/test_auth.py').",
+    )
+    test_name: Optional[str] = Field(
+        None,
+        description=(
+            "Specific test function or class to run (e.g. 'test_timeout', "
+            "'TestAuth::test_login'). If omitted, runs the whole file."
+        ),
+    )
+    timeout: int = Field(
+        default=30, ge=5, le=60,
+        description="Max seconds to wait for the test run (default: 30).",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool name → Pydantic param model mapping
 #
@@ -201,6 +220,7 @@ TOOL_PARAM_MODELS: Dict[str, type] = {
     "module_summary": ModuleSummaryParams,
     "expand_symbol": ExpandSymbolParams,
     "detect_patterns": DetectPatternsParams,
+    "run_test": RunTestParams,
 }
 
 
@@ -397,7 +417,9 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "git_log",
         "description": (
             "Show recent git commits, optionally filtered to a specific file. "
-            "Useful for understanding what changed recently."
+            "Use search= to find commits mentioning specific terms (e.g. 'CVE', "
+            "'timeout', 'fix'). Useful for understanding what changed recently "
+            "and finding security-related or bug-fix commits."
         ),
         "input_schema": GitLogParams.model_json_schema(),
     },
@@ -541,5 +563,17 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "code patterns before diving into detailed review."
         ),
         "input_schema": DetectPatternsParams.model_json_schema(),
+    },
+    {
+        "name": "run_test",
+        "description": (
+            "Run a specific test file or test function and return the result. "
+            "Use this as a VERIFICATION step to prove a bug exists — e.g. run "
+            "the test that covers a changed function to see if it fails. "
+            "Returns pass/fail status, output, and failure details. "
+            "Only use after you have identified a likely finding and want to "
+            "confirm it with evidence from actual test execution."
+        ),
+        "input_schema": RunTestParams.model_json_schema(),
     },
 ]

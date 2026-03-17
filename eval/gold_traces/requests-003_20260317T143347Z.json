@@ -1,0 +1,97 @@
+{
+  "tool_uses": [
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "git diff HEAD~1..HEAD",
+        "description": "View the diff between last two commits"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_c9p04azi/requests/models.py",
+        "offset": 910,
+        "limit": 50
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_c9p04azi/requests/models.py",
+        "offset": 895,
+        "limit": 20
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "apparent_encoding",
+        "path": "/tmp/eval_ws_c9p04azi/requests/models.py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "def encoding|self\\.encoding",
+        "path": "/tmp/eval_ws_c9p04azi/requests/models.py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_c9p04azi/requests/models.py",
+        "offset": 788,
+        "limit": 10
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "\\.text",
+        "path": "/tmp/eval_ws_c9p04azi/tests",
+        "output_mode": "content",
+        "head_limit": 30
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "apparent_encoding",
+        "path": "/tmp/eval_ws_c9p04azi",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    }
+  ],
+  "files_read": [
+    "/tmp/eval_ws_c9p04azi/requests/models.py"
+  ],
+  "grep_patterns": [
+    "apparent_encoding",
+    "def encoding|self\\.encoding",
+    "\\.text",
+    "apparent_encoding"
+  ],
+  "bash_commands": [
+    "git diff HEAD~1..HEAD"
+  ],
+  "total_tool_calls": 8,
+  "final_text": "I have all the evidence I need. Here's the analysis:\n\nThe bug patch removed two critical lines from the `text` property (lines 924-925 in the original):\n\n```python\nif self.encoding is None:\n    encoding = self.apparent_encoding\n```\n\n**What this means:** When `self.encoding` is `None` (i.e., the HTTP response headers didn't specify a charset), the original code would fall back to `apparent_encoding` \u2014 which uses `chardet`/`charset_normalizer` to detect the encoding from the content bytes. With the patch, `encoding` stays `None`, and `str(self.content, None, errors=\"replace\")` raises a `TypeError`, which is caught and falls through to `str(self.content, errors=\"replace\")` \u2014 which uses the Python default (UTF-8), ignoring the actual encoding of the content.\n\n```json\n[\n  {\n    \"title\": \"Removal of apparent_encoding fallback causes incorrect text decoding for non-UTF-8 responses\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.99,\n    \"file\": \"requests/models.py\",\n    \"start_line\": 926,\n    \"end_line\": 930,\n    \"evidence\": [\n      \"Line 921: encoding = self.encoding  # encoding is None when no charset in HTTP headers\",\n      \"Removed lines: 'if self.encoding is None: encoding = self.apparent_encoding'\",\n      \"Line 930: str(self.content, encoding, errors='replace') \u2014 encoding is now None, raises TypeError\",\n      \"Line 938: fallback str(self.content, errors='replace') uses Python default UTF-8, ignoring actual content encoding\",\n      \"Line 791-793: apparent_encoding uses chardet.detect() to determine actual encoding from content bytes\"\n    ],\n    \"risk\": \"Any HTTP response without an explicit charset in Content-Type (very common \u2014 many servers omit it) that is encoded in a non-UTF-8 encoding (e.g., ISO-8859-1, Shift_JIS, GB2312, Windows-1252) will be decoded as UTF-8 instead of the correct encoding. This produces mojibake (garbled text) or replacement characters for all non-ASCII content. This silently corrupts data for a huge number of real-world web pages and APIs, especially those serving content in CJK languages, Eastern European languages, or legacy encodings.\",\n    \"suggested_fix\": \"Restore the removed lines after line 926 ('# Fallback to auto-detected encoding.'):\\n\\n        if self.encoding is None:\\n            encoding = self.apparent_encoding\"\n  }\n]\n```",
+  "model": "",
+  "cost_usd": 0.157478,
+  "input_tokens": 8,
+  "output_tokens": 1537,
+  "duration_ms": 41902,
+  "session_id": "45347cf5-d67c-4b7f-b66f-adf7646877f8",
+  "case_id": "requests-003"
+}

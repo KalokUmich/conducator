@@ -46,7 +46,7 @@ The extension drives all state through a finite state machine persisted in `glob
 
 #### Code Intelligence
 - **Code snippet sharing** — Extract editor selection and send in chat; recipients can navigate back to the file and line range.
-- **Agentic code explanation** — Sends a query to `POST /api/context/query/stream` which runs the backend LLM agent loop (up to 25 iterations, 500K token budget, 21 code tools). Progress is streamed via SSE and shown in real-time in the chat sidebar. The final answer is posted as a collapsible AI explanation card that can be expanded/collapsed inline.
+- **Agentic code explanation** — Sends a query to `POST /api/context/query/stream` which runs the backend LLM agent loop (up to 25 iterations, 500K token budget, 24 code tools). Progress is streamed via SSE and shown in real-time in the chat sidebar. The final answer is posted as a collapsible AI explanation card that can be expanded/collapsed inline.
 - **Workspace search** — `conductor.searchWorkspace` command: full-text search over the active `conductor://` workspace via `POST /workspace/{room_id}/search`.
 - **Stack trace parsing** — Shares stack traces in chat with resolved file paths and line anchors.
 
@@ -226,7 +226,7 @@ Conductor 是一个 VS Code 扩展，提供基于 WebView 的协作侧边栏、G
 
 #### 代码智能
 - **代码片段共享** — 提取当前编辑器选区并发送到聊天；接收方可跳转至对应文件和行范围。
-- **Agentic 代码解释** — 向 `POST /api/context/query/stream` 发起请求，在后端运行 LLM agent loop（最多 25 轮迭代、50 万 token 预算、21 个代码工具）。进度通过 SSE 实时流式传输并在聊天侧边栏显示。最终答案以可折叠的 AI 解释卡片形式呈现，可在聊天中内联展开/收起。
+- **Agentic 代码解释** — 向 `POST /api/context/query/stream` 发起请求，在后端运行 LLM agent loop（最多 25 轮迭代、50 万 token 预算、24 个代码工具）。进度通过 SSE 实时流式传输并在聊天侧边栏显示。最终答案以可折叠的 AI 解释卡片形式呈现，可在聊天中内联展开/收起。
 - **工作区搜索** — `conductor.searchWorkspace` 命令：通过 `POST /workspace/{room_id}/search` 对活跃 `conductor://` 工作区进行全文搜索。
 - **堆栈追踪解析** — 共享堆栈追踪，并解析文件路径和行号定位。
 

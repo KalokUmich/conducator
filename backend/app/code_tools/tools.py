@@ -860,9 +860,12 @@ def git_log(
     workspace: str,
     file: Optional[str] = None,
     n: int = 10,
+    search: Optional[str] = None,
 ) -> ToolResult:
-    """Show recent git commits."""
+    """Show recent git commits, optionally filtering by message content."""
     args = ["log", f"-{n}", "--format=%H|%s|%an|%ai"]
+    if search:
+        args += [f"--grep={search}", "-i"]  # case-insensitive search
     if file:
         fp = _resolve(workspace, file)
         args += ["--", str(fp)]
@@ -3311,6 +3314,139 @@ def detect_patterns(
 
 
 # ---------------------------------------------------------------------------
+# Test execution (verification tool)
+# ---------------------------------------------------------------------------
+
+
+def _detect_test_runner(workspace: str, test_file: str) -> tuple:
+    """Detect the test framework and build the run command.
+
+    Returns (command_list, description) or raises ValueError.
+    """
+    ext = Path(test_file).suffix.lower()
+    name = Path(test_file).name
+
+    if ext == ".py":
+        # Python: prefer pytest, fall back to unittest
+        return ["python", "-m", "pytest", "-x", "-q"], "pytest"
+    elif ext in (".js", ".ts", ".jsx", ".tsx"):
+        # JS/TS: check for common runners
+        if (Path(workspace) / "node_modules" / ".bin" / "jest").exists():
+            return ["npx", "jest", "--no-coverage"], "jest"
+        elif (Path(workspace) / "node_modules" / ".bin" / "vitest").exists():
+            return ["npx", "vitest", "run"], "vitest"
+        return ["npx", "jest", "--no-coverage"], "jest"
+    elif ext == ".go":
+        return ["go", "test", "-v", "-run"], "go test"
+    elif ext == ".java":
+        if (Path(workspace) / "pom.xml").exists():
+            return ["mvn", "-pl", ".", "test", "-Dtest="], "maven"
+        elif (Path(workspace) / "build.gradle").exists():
+            return ["./gradlew", "test", "--tests"], "gradle"
+        return ["mvn", "-pl", ".", "test", "-Dtest="], "maven"
+    elif ext == ".rs":
+        return ["cargo", "test"], "cargo test"
+    else:
+        raise ValueError(f"Unsupported test file extension: {ext}")
+
+
+def run_test(
+    workspace: str,
+    test_file: str,
+    test_name: Optional[str] = None,
+    timeout: int = 30,
+) -> ToolResult:
+    """Run a specific test file or test function and return the result.
+
+    This is a verification tool — use it to confirm a suspected bug by
+    running the relevant test and checking if it passes or fails.
+    """
+    fp = _resolve(workspace, test_file)
+    if not fp.exists():
+        return ToolResult(
+            tool_name="run_test", success=False,
+            error=f"Test file not found: {test_file}",
+        )
+
+    try:
+        base_cmd, runner = _detect_test_runner(workspace, test_file)
+    except ValueError as e:
+        return ToolResult(tool_name="run_test", success=False, error=str(e))
+
+    # Build the command
+    if runner == "pytest":
+        target = str(fp)
+        if test_name:
+            target += f"::{test_name}"
+        cmd = base_cmd + [target, f"--timeout={timeout}"]
+    elif runner == "go test":
+        cmd = base_cmd + [test_name or ".", f"-timeout={timeout}s"]
+        # go test needs the package path
+        cmd = ["go", "test", "-v", "-run", test_name or ".", str(fp.parent)]
+    elif runner in ("maven", "gradle"):
+        test_spec = test_name or Path(test_file).stem
+        cmd = base_cmd[:-1] + [base_cmd[-1] + test_spec]
+    elif runner == "cargo test":
+        cmd = base_cmd + [test_name or ""]
+    else:
+        # jest/vitest
+        target = str(fp)
+        cmd = base_cmd + [target]
+        if test_name:
+            cmd += ["-t", test_name]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+        output = proc.stdout[-3000:] if len(proc.stdout) > 3000 else proc.stdout
+        stderr = proc.stderr[-1000:] if len(proc.stderr) > 1000 else proc.stderr
+
+        passed = proc.returncode == 0
+
+        return ToolResult(
+            tool_name="run_test",
+            data={
+                "passed": passed,
+                "return_code": proc.returncode,
+                "runner": runner,
+                "test_file": test_file,
+                "test_name": test_name,
+                "output": output,
+                "stderr": stderr if not passed else "",
+            },
+        )
+    except subprocess.TimeoutExpired:
+        return ToolResult(
+            tool_name="run_test",
+            data={
+                "passed": False,
+                "return_code": -1,
+                "runner": runner,
+                "test_file": test_file,
+                "test_name": test_name,
+                "output": f"Test timed out after {timeout}s",
+                "stderr": "",
+            },
+        )
+    except FileNotFoundError as e:
+        return ToolResult(
+            tool_name="run_test", success=False,
+            error=f"Test runner not found: {e}",
+        )
+    except Exception as exc:
+        return ToolResult(
+            tool_name="run_test", success=False,
+            error=f"Test execution failed: {exc}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatcher
 # ---------------------------------------------------------------------------
 
@@ -3338,6 +3474,7 @@ TOOL_REGISTRY = {
     "module_summary": module_summary,
     "expand_symbol": expand_symbol,
     "detect_patterns": detect_patterns,
+    "run_test": run_test,
 }
 
 
