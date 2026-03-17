@@ -45,8 +45,8 @@ backend/
 │   │   ├── evidence.py            # EvidenceEvaluator — answer quality gate
 │   │   ├── prompts.py             # 3-layer system prompt (Core Identity + Strategy + Runtime)
 │   │   └── router.py              # POST /api/context/query (+ /stream)
-│   ├── code_tools/                # 21 code intelligence tools
-│   │   ├── tools.py               # Tool implementations (grep, AST, call graph, git, compressed view)
+│   ├── code_tools/                # 24 code intelligence tools
+│   │   ├── tools.py               # Tool implementations (grep, AST, call graph, git, compressed view, run_test)
 │   │   ├── schemas.py             # Pydantic models + TOOL_DEFINITIONS for LLM
 │   │   ├── output_policy.py       # Per-tool truncation policies (budget-adaptive)
 │   │   └── router.py              # /api/code-tools/ direct endpoints
@@ -87,7 +87,7 @@ backend/
 ├── requirements.txt
 └── tests/
     ├── conftest.py                # Centralized stubs (cocoindex, litellm, etc.)
-    ├── test_code_tools.py         # 98 tests — all 21 tools + dispatcher + multi-language
+    ├── test_code_tools.py         # 98 tests — all 24 tools + dispatcher + multi-language
     ├── test_agent_loop.py         # 39 tests — agent loop + 3-layer prompt + workspace layout
     ├── test_budget_controller.py  # 20 tests — token budget signals, tracking, edge cases
     ├── test_session_trace.py      # 15 tests — SessionTrace, IterationTrace, save/load
@@ -277,7 +277,7 @@ AgentResult(answer, context_chunks, tool_calls_made, budget_summary)
 
 **中文说明:** 传统 RAG 流程是一次性检索 + 生成，无法处理"先找到函数定义，再跟踪其调用链"这类需要多步推理的问题。Agentic 方式让 LLM 自主决定每一步要调用哪个工具，像人类工程师一样逐步探索代码库。QueryClassifier 将查询分为 7 种类型并选出最优工具子集；BudgetController 追踪 token 用量并发出三级信号；EvidenceEvaluator 确保答案有具体文件引用才允许输出。
 
-### 4.2 The 21 Code Tools / 21 个代码工具
+### 4.2 The 24 Code Tools / 24 个代码工具
 
 All tools live in `code_tools/tools.py` and share a common `execute_tool(name, workspace, params)` dispatcher. The agent sees only the **dynamically selected subset** (8-12 tools) for its query type:
 
@@ -291,21 +291,22 @@ All tools live in `code_tools/tools.py` and share a common `execute_tool(name, w
 | `file_outline` | All definitions in a file with line numbers |
 | `get_dependencies` | Files this file imports |
 | `get_dependents` | Files that import this file |
-| `git_log` | Recent commits, optionally per-file |
+| `git_log` | Recent commits, optionally per-file; `search=` filters by commit message (e.g. CVE IDs, issue numbers) |
 | `git_diff` | Diff between two git refs |
 | `ast_search` | Structural AST search via ast-grep (`$VAR`, `$$$MULTI` patterns) |
 | `get_callees` | Functions/methods called within a specific function body |
 | `get_callers` | Functions/methods that call a given function (cross-file) |
 | `git_blame` | Per-line authorship with commit hash, author, date |
-| `git_show` | Full commit details (message + diff) |
+| `git_show` | Full commit details (message + diff) — use to view pre-change code at `HEAD~1` |
 | `find_tests` | Test functions covering a given function/class |
 | `test_outline` | Test file structure with mocks, assertions, fixtures |
 | `trace_variable` | Data flow tracing: aliases, arg→param mapping, sink/source patterns |
 | `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
 | `module_summary` | Module-level summary: services, models, functions (~95% savings) |
 | `expand_symbol` | Expand a compressed symbol to full source code |
+| `run_test` | Execute a test file or specific test function; returns pass/fail + output (optional verification step) |
 
-**中文说明:** `ast_search` 使用 ast-grep CLI 进行结构化 AST 查询，支持模式变量（`$VAR` 匹配任意节点）。`get_callers`/`get_callees` 实现了函数级调用图，可跨文件追踪函数调用关系。`compressed_view` 和 `module_summary` 用签名代替函数体，可节省 80-95% token；`trace_variable` 支持多跳数据流追踪（HTTP 入参 → SQL WHERE 子句）。
+**中文说明:** `ast_search` 使用 ast-grep CLI 进行结构化 AST 查询，支持模式变量（`$VAR` 匹配任意节点）。`get_callers`/`get_callees` 实现了函数级调用图，可跨文件追踪函数调用关系。`compressed_view` 和 `module_summary` 用签名代替函数体，可节省 80-95% token；`trace_variable` 支持多跳数据流追踪（HTTP 入参 → SQL WHERE 子句）。`git_show HEAD~1:file.py` 可查看变更前的完整文件；`run_test` 可实际执行测试验证发现的问题。
 
 ### 4.3 QueryClassifier / 查询分类器
 
@@ -321,7 +322,7 @@ All tools live in `code_tools/tools.py` and share a common `execute_tool(name, w
 | `test_coverage` | "test", "coverage" | find_tests + test_outline |
 | `general` | (default) | balanced mix |
 
-Each type selects 8-12 tools from the full 21. This reduces hallucinated tool calls and token waste.
+Each type selects 8-12 tools from the full 24. This reduces hallucinated tool calls and token waste.
 
 ### 4.4 BudgetController / Token 预算控制器
 
@@ -702,11 +703,12 @@ The `eval/` directory (standalone, excluded from Docker via `.dockerignore`) pro
 
 ```
 eval/
-├── run.py              # CLI entrypoint (--filter, --no-judge, --save-baseline, --provider, --model)
+├── run.py              # CLI entrypoint (--filter, --no-judge, --save-baseline, --gold, --compare-gold, ...)
 ├── runner.py           # Workspace setup (copytree → git init → git apply → git commit) + CodeReviewService execution
+├── gold_runner.py      # Gold-standard runner: invokes `claude` CLI directly, captures GoldTrace
 ├── scorer.py           # Deterministic scoring: recall, precision, severity, location, recommendation, context
 ├── judge.py            # LLM-as-Judge: completeness, reasoning quality, actionability, false positive quality (1-5)
-├── report.py           # Report generation + baseline comparison + regression detection (10% threshold)
+├── report.py           # Report generation + baseline comparison + gold comparison + regression detection (10%)
 ├── repos.yaml          # Repo manifest (name → source_dir, version, language)
 ├── repos/              # Plain source trees (no .git)
 │   └── requests/       # requests v2.31.0 source
@@ -714,7 +716,9 @@ eval/
 │   └── requests/
 │       ├── cases.yaml  # 12 case definitions with ground truth
 │       └── patches/    # 12 .patch files (4 easy, 5 medium, 3 hard)
-└── baselines/          # Timestamped JSON baselines for regression detection
+├── baselines/          # Pipeline baseline JSON files (timestamped)
+├── gold_baselines/     # Gold-standard baseline JSON files (timestamped)
+└── gold_traces/        # Full investigation traces per gold run (tool calls, files read, cost)
 ```
 
 ### 11.2 How It Works / 工作原理
@@ -730,10 +734,10 @@ eval/
 ### 11.3 CLI Usage / 命令行使用
 
 ```bash
-# Run all 12 cases
+# Pipeline mode (default): run CodeReviewService against all 12 cases
 python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
 
-# Run a single case (fast check)
+# Single case (fast check)
 python eval/run.py --filter "requests-001"
 
 # Deterministic scoring only (no LLM judge cost)
@@ -747,9 +751,37 @@ python eval/run.py --provider bedrock --model us.anthropic.claude-sonnet-4-5-202
 
 # Use lighter model for sub-agents + run 3 cases in parallel
 python eval/run.py --provider anthropic --explorer-model claude-haiku-4-5-20251001 --parallelism 3
+
+# Gold-standard mode: invoke Claude Code CLI directly (quality ceiling baseline)
+python eval/run.py --gold --save-baseline
+python eval/run.py --gold --gold-model opus --gold-max-budget 5.0 --no-judge
+
+# Compare pipeline results against the saved gold baseline
+python eval/run.py --compare-gold
 ```
 
-### 11.4 Scoring Rubric / 评分标准
+### 11.4 Gold-Standard Baseline / 黄金标准基线
+
+The gold baseline runs `claude` CLI directly (Claude Code with its own tools and strategies), bypassing our pipeline entirely. This provides a **quality ceiling** — the best possible result when the strongest model has free rein.
+
+**Why gold baseline matters:**
+- Reveals which tools/strategies Claude Code uses that our pipeline lacks
+- Shows what files Claude Code investigates that our agents miss
+- Identifies skills worth integrating (e.g., `git show HEAD~1:file`, `python -m pytest`, spawning sub-Agents)
+
+**How it works:**
+1. Invokes `claude -p --output-format stream-json --verbose --dangerously-skip-permissions`
+2. Strips `ANTHROPIC_API_KEY` so Claude Code uses your subscription (not API credits)
+3. Captures a full `GoldTrace`: all tool calls, files read, grep patterns, bash commands, cost, token count
+4. Parses findings from Claude Code's JSON output using the same `ReviewFinding` schema
+
+**Output files:**
+- `eval/gold_baselines/gold_*.json` — baseline scores for regression comparison
+- `eval/gold_traces/{case_id}_{timestamp}.json` — full investigation trace per case
+
+**中文说明:** Gold baseline 直接运行 `claude` CLI（Claude Code），完全绕过我们的 Pipeline。不使用 ANTHROPIC_API_KEY，通过月费订阅调用，不额外消耗 API 额度。完整记录调用轨迹（工具调用、读取文件、grep 模式、bash 命令、费用、token 数），可用于分析 Claude Code 的探索策略，指导我们改进 Pipeline。
+
+### 11.5 Scoring Rubric / 评分标准
 
 **Deterministic scoring (scorer.py):**
 
@@ -771,7 +803,7 @@ python eval/run.py --provider anthropic --explorer-model claude-haiku-4-5-202510
 | Actionability | Are suggestions concrete and fixable? |
 | False Positive Quality | Are non-bug findings legitimate? |
 
-### 11.5 Adding a New Repo / 添加新仓库
+### 11.6 Adding a New Repo / 添加新仓库
 
 1. Clone the repo at a specific version and remove `.git`:
    ```bash
@@ -790,7 +822,7 @@ python eval/run.py --provider anthropic --explorer-model claude-haiku-4-5-202510
 
 **中文说明:** 添加新仓库只需三步：克隆特定版本并删除 `.git`，在 `repos.yaml` 中注册，然后创建对应的 cases 目录和补丁文件。
 
-### 11.6 Adding a New Case / 添加新测试用例
+### 11.7 Adding a New Case / 添加新测试用例
 
 1. Create a patch against the source tree:
    ```bash
@@ -819,7 +851,7 @@ python eval/run.py --provider anthropic --explorer-model claude-haiku-4-5-202510
 
 **中文说明:** 在源码树上修改制造 bug，用 `git diff` 生成补丁，然后在 `cases.yaml` 中定义预期发现（正则匹配标题、文件、行号范围、严重程度等）。`requires_context` 用于验证 Agent 是否进行了跨文件探索。
 
-### 11.7 Baseline & Regression Detection / 基线与回归检测
+### 11.8 Baseline & Regression Detection / 基线与回归检测
 
 - Baselines are saved as timestamped JSON in `eval/baselines/`
 - Each run automatically compares against the latest baseline
@@ -850,7 +882,7 @@ pytest --cov=. --cov-report=html             # coverage report
 
 | File | Tests | What it covers |
 |------|-------|----------------|
-| `test_code_tools.py` | 98 | All 21 tools + dispatcher + multi-language |
+| `test_code_tools.py` | 98 | All 24 tools + dispatcher + multi-language |
 | `test_agent_loop.py` | 39 | Agent loop + 3-layer prompt + workspace layout |
 | `test_budget_controller.py` | 20 | Token budget signals, tracking, WARN/FORCE |
 | `test_session_trace.py` | 15 | SessionTrace JSON save/load |

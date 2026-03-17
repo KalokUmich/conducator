@@ -52,7 +52,7 @@ Each collaboration room runs inside its own Git workspace using bare repositorie
 
 ### Agentic Code Intelligence
 
-Conductor uses a tool-based agent loop instead of simple RAG. The agent iteratively navigates the repository using 21 code tools (up to 25 iterations, 500K token budget):
+Conductor uses a tool-based agent loop instead of simple RAG. The agent iteratively navigates the repository using 24 code tools (up to 25 iterations, 500K token budget):
 
 | Tool | Description |
 |------|-------------|
@@ -64,19 +64,20 @@ Conductor uses a tool-based agent loop instead of simple RAG. The agent iterativ
 | `file_outline` | All definitions in a file |
 | `get_dependencies` | Files this file imports |
 | `get_dependents` | Files that import this file |
-| `git_log` | Recent commits |
+| `git_log` | Recent commits; `search=` param filters by commit message |
 | `git_diff` | Diff between refs |
 | `ast_search` | Structural AST search (ast-grep, `$VAR`/`$$$MULTI` patterns) |
 | `get_callees` | Functions called within a function |
 | `get_callers` | Functions that call a given function (cross-file) |
 | `git_blame` | Per-line authorship with commit hash, author, date |
-| `git_show` | Full commit details (message + diff) |
+| `git_show` | Full commit details (message + diff); reads pre-change file at `HEAD~1:path` |
 | `find_tests` | Test functions covering a given function/class |
 | `test_outline` | Test file structure with mocks, assertions, fixtures |
 | `trace_variable` | Data flow tracing: alias detection, arg→param mapping, sink/source patterns |
 | `compressed_view` | File signatures + call relationships + side effects (~80% token savings) |
 | `module_summary` | Module-level summary: services, models, functions, file list (~95% savings) |
 | `expand_symbol` | Expand a symbol from compressed view to full source code |
+| `run_test` | Execute a test file or function; returns pass/fail + output (optional verification) |
 
 The agent dynamically selects 8–12 tools per query type (reducing hallucinated calls and token waste). A **Token Budget Controller** emits `NORMAL → WARN_CONVERGE → FORCE_CONCLUDE` signals. An **Evidence Evaluator** gates answers before finalising: requires file:line references, ≥2 tool calls, ≥1 file accessed.
 
@@ -112,7 +113,7 @@ Open the VS Code extension and start a session. Then ask questions like:
 │  └──────────────────┘    │     │  ┌───────────────────────────────────┐  │
 │                          │     │  │ Agent Loop Service                 │  │
 │  ┌──────────────────┐    │HTTP │  │  QueryClassifier → 3-layer prompt │  │
-│  │ WorkspaceClient   │◄──┼─────┼──│  LLM ←→ 21 Code Tools (dynamic  │  │
+│  │ WorkspaceClient   │◄──┼─────┼──│  LLM ←→ 24 Code Tools (dynamic  │  │
 │  │ WorkspacePanel    │    │     │  │  subset) → BudgetController       │  │
 │  │ FileSystemProvider│    │     │  │  → EvidenceEvaluator → SSE stream │  │
 │  └──────────────────┘    │     │  └───────────────────────────────────┘  │
@@ -143,7 +144,7 @@ Current prototype includes:
 
 - VS Code collaboration extension
 - FastAPI backend
-- Agentic code intelligence (21 tools)
+- Agentic code intelligence (24 tools)
 - Isolated Git workspaces per room
 - Multi-provider AI support (Bedrock, Anthropic, OpenAI)
 - 900+ automated tests
@@ -166,7 +167,7 @@ See [ROADMAP.md](ROADMAP.md) for full details.
 ```bash
 cd backend
 pytest                                        # all tests (900+)
-pytest tests/test_code_tools.py -v            # 21 code tools (98 tests)
+pytest tests/test_code_tools.py -v            # 24 code tools (98 tests)
 pytest tests/test_agent_loop.py -v            # agent loop + 3-layer prompt (39 tests)
 pytest tests/test_budget_controller.py -v     # token budget controller (20 tests)
 pytest tests/test_session_trace.py -v         # session trace (15 tests)
@@ -240,7 +241,7 @@ AI 提炼
 
 ### Agentic 代码智能
 
-Conductor 使用基于工具的 Agent 循环，而非简单的 RAG。Agent 通过 21 个代码工具迭代探索代码库（最多 25 轮迭代，50 万 token 预算）。
+Conductor 使用基于工具的 Agent 循环，而非简单的 RAG。Agent 通过 24 个代码工具迭代探索代码库（最多 25 轮迭代，50 万 token 预算）。
 
 工具详情见上方英文部分。
 
@@ -281,7 +282,7 @@ npm run compile
 
 - VS Code 协作扩展
 - FastAPI 后端
-- Agentic 代码智能（21 个工具）
+- Agentic 代码智能（24 个工具）
 - 每个房间独立的 Git 工作区
 - 多提供商 AI 支持（Bedrock、Anthropic、OpenAI）
 - 900+ 自动化测试

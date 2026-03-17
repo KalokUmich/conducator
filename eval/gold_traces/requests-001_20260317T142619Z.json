@@ -1,0 +1,337 @@
+{
+  "tool_uses": [
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "git diff HEAD~1..HEAD",
+        "description": "Show the diff from the last commit"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/adapters.py",
+        "offset": 450,
+        "limit": 80
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "timeout",
+        "path": "/tmp/eval_ws_53u25gqr/requests/adapters.py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Agent",
+      "params": {
+        "subagent_type": "Explore",
+        "description": "Find timeout usage patterns",
+        "prompt": "Search thoroughly for how timeout is used throughout the requests library. I need to understand:\n\n1. How users pass timeout values (e.g., `requests.get(..., timeout=...)`)\n2. Where `TimeoutSauce` is used and imported\n3. How `ConnectTimeout` and `ReadTimeout` exceptions are handled\n4. Any tests related to timeout behavior\n5. How the `send` method in adapters.py is called from sessions.py or other callers\n\nUse \"medium\" thoroughness. Search in /tmp/eval_ws_53u25gqr/"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Glob",
+      "params": {
+        "pattern": "**/*.py",
+        "path": "/tmp/eval_ws_53u25gqr"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "find /tmp/eval_ws_53u25gqr -type f -name \"*.py\" | head -20",
+        "description": "List Python files to understand repository structure"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "timeout",
+        "type": "py",
+        "output_mode": "files_with_matches",
+        "path": "/tmp/eval_ws_53u25gqr"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "TimeoutSauce",
+        "type": "py",
+        "output_mode": "files_with_matches",
+        "path": "/tmp/eval_ws_53u25gqr"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "ConnectTimeout|ReadTimeout",
+        "type": "py",
+        "output_mode": "files_with_matches",
+        "path": "/tmp/eval_ws_53u25gqr"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/exceptions.py"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/adapters.py"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/api.py"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/sessions.py",
+        "limit": 100
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "def request|def send|adapter\\.send",
+        "type": "py",
+        "path": "/tmp/eval_ws_53u25gqr/requests/sessions.py",
+        "output_mode": "content",
+        "context": 3
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/sessions.py",
+        "offset": 673,
+        "limit": 50
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/sessions.py",
+        "offset": 502,
+        "limit": 100
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "def test.*timeout|timeout",
+        "type": "py",
+        "path": "/tmp/eval_ws_53u25gqr/tests/test_requests.py",
+        "output_mode": "content",
+        "head_limit": 50
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/tests/test_requests.py",
+        "offset": 2437,
+        "limit": 60
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "TimeoutSauce",
+        "type": "py",
+        "output_mode": "content",
+        "context": 5,
+        "path": "/tmp/eval_ws_53u25gqr/requests"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "grep -n \"TimeoutSauce\" /tmp/eval_ws_53u25gqr/requests/adapters.py",
+        "description": "Search for all TimeoutSauce usages in adapters.py"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "timeout",
+        "type": "py",
+        "path": "/tmp/eval_ws_53u25gqr/requests/models.py",
+        "output_mode": "content",
+        "head_limit": 30
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/tests/test_requests.py",
+        "limit": 80
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "except.*Timeout|except.*ConnectTimeout|except.*ReadTimeout",
+        "type": "py",
+        "path": "/tmp/eval_ws_53u25gqr/tests/test_requests.py",
+        "output_mode": "content",
+        "context": 2
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "grep -n \"timeout\" /tmp/eval_ws_53u25gqr/requests/adapters.py | head -20",
+        "description": "Show timeout references in adapters.py"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/adapters.py",
+        "offset": "[468, 488]",
+        "limit": 25
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/adapters.py",
+        "offset": 468,
+        "limit": 25
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "ConnectTimeout|ReadTimeout|Timeout",
+        "type": "py",
+        "path": "/tmp/eval_ws_53u25gqr/requests/__init__.py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/tests/test_requests.py",
+        "offset": 2450,
+        "limit": 15
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/__init__.py",
+        "limit": 180
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/adapters.py",
+        "offset": 430,
+        "limit": 15
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/sessions.py",
+        "offset": 580,
+        "limit": 15
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/tests/test_requests.py",
+        "offset": 2435,
+        "limit": 65
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_53u25gqr/requests/sessions.py",
+        "offset": 505,
+        "limit": 20
+      },
+      "result_summary": ""
+    }
+  ],
+  "files_read": [
+    "/tmp/eval_ws_53u25gqr/requests/__init__.py",
+    "/tmp/eval_ws_53u25gqr/requests/adapters.py",
+    "/tmp/eval_ws_53u25gqr/requests/api.py",
+    "/tmp/eval_ws_53u25gqr/requests/exceptions.py",
+    "/tmp/eval_ws_53u25gqr/requests/sessions.py",
+    "/tmp/eval_ws_53u25gqr/tests/test_requests.py"
+  ],
+  "grep_patterns": [
+    "timeout",
+    "[glob] **/*.py",
+    "timeout",
+    "TimeoutSauce",
+    "ConnectTimeout|ReadTimeout",
+    "def request|def send|adapter\\.send",
+    "def test.*timeout|timeout",
+    "TimeoutSauce",
+    "timeout",
+    "except.*Timeout|except.*ConnectTimeout|except.*ReadTimeout",
+    "ConnectTimeout|ReadTimeout|Timeout"
+  ],
+  "bash_commands": [
+    "git diff HEAD~1..HEAD",
+    "find /tmp/eval_ws_53u25gqr -type f -name \"*.py\" | head -20",
+    "grep -n \"TimeoutSauce\" /tmp/eval_ws_53u25gqr/requests/adapters.py",
+    "grep -n \"timeout\" /tmp/eval_ws_53u25gqr/requests/adapters.py | head -20"
+  ],
+  "total_tool_calls": 33,
+  "final_text": "I have all the evidence I need. Here are my findings:\n\n```json\n[\n  {\n    \"title\": \"User-specified timeout is unconditionally discarded, all requests have no timeout\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 1.0,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 471,\n    \"end_line\": 472,\n    \"evidence\": [\n      \"Line 472: timeout = None\",\n      \"Line 485: timeout=timeout,  # passes None to conn.urlopen()\",\n      \"Line 435: def send(self, request, stream=False, timeout=None, ...  # timeout parameter accepted but ignored\",\n      \"sessions.py line 585: 'timeout': timeout,  # user's timeout value is faithfully passed to adapter.send()\",\n      \"The removed code (lines 468-479 in original) properly converted tuple/float timeouts to TimeoutSauce objects\"\n    ],\n    \"risk\": \"Every HTTP request made through the requests library will have no timeout at all, regardless of what the user passes. This means: (1) Any request to a slow or unresponsive server will hang indefinitely, blocking the calling thread forever. (2) Applications relying on timeout for resilience (circuit breakers, retries, SLA enforcement) silently lose that protection. (3) In server environments, this can lead to thread/connection pool exhaustion and cascading failures (denial of service). (4) The timeout parameter in the public API becomes a no-op, silently violating the documented contract.\",\n    \"suggested_fix\": \"Restore the original timeout handling logic:\\n\\n        if isinstance(timeout, tuple):\\n            try:\\n                connect, read = timeout\\n                timeout = TimeoutSauce(connect=connect, read=read)\\n            except ValueError:\\n                raise ValueError(\\n                    f\\\"Invalid timeout {timeout}. Pass a (connect, read) timeout tuple, \\\"\\n                    f\\\"or a single float to set both timeouts to the same value.\\\"\\n                )\\n        elif isinstance(timeout, TimeoutSauce):\\n            pass\\n        else:\\n            timeout = TimeoutSauce(connect=timeout, read=timeout)\"\n  },\n  {\n    \"title\": \"Timeout validation for invalid values is removed, errors silently ignored\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 1.0,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 471,\n    \"end_line\": 472,\n    \"evidence\": [\n      \"Removed: except ValueError: raise ValueError(f'Invalid timeout {timeout}. Pass a (connect, read) timeout tuple, ...')\",\n      \"Removed: the try/except block that validated tuple length (connect, read = timeout would raise ValueError for 3-tuples)\",\n      \"tests/test_requests.py line 2450: test_invalid_timeout passes (3,4,5) and 'foo' expecting ValueError \u2014 these tests will now fail\"\n    ],\n    \"risk\": \"Users passing invalid timeout values like 3-tuples (3, 4, 5) or strings ('foo') will no longer get a clear ValueError. Instead, the invalid value is silently discarded and replaced with None (no timeout). This masks programming errors and makes debugging much harder.\",\n    \"suggested_fix\": \"Restore the original timeout validation logic that raises ValueError for invalid timeout values (see suggested fix above).\"\n  },\n  {\n    \"title\": \"Denial of service: connections can hang indefinitely with no way to set a timeout\",\n    \"category\": \"security\",\n    \"severity\": \"critical\",\n    \"confidence\": 1.0,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 471,\n    \"end_line\": 472,\n    \"evidence\": [\n      \"Line 472: timeout = None  # unconditionally removes all timeouts\",\n      \"Line 485: timeout=timeout  # passes None to urllib3's urlopen, which means no timeout\",\n      \"Any request to a TARPIT-style address (tests/test_requests.py line 2483: requests.get(TARPIT, timeout=timeout)) will hang forever instead of raising ConnectTimeout\"\n    ],\n    \"risk\": \"An attacker controlling or influencing target URLs can cause application threads to hang indefinitely. In web servers or worker pools, this leads to resource exhaustion and denial of service. Even without an attacker, any network issue (unresponsive host, dropped packets with no RST) will cause permanent hangs.\",\n    \"suggested_fix\": \"Restore the original timeout handling that converts user-supplied timeout values into urllib3 TimeoutSauce objects and passes them to conn.urlopen().\"\n  },\n  {\n    \"title\": \"Multiple timeout-related tests will fail due to removed functionality\",\n    \"category\": \"test_coverage\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.98,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 471,\n    \"end_line\": 472,\n    \"evidence\": [\n      \"test_stream_timeout (line 2437): expects Timeout exception with 2.0s timeout on delay/10 \u2014 will hang forever instead\",\n      \"test_invalid_timeout (line 2450): expects ValueError for (3,4,5) and 'foo' \u2014 no validation occurs anymore\",\n      \"test_read_timeout (line 2471): expects ReadTimeout with (None, 0.1) \u2014 will hang forever instead\",\n      \"test_connect_timeout (line 2481): expects ConnectTimeout with (0.1, None) \u2014 will hang forever instead\",\n      \"test_total_timeout_connect (line 2492): expects ConnectTimeout with (0.1, 0.1) \u2014 will hang forever instead\"\n    ],\n    \"risk\": \"5 out of 6 timeout tests will either fail or hang indefinitely. test_none_timeout is the only one that would still pass since it already tests the None timeout case. This indicates a fundamental breakage of the timeout feature.\",\n    \"suggested_fix\": \"Restore the original timeout handling logic to make all existing tests pass.\"\n  }\n]\n```\n\n**Summary**: The diff replaces the entire timeout handling logic in `HTTPAdapter.send()` with `timeout = None`, which unconditionally disables all timeouts on every HTTP request. This is a critical defect that:\n\n1. **Silently ignores** user-specified timeout values (`requests.get(url, timeout=5)` no longer times out)\n2. **Removes input validation** for malformed timeout values (3-tuples, strings)\n3. **Creates a denial-of-service vector** where any unresponsive server causes permanent thread hangs\n4. **Breaks 5 existing tests** that verify timeout behavior",
+  "model": "",
+  "cost_usd": 0.34104005,
+  "input_tokens": 9,
+  "output_tokens": 2580,
+  "duration_ms": 113532,
+  "session_id": "c472cadf-9414-41d1-b55f-7b2f57ec6932",
+  "case_id": "requests-001"
+}

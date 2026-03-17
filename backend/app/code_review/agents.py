@@ -98,7 +98,7 @@ AGENT_SPECS: List[AgentSpec] = [
         name="correctness",
         category=FindingCategory.CORRECTNESS,
         tools=_REVIEW_CORE_TOOLS + [
-            "git_diff", "find_references",
+            "git_diff", "git_show", "git_log", "find_references",
             "get_callers", "get_callees", "trace_variable",
             "get_dependencies",
         ],
@@ -108,6 +108,7 @@ AGENT_SPECS: List[AgentSpec] = [
         strategy_hint=(
             "Mixed strategy: scan all diffs for suspicious patterns first, "
             "then deep-dive the top 2-3 suspects with trace_variable and get_callees. "
+            "Use git_show to compare code BEFORE vs AFTER the change. "
             "Budget 3-4 tool calls for scanning, 6-8 for deep investigation."
         ),
     ),
@@ -115,7 +116,7 @@ AGENT_SPECS: List[AgentSpec] = [
         name="concurrency",
         category=FindingCategory.CONCURRENCY,
         tools=_REVIEW_CORE_TOOLS + [
-            "git_diff", "find_references",
+            "git_diff", "git_show", "find_references",
             "get_callers", "get_callees", "trace_variable",
             "ast_search",
         ],
@@ -132,7 +133,7 @@ AGENT_SPECS: List[AgentSpec] = [
         name="security",
         category=FindingCategory.SECURITY,
         tools=_REVIEW_CORE_TOOLS + [
-            "git_diff", "trace_variable",
+            "git_diff", "git_show", "git_log", "trace_variable",
             "find_references", "git_blame", "ast_search",
         ],
         budget_tokens=_sub_budget(0.75),   # 420,000
@@ -141,6 +142,7 @@ AGENT_SPECS: List[AgentSpec] = [
         strategy_hint=(
             "Depth-first: trace data from external input (HTTP, queue, file) "
             "through to storage/output. Use trace_variable for taint analysis. "
+            "Use git_log search= to find related security fixes or CVEs. "
             "For each flow, verify sanitization/validation at every boundary."
         ),
     ),
@@ -166,6 +168,7 @@ AGENT_SPECS: List[AgentSpec] = [
         tools=_REVIEW_CORE_TOOLS + [
             "git_diff", "find_tests",
             "test_outline", "find_references", "list_files",
+            "run_test",
         ],
         budget_tokens=_sub_budget(0.55),   # 308,000
         max_iterations=_sub_iters(0.55),   # 15
@@ -173,7 +176,8 @@ AGENT_SPECS: List[AgentSpec] = [
         strategy_hint=(
             "Breadth-first: for each changed file, use find_tests to locate "
             "existing tests. Use test_outline on found test files to assess "
-            "coverage quality. Focus on untested critical paths, not line counts."
+            "coverage quality. Use run_test to execute key tests and verify "
+            "they still pass. Focus on untested critical paths, not line counts."
         ),
     ),
 ]
@@ -236,9 +240,11 @@ risk: {risk_summary}
 ## Investigation instructions
 1. Analyze the diffs above for issues in your focus area.
 2. Use **read_file** with line ranges for broader context around changes.
-3. Use additional tools (find_references, get_callers, trace_variable, etc.) to trace impact.
-4. The file list and diffs are already provided — skip git_diff_files.
-5. When you have enough evidence, stop investigating and produce your findings JSON.
+3. Use **git_show** with a commit ref and file path to see the code BEFORE the change — compare what was removed/replaced to understand intent.
+4. Use **git_log** with search= to find related commits (e.g. search="CVE", search="fix timeout").
+5. Use additional tools (find_references, get_callers, trace_variable, etc.) to trace impact.
+6. The file list and diffs are already provided — skip git_diff_files.
+7. When you have enough evidence, stop investigating and produce your findings JSON.
 
 ## Quality rules
 - Report at most **5 findings**. Prioritize by real-world impact.

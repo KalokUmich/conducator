@@ -20,7 +20,7 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
   - Workspace code search (`GET /workspace/{room_id}/search`)
 - **Agentic Code Intelligence**:
   - `AgentLoopService` — LLM-driven iterative tool loop (up to 25 iterations, 500K token budget)
-  - 21 code tools: `grep`, `read_file`, `list_files`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`
+  - 24 code tools: `grep`, `read_file`, `list_files`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log` (+ `search=`), `git_diff`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`, `run_test`
   - 3-layer system prompt: Core Identity + Strategy (by query type) + Runtime Guidance
   - Query classifier: keyword matching (default) or LLM pre-classification (Haiku)
   - Dynamic tool sets: 8-12 tools per query type (reduces LLM confusion)
@@ -231,7 +231,7 @@ Optimizations guided by OpenAI review and academic research (ICLR 2026, MutaGReP
 - [x] Optional LLM pre-classification via `classify_query_with_llm()` using lightweight model (Haiku) — ~100ms, ~$0.001 per call
 - [x] Configurable in `conductor.settings.yaml` via `classifier.use_llm` and `classifier.model_id`
 - [x] Falls back to keyword matching on LLM failure
-- [x] Dynamic tool set per query type — only 8-12 of 21 tools exposed to LLM (reduces confusion and token waste)
+- [x] Dynamic tool set per query type — only 8-12 of 24 tools exposed to LLM (reduces confusion and token waste)
 - [x] `filter_tools()` helper in `schemas.py` for tool set filtering
 - [x] 26 tests in `test_query_classifier.py` (keyword, LLM mock, tool_set, filter_tools)
 

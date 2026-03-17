@@ -25,7 +25,7 @@ pytest --cov=. --cov-report=html             # coverage report
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `tests/test_code_tools.py` | 98 | All 21 code tools + dispatcher + multi-language |
+| `tests/test_code_tools.py` | 98 | All 24 code tools + dispatcher + multi-language |
 | `tests/test_agent_loop.py` | 39 | Agent loop + message format + workspace layout + 3-layer prompt |
 | `tests/test_budget_controller.py` | 20 | Token budget signals, tracking, edge cases |
 | `tests/test_session_trace.py` | 15 | SessionTrace, IterationTrace, save/load |
@@ -43,7 +43,7 @@ pytest --cov=. --cov-report=html             # coverage report
 
 ### Code Tools Tests (98 tests)
 
-The `test_code_tools.py` file covers all **21 code tools** using real filesystem operations via `tmp_path` fixtures:
+The `test_code_tools.py` file covers all **24 code tools** using real filesystem operations via `tmp_path` fixtures:
 
 **Basic navigation tools:**
 - `grep` — regex search, multi-match, exclude patterns, binary skip
@@ -57,10 +57,10 @@ The `test_code_tools.py` file covers all **21 code tools** using real filesystem
 - `get_dependencies` / `get_dependents` — dependency graph traversal
 
 **Git tools:**
-- `git_log` — per-file and repo-wide commit history
+- `git_log` — per-file and repo-wide commit history; `search=` param filters by commit message (uses `--grep`)
 - `git_diff` — diff between refs
 - `git_blame` — per-line authorship (commit hash, author, date)
-- `git_show` — full commit details (message + diff)
+- `git_show` — full commit details (message + diff); also used to read pre-change file content
 
 **Call graph tools:**
 - `get_callees` — functions called within a function body
@@ -80,6 +80,9 @@ The `test_code_tools.py` file covers all **21 code tools** using real filesystem
 - `compressed_view` — file signatures + call relationships + side effects (~80% token savings)
 - `module_summary` — module-level summary: services, models, controllers, functions (~95% savings)
 - `expand_symbol` — expand a compressed symbol to full source (workspace-wide substring matching)
+
+**Test execution:**
+- `run_test` — execute a test file or specific test function; detect runner (pytest/jest/go test/maven/cargo); return pass/fail + output
 
 **Dispatcher tests:**
 - `execute_tool()` with unknown tool name
@@ -338,7 +341,7 @@ pytest --cov=. --cov-report=html             # 覆盖率报告
 
 | 文件 | 测试数 | 覆盖 |
 |------|--------|------|
-| `tests/test_code_tools.py` | 98 | 21 个代码工具 + 调度器 + 多语言 |
+| `tests/test_code_tools.py` | 98 | 24 个代码工具 + 调度器 + 多语言 |
 | `tests/test_agent_loop.py` | 39 | Agent loop + 消息格式 + 工作区侦察 + 三层提示词 |
 | `tests/test_budget_controller.py` | 20 | Token 预算信号、跟踪、边界情况 |
 | `tests/test_session_trace.py` | 15 | SessionTrace、IterationTrace、保存/加载 |
@@ -355,7 +358,7 @@ pytest --cov=. --cov-report=html             # 覆盖率报告
 
 ### 代码工具测试要点（98 项）
 
-- **21 个工具** 均使用真实文件系统（`tmp_path` fixture）
+- **24 个工具** 均使用真实文件系统（`tmp_path` fixture）
 - grep/read_file/list_files：基础导航与正则搜索
 - find_symbol：带角色分类（route_entry / business_logic / domain_model / infrastructure / utility / test）的 AST 符号查找
 - get_callers / get_callees：跨文件函数调用图

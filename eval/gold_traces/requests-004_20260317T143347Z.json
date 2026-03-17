@@ -1,0 +1,347 @@
+{
+  "tool_uses": [
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "git diff HEAD~1..HEAD",
+        "description": "Show the diff for the latest commit"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/models.py",
+        "offset": 560,
+        "limit": 40
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "prepare_content_length",
+        "path": "/tmp/eval_ws_1fttn6sz",
+        "output_mode": "content",
+        "-n": true
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Agent",
+      "params": {
+        "description": "Investigate Content-Length impact",
+        "subagent_type": "Explore",
+        "prompt": "In /tmp/eval_ws_1fttn6sz, investigate the full impact of the `prepare_content_length` method being gutted (it now just does `pass` instead of setting Content-Length headers). I need to understand:\n\n1. How `super_len` is used and what types of bodies it handles (file objects, strings, bytes, generators, etc.)\n2. What happens downstream when Content-Length is missing - look at how urllib3/httplib handles requests without Content-Length\n3. Check if there are tests that verify Content-Length behavior\n4. Look at how Transfer-Encoding: chunked interacts with this - will bodies still be sent correctly?\n5. Check if any auth mechanisms or redirects depend on Content-Length being set\n6. Look at the `prepare_body` method that calls `prepare_content_length` for full context\n7. Check if there are any callers that explicitly check for Content-Length header after preparation\n\nBe thorough - search for \"Content-Length\", \"content-length\", \"content_length\", \"super_len\", \"Transfer-Encoding\", \"chunked\" across the codebase."
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "find /tmp/eval_ws_1fttn6sz -type f -name \"*.py\" | head -20"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "prepare_content_length",
+        "type": "py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "[Cc]ontent-[Ll]ength",
+        "type": "py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "super_len",
+        "type": "py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "[Tt]ransfer-[Ee]ncoding|chunked",
+        "type": "py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/models.py"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/utils.py",
+        "limit": 200
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/adapters.py",
+        "limit": 550
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/sessions.py",
+        "limit": 350
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/auth.py"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "def test.*[Cc]ontent[_-][Ll]ength|def test.*chunked",
+        "type": "py",
+        "output_mode": "content",
+        "head_limit": 50
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/tests/test_requests.py",
+        "offset": 120,
+        "limit": 200
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/tests/test_requests.py",
+        "offset": 2145,
+        "limit": 45
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/tests/test_lowlevel.py",
+        "offset": 1,
+        "limit": 150
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "git log --oneline -10"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "git show 728f60d"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "def urlopen|chunked",
+        "type": "py",
+        "path": "/tmp/eval_ws_1fttn6sz/requests",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "rewind_body",
+        "type": "py",
+        "output_mode": "content"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/utils.py",
+        "offset": 1079,
+        "limit": 50
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/tests/test_utils.py",
+        "offset": 35,
+        "limit": 130
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "grep -r \"urlopen\" /tmp/eval_ws_1fttn6sz/requests/*.py | head -20"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/models.py",
+        "offset": 495,
+        "limit": 100
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/models.py",
+        "offset": 578,
+        "limit": 25
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/sessions.py",
+        "offset": 220,
+        "limit": 50
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "grep -r \"Content-Length\" /tmp/eval_ws_1fttn6sz/requests/*.py -B 2 -A 2 | head -100"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "grep -n \"builtin_str\\|Content-Length\" /tmp/eval_ws_1fttn6sz/requests/models.py | head -20"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "python -m pytest tests/test_requests.py::TestRequests::test_no_content_length -v 2>&1 | head -50"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "find /tmp/eval_ws_1fttn6sz -type f -name \"*.txt\" | head -10"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/tests/test_requests.py",
+        "offset": 300,
+        "limit": 50
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/adapters.py",
+        "offset": 460,
+        "limit": 40
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/sessions.py",
+        "offset": 220,
+        "limit": 45
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_1fttn6sz/requests/models.py",
+        "offset": 510,
+        "limit": 65
+      },
+      "result_summary": ""
+    }
+  ],
+  "files_read": [
+    "/tmp/eval_ws_1fttn6sz/requests/adapters.py",
+    "/tmp/eval_ws_1fttn6sz/requests/auth.py",
+    "/tmp/eval_ws_1fttn6sz/requests/models.py",
+    "/tmp/eval_ws_1fttn6sz/requests/sessions.py",
+    "/tmp/eval_ws_1fttn6sz/requests/utils.py",
+    "/tmp/eval_ws_1fttn6sz/tests/test_lowlevel.py",
+    "/tmp/eval_ws_1fttn6sz/tests/test_requests.py",
+    "/tmp/eval_ws_1fttn6sz/tests/test_utils.py"
+  ],
+  "grep_patterns": [
+    "prepare_content_length",
+    "prepare_content_length",
+    "[Cc]ontent-[Ll]ength",
+    "super_len",
+    "[Tt]ransfer-[Ee]ncoding|chunked",
+    "def test.*[Cc]ontent[_-][Ll]ength|def test.*chunked",
+    "def urlopen|chunked",
+    "rewind_body"
+  ],
+  "bash_commands": [
+    "git diff HEAD~1..HEAD",
+    "find /tmp/eval_ws_1fttn6sz -type f -name \"*.py\" | head -20",
+    "git log --oneline -10",
+    "git show 728f60d",
+    "grep -r \"urlopen\" /tmp/eval_ws_1fttn6sz/requests/*.py | head -20",
+    "grep -r \"Content-Length\" /tmp/eval_ws_1fttn6sz/requests/*.py -B 2 -A 2 | head -100",
+    "grep -n \"builtin_str\\|Content-Length\" /tmp/eval_ws_1fttn6sz/requests/models.py | head -20",
+    "python -m pytest tests/test_requests.py::TestRequests::test_no_content_length -v 2>&1 | head -50",
+    "find /tmp/eval_ws_1fttn6sz -type f -name \"*.txt\" | head -10"
+  ],
+  "total_tool_calls": 36,
+  "final_text": "Now I have all the evidence I need. Here are the findings:\n\n```json\n[\n  {\n    \"title\": \"Content-Length header never set for non-stream POST/PUT/PATCH bodies (form data, JSON, file uploads)\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.99,\n    \"file\": \"requests/models.py\",\n    \"start_line\": 573,\n    \"end_line\": 576,\n    \"evidence\": [\n      \"Line 565: self.prepare_content_length(body) \u2014 called for all non-stream bodies (form data, JSON, multipart uploads)\",\n      \"Lines 573-576: prepare_content_length now does 'pass' instead of computing and setting Content-Length\",\n      \"Original code used super_len(body) to calculate length and set self.headers['Content-Length'] = builtin_str(length)\"\n    ],\n    \"risk\": \"Every non-streaming POST/PUT/PATCH request (form data, JSON payloads, multipart file uploads) will be sent without a Content-Length header. Many HTTP servers and proxies require Content-Length for non-chunked requests. This will cause request failures, timeouts, or rejected requests across a wide range of servers.\",\n    \"suggested_fix\": \"Restore the original prepare_content_length implementation that calls super_len(body) and sets the Content-Length header when body is not None and has a computable length.\"\n  },\n  {\n    \"title\": \"Non-stream bodies forced into chunked transfer encoding\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.98,\n    \"file\": \"requests/adapters.py\",\n    \"start_line\": 469,\n    \"end_line\": 469,\n    \"evidence\": [\n      \"Line 469: chunked = not (request.body is None or 'Content-Length' in request.headers)\",\n      \"Without Content-Length being set, any request with a body will have chunked=True\",\n      \"Line 497: chunked=chunked is passed to urllib3's conn.urlopen()\"\n    ],\n    \"risk\": \"All non-stream requests with a body (form-encoded data, JSON, file uploads) will be sent using Transfer-Encoding: chunked instead of with Content-Length. Many servers, proxies, and load balancers do not support chunked request encoding, leading to 411 Length Required errors, 400 Bad Request errors, or connection failures. This is especially problematic for simple form POSTs.\",\n    \"suggested_fix\": \"Restore the original prepare_content_length implementation so Content-Length is set for bodies with deterministic length, preventing the chunked fallback in the adapter.\"\n  },\n  {\n    \"title\": \"Content-Length: 0 no longer set for bodyless POST/PUT/PATCH/DELETE requests\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.97,\n    \"file\": \"requests/models.py\",\n    \"start_line\": 573,\n    \"end_line\": 576,\n    \"evidence\": [\n      \"Original code: elif self.method not in ('GET', 'HEAD') and self.headers.get('Content-Length') is None: self.headers['Content-Length'] = '0'\",\n      \"Now replaced with 'pass' \u2014 bodyless POST/PUT/PATCH/DELETE will have no Content-Length header at all\"\n    ],\n    \"risk\": \"HTTP servers commonly require Content-Length: 0 for POST/PUT/PATCH/DELETE requests with no body (RFC 7230 recommends it). Without it, servers may wait indefinitely for a body, return 411 Length Required, or timeout. This breaks common patterns like empty POST requests for triggering actions.\",\n    \"suggested_fix\": \"Restore the elif branch that sets Content-Length to '0' for non-GET/HEAD methods when body is None.\"\n  },\n  {\n    \"title\": \"307/308 redirects with form/JSON bodies fail to rewind\",\n    \"category\": \"reliability\",\n    \"severity\": \"warning\",\n    \"confidence\": 0.85,\n    \"file\": \"requests/sessions.py\",\n    \"start_line\": 248,\n    \"end_line\": 257,\n    \"evidence\": [\n      \"Lines 251-253: rewindable = prepared_request._body_position is not None and ('Content-Length' in headers or 'Transfer-Encoding' in headers)\",\n      \"For non-stream bodies (form data, JSON), _body_position is None (only set for stream bodies at line 538)\",\n      \"Without Content-Length set and without Transfer-Encoding, rewindable evaluates to False for the header check\"\n    ],\n    \"risk\": \"On 307/308 redirects where the body must be preserved and resent, the missing Content-Length header contributes to the rewindability check failing. For non-stream bodies _body_position is already None so the impact is limited, but for edge cases where auth modifies a stream body and Content-Length was the only qualifying header, the redirect will silently drop the body or hang.\",\n    \"suggested_fix\": \"Restore Content-Length header setting in prepare_content_length to ensure the rewindability check works correctly for all body types.\"\n  },\n  {\n    \"title\": \"Auth recomputation of Content-Length is silently broken\",\n    \"category\": \"correctness\",\n    \"severity\": \"warning\",\n    \"confidence\": 0.95,\n    \"file\": \"requests/models.py\",\n    \"start_line\": 597,\n    \"end_line\": 598,\n    \"evidence\": [\n      \"Line 598: self.prepare_content_length(self.body) \u2014 called after auth modifies the request\",\n      \"Comment on line 597: '# Recompute Content-Length'\",\n      \"The recomputation is now a no-op, so if auth changes the body, Content-Length will be stale or absent\"\n    ],\n    \"risk\": \"If an auth mechanism modifies the request body (e.g., signing the body or wrapping it), the Content-Length header will not be updated to reflect the new body size. This can cause servers to truncate or reject the request.\",\n    \"suggested_fix\": \"Restore the original prepare_content_length implementation so auth-triggered recomputation actually works.\"\n  }\n]\n```",
+  "model": "",
+  "cost_usd": 0.39307634999999996,
+  "input_tokens": 8,
+  "output_tokens": 2494,
+  "duration_ms": 143762,
+  "session_id": "a038a027-3d8f-4c13-b898-24cfafff060d",
+  "case_id": "requests-004"
+}

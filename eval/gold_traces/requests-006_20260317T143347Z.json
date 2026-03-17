@@ -1,0 +1,136 @@
+{
+  "tool_uses": [
+    {
+      "tool": "Bash",
+      "params": {
+        "command": "git diff HEAD~1..HEAD",
+        "description": "Show the diff from the last commit"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_njpmkl92/requests/sessions.py",
+        "offset": 770,
+        "limit": 40
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "get_adapter",
+        "output_mode": "files_with_matches"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "InvalidSchema",
+        "output_mode": "files_with_matches"
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "get_adapter",
+        "output_mode": "content",
+        "context": 3
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "self\\.adapters",
+        "path": "/tmp/eval_ws_njpmkl92/requests/sessions.py",
+        "output_mode": "content",
+        "context": 2
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "InvalidSchema",
+        "path": "/tmp/eval_ws_njpmkl92/tests/test_requests.py",
+        "output_mode": "content",
+        "context": 5
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_njpmkl92/tests/test_requests.py",
+        "offset": 90,
+        "limit": 30
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_njpmkl92/requests/sessions.py",
+        "offset": 440,
+        "limit": 15
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_njpmkl92/requests/sessions.py",
+        "offset": 685,
+        "limit": 30
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Read",
+      "params": {
+        "file_path": "/tmp/eval_ws_njpmkl92/requests/sessions.py",
+        "offset": 800,
+        "limit": 15
+      },
+      "result_summary": ""
+    },
+    {
+      "tool": "Grep",
+      "params": {
+        "pattern": "def send\\b",
+        "path": "/tmp/eval_ws_njpmkl92/requests/adapters.py",
+        "output_mode": "content",
+        "context": 5
+      },
+      "result_summary": ""
+    }
+  ],
+  "files_read": [
+    "/tmp/eval_ws_njpmkl92/requests/sessions.py",
+    "/tmp/eval_ws_njpmkl92/tests/test_requests.py"
+  ],
+  "grep_patterns": [
+    "get_adapter",
+    "InvalidSchema",
+    "get_adapter",
+    "self\\.adapters",
+    "InvalidSchema",
+    "def send\\b"
+  ],
+  "bash_commands": [
+    "git diff HEAD~1..HEAD"
+  ],
+  "total_tool_calls": 12,
+  "final_text": "I now have a complete picture. Here are my findings:\n\n```json\n[\n  {\n    \"title\": \"Security: Arbitrary URL schemes silently routed to HTTP adapter instead of being rejected\",\n    \"category\": \"security\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.97,\n    \"file\": \"requests/sessions.py\",\n    \"start_line\": 793,\n    \"end_line\": 794,\n    \"evidence\": [\n      \"return list(self.adapters.values())[-1]\",\n      \"Default adapters are mounted for 'https://' and 'http://' only (line 450-451)\",\n      \"Adapters sorted descending by prefix length, so last is 'http://' (len 7)\",\n      \"Original code: raise InvalidSchema(f\\\"No connection adapters were found for {url!r}\\\")\"\n    ],\n    \"risk\": \"URLs with dangerous schemes like file://, ftp://, gopher://, or completely invalid schemes are no longer rejected. Instead they are silently routed through the HTTP adapter. In server-side applications that pass user-controlled URLs to requests (e.g., webhook URLs, URL preview fetchers), this removes a critical validation layer. An attacker could submit a URL like 'file:///etc/passwd' or a crafted scheme to probe internal services, enabling SSRF attacks. The original InvalidSchema exception served as a security boundary that is now gone.\",\n    \"suggested_fix\": \"Restore the original behavior: raise InvalidSchema(f\\\"No connection adapters were found for {url!r}\\\") when no adapter prefix matches the URL.\"\n  },\n  {\n    \"title\": \"Correctness: URLs without recognized schemes silently produce confusing errors instead of clear InvalidSchema\",\n    \"category\": \"correctness\",\n    \"severity\": \"critical\",\n    \"confidence\": 0.95,\n    \"file\": \"requests/sessions.py\",\n    \"start_line\": 793,\n    \"end_line\": 794,\n    \"evidence\": [\n      \"return list(self.adapters.values())[-1]\",\n      \"Test at line 98-100 expects InvalidSchema for 'localhost:3128', 'localhost.localdomain:3128/', '10.122.1.1:3128/'\",\n      \"adapter = self.get_adapter(url=request.url) at line 697 feeds into adapter.send(request, **kwargs) at line 703\"\n    ],\n    \"risk\": \"URLs like 'localhost:3128' (missing scheme) previously raised a clear InvalidSchema exception, helping developers quickly identify the problem. Now these URLs are silently sent to the HTTP adapter which will attempt to make an HTTP connection to a malformed URL, producing cryptic connection errors (e.g., ConnectionError or invalid hostname errors) instead of the descriptive InvalidSchema message. This makes debugging significantly harder for users who accidentally omit the scheme.\",\n    \"suggested_fix\": \"Restore the original behavior: raise InvalidSchema(f\\\"No connection adapters were found for {url!r}\\\") when no adapter prefix matches the URL.\"\n  },\n  {\n    \"title\": \"Reliability: IndexError crash when session has no adapters mounted\",\n    \"category\": \"reliability\",\n    \"severity\": \"warning\",\n    \"confidence\": 0.85,\n    \"file\": \"requests/sessions.py\",\n    \"start_line\": 794,\n    \"end_line\": 794,\n    \"evidence\": [\n      \"return list(self.adapters.values())[-1]\",\n      \"self.adapters = OrderedDict() at line 449\",\n      \"Users can unmount adapters or create subclasses with empty adapters dict\"\n    ],\n    \"risk\": \"If a user creates a session subclass with no adapters or manually clears self.adapters, list(self.adapters.values())[-1] raises an IndexError with no useful message. The original InvalidSchema exception would have been raised with a descriptive message including the URL. The IndexError is an unhandled crash with no context about what went wrong.\",\n    \"suggested_fix\": \"Restore the original InvalidSchema raise, or at minimum add a guard: if not self.adapters: raise InvalidSchema(...)\"\n  }\n]\n```\n\n**Summary of the bug:** The patch replaces a critical error-raising path in `Session.get_adapter()` with a silent fallback to the last registered adapter. This introduces three problems:\n\n1. **Critical security issue** - URLs with arbitrary/dangerous schemes (`file://`, `ftp://`, etc.) are no longer rejected, removing a security boundary that prevents SSRF in server-side applications.\n\n2. **Critical correctness issue** - Malformed URLs (e.g., `localhost:3128` without a scheme) that previously gave clear `InvalidSchema` errors now silently attempt HTTP connections, producing cryptic failures. This also breaks existing tests that expect `InvalidSchema`.\n\n3. **Reliability issue** - If the adapters dict is empty, the new code crashes with an unhelpful `IndexError` instead of a descriptive `InvalidSchema` error.",
+  "model": "",
+  "cost_usd": 0.217221,
+  "input_tokens": 7,
+  "output_tokens": 3244,
+  "duration_ms": 76463,
+  "session_id": "0e8eda53-26cd-49c3-9711-86d2797860b2",
+  "case_id": "requests-006"
+}
