@@ -32,7 +32,7 @@ from app.code_tools.schemas import TOOL_DEFINITIONS, filter_tools
 from .budget import BudgetConfig, BudgetController, BudgetSignal, IterationMetrics
 from .evidence import check_evidence
 from .prompts import _read_key_docs, build_system_prompt, scan_workspace_layout, scan_workspace_risk
-from .query_classifier import QueryClassification, classify_query, classify_query_with_llm
+from .query_classifier import QUERY_TYPES, QueryClassification, classify_query, classify_query_with_llm
 from .trace import IterationTrace, SessionTrace, ToolCallTrace, TraceWriter
 from app.workflow.observability import observe
 
@@ -124,10 +124,11 @@ class AgentLoopService:
         trace_writer: Optional[TraceWriter] = None,
         classifier_provider: Optional[AIProvider] = None,
         explorer_provider: Optional[AIProvider] = None,
-        _skip_review_delegation: bool = False,
+        _is_sub_agent: bool = False,
         llm_semaphore: Optional[asyncio.Semaphore] = None,
         max_evidence_retries: int = 2,
         workflow_config=None,
+        workflow_route_name: str = "",
     ) -> None:
         self._provider = provider
         self._max_iterations = max_iterations
@@ -136,10 +137,11 @@ class AgentLoopService:
         self._trace_writer = trace_writer
         self._classifier_provider = classifier_provider
         self._explorer_provider = explorer_provider
-        self._skip_review_delegation = _skip_review_delegation
+        self._is_sub_agent = _is_sub_agent
         self._llm_semaphore = llm_semaphore
         self._max_evidence_retries = max_evidence_retries
         self._workflow_config = workflow_config
+        self._workflow_route_name = workflow_route_name
 
     @observe(name="agent_loop")
     async def run(
@@ -205,38 +207,38 @@ class AgentLoopService:
         )
         trace.begin()
 
-        # When workflow_config is set, the router already classified via
-        # WorkflowEngine — skip the internal classification entirely.
-        # Sub-agents (inside CodeReviewService) also skip expensive startup.
-        if self._skip_review_delegation:
-            layout = ""
-            project_docs = ""
-            risk_context = ""
-            classification = classify_query(query)  # keyword-only, zero latency
-        elif self._workflow_config is not None:
-            # Workflow-driven: router already picked the right agent.
-            # Still scan workspace for context, but use agent's category as query_type.
-            layout_task = asyncio.to_thread(scan_workspace_layout, workspace_path)
-            docs_task = asyncio.to_thread(_read_key_docs, workspace_path)
-            risk_task = asyncio.to_thread(scan_workspace_risk, workspace_path)
-            layout, project_docs, risk_context = await asyncio.gather(
-                layout_task, docs_task, risk_task,
+        # Scan workspace for context (layout, docs, risk) so the LLM
+        # knows the project structure from iteration 1.
+        layout_task = asyncio.to_thread(scan_workspace_layout, workspace_path)
+        docs_task = asyncio.to_thread(_read_key_docs, workspace_path)
+        risk_task = asyncio.to_thread(scan_workspace_risk, workspace_path)
+        layout, project_docs, risk_context = await asyncio.gather(
+            layout_task, docs_task, risk_task,
+        )
+
+        # Branch 1: Running under WorkflowEngine — use the route's classification directly
+        if self._workflow_route_name:
+            route_type = (
+                self._workflow_route_name
+                or getattr(self._workflow_config, "category", None)
+                or getattr(self._workflow_config, "name", "general")
             )
-            # Build a classification from the workflow agent config
-            agent_category = getattr(self._workflow_config, "category", None) or getattr(self._workflow_config, "name", "general")
-            classification = classify_query(query)  # keyword for tool_set baseline
-            classification.query_type = agent_category
-            logger.info("Using workflow-driven classification: type=%s (from agent config)", agent_category)
+            if route_type in QUERY_TYPES:
+                spec = QUERY_TYPES[route_type]
+                classification = QueryClassification(
+                    query_type=route_type,
+                    budget_level=spec["budget_level"],
+                    suggested_token_budget=spec["suggested_token_budget"],
+                    tool_set=spec["tools"],
+                )
+            else:
+                classification = classify_query(query)
+                classification.query_type = route_type
+            logger.info("Using workflow-driven classification: type=%s (route=%s)",
+                        classification.query_type, self._workflow_route_name)
+
+        # Branch 2: Standalone mode — full classification (LLM preferred, keyword fallback)
         else:
-            # Pre-scan the workspace layout, key docs, and risk signals in parallel
-            # so the LLM knows the project structure and context from iteration 1.
-            layout_task = asyncio.to_thread(scan_workspace_layout, workspace_path)
-            docs_task = asyncio.to_thread(_read_key_docs, workspace_path)
-            risk_task = asyncio.to_thread(scan_workspace_risk, workspace_path)
-            layout, project_docs, risk_context = await asyncio.gather(
-                layout_task, docs_task, risk_task,
-            )
-            # Classify the query — use LLM if a classifier provider is available
             if self._classifier_provider:
                 try:
                     classification = await classify_query_with_llm(
@@ -252,11 +254,11 @@ class AgentLoopService:
         # ---- Multi-agent code review delegation ----
         # When a PR diff spec is detected, delegate to CodeReviewService
         # for parallel multi-agent review instead of the single agent loop.
-        # Skip if _skip_review_delegation is set (sub-agents inside CodeReviewService).
+        # Skip if _is_sub_agent is set (sub-agents inside CodeReviewService).
         if (
             classification.query_type == "code_review"
             and classification.diff_spec
-            and not self._skip_review_delegation
+            and not self._is_sub_agent
         ):
             logger.info(
                 "Delegating to multi-agent code review: diff_spec=%s",
@@ -281,7 +283,7 @@ class AgentLoopService:
         # are better served by the single-agent module_summary approach.
         if (
             classification.query_type == "business_flow_tracing"
-            and not self._skip_review_delegation
+            and not self._is_sub_agent
             and self._classifier_provider is not None
         ):
             logger.info(
@@ -313,10 +315,9 @@ class AgentLoopService:
         # Dynamic tool set — only expose tools relevant to the query type
         active_tools = filter_tools(classification.tool_set) if classification.tool_set else TOOL_DEFINITIONS
         logger.info(
-            "Query classified: type=%s, budget=%s, tools=%d/%d, strategy=%s",
+            "Query classified: type=%s, budget=%s, tools=%d/%d",
             classification.query_type, classification.budget_level,
             len(active_tools), len(TOOL_DEFINITIONS),
-            classification.strategy[:60],
         )
 
         messages = self._initial_messages(query, classification)
@@ -342,15 +343,36 @@ class AgentLoopService:
         greps_used: List[str] = []
         # Track distinct top-level directories accessed to detect scatter
         dirs_accessed: Dict[str, int] = {}  # dir → count of files read
+        # Track all tool calls to detect exact duplicate calls
+        _tool_call_history: Dict[str, int] = {}  # "tool|params_json" → count
 
         # Build executor: prefer the injected one, fall back to local
         executor = self._tool_executor or LocalToolExecutor(workspace_path)
 
+        # Cache for tool results to serve duplicates without re-execution
+        _tool_result_cache: Dict[str, "ToolResult"] = {}
+
         # Closure executed in a thread for each tool call (with timing)
         async def _exec_tool(tc_arg):
+            import json as _json
+
+            # Build a cache key from tool name + sorted params
+            try:
+                cache_key = f"{tc_arg.name}|{_json.dumps(tc_arg.input, sort_keys=True)}"
+            except (TypeError, ValueError):
+                cache_key = f"{tc_arg.name}|{str(tc_arg.input)}"
+
+            dup_count = _tool_call_history.get(cache_key, 0)
+            _tool_call_history[cache_key] = dup_count + 1
+
+            # Exact duplicate — return cached result without re-execution
+            if dup_count > 0 and cache_key in _tool_result_cache:
+                return tc_arg, _tool_result_cache[cache_key], 0.0
+
             t0 = time.monotonic()
             result = await executor.execute(tc_arg.name, tc_arg.input)
             elapsed = (time.monotonic() - t0) * 1000
+            _tool_result_cache[cache_key] = result
             return tc_arg, result, elapsed
 
         # LLM call timeout — prevents hanging when context is too large
@@ -609,6 +631,35 @@ class AgentLoopService:
             tool_results_content = []
             guidance_notes: List[str] = []
 
+            # Detect duplicate tool calls and warn the LLM
+            import json as _json
+            dup_tools = []
+            for tc_arg in response.tool_calls:
+                try:
+                    ck = f"{tc_arg.name}|{_json.dumps(tc_arg.input, sort_keys=True)}"
+                except (TypeError, ValueError):
+                    ck = f"{tc_arg.name}|{str(tc_arg.input)}"
+                cnt = _tool_call_history.get(ck, 0)
+                if cnt > 1:
+                    dup_tools.append((tc_arg.name, cnt))
+            if dup_tools:
+                dup_desc = ", ".join(f"{name} ({cnt}x)" for name, cnt in dup_tools)
+                guidance_notes.append(
+                    f"⚠ DUPLICATE TOOL CALLS DETECTED: {dup_desc}. "
+                    f"You are re-calling tools with identical parameters — the result "
+                    f"will be the same. Stop repeating and either: (1) use the result "
+                    f"you already have, (2) try a different approach, or (3) provide "
+                    f"your final answer now."
+                )
+                # After 3+ repeats of any single call, force conclude
+                max_repeats = max(cnt for _, cnt in dup_tools)
+                if max_repeats >= 3:
+                    guidance_notes.append(
+                        "🛑 STOP: You have repeated the same tool call 3+ times. "
+                        "You MUST provide your answer NOW based on what you already know. "
+                        "Do NOT call any more tools."
+                    )
+
             # Guard: warn if too many heavy tools in one turn
             diff_calls_this_turn = sum(
                 1 for tc_arg in response.tool_calls
@@ -856,23 +907,63 @@ class AgentLoopService:
                 self._tool_results_message_with_note(tool_results_content, budget_note)
             )
 
-        # Exhausted iterations — use accumulated text as fallback
-        answer = (response.text if response else "") or ""
-        if not answer.strip() and accumulated_text:
+        # Exhausted iterations — make one final LLM call WITHOUT tools
+        # to force a proper answer based on everything collected so far.
+        logger.info(
+            "[%s] Iterations exhausted (%d). Making final judge call (no tools).",
+            _sid, self._max_iterations,
+        )
+
+        messages.append({
+            "role": "user",
+            "content": [{
+                "text": (
+                    "⚠ You have exhausted all tool-calling iterations. "
+                    "You MUST provide your final answer NOW based on everything "
+                    "you have learned so far. Synthesize your findings into a "
+                    "clear, complete explanation. Do NOT say you need more information "
+                    "or request additional tool calls — just give your best answer "
+                    "with what you have."
+                ),
+            }],
+        })
+
+        try:
+            final_response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._provider.chat_with_tools,
+                    messages=messages,
+                    tools=[],  # no tools — force text-only response
+                    system=system,
+                ),
+                timeout=_LLM_TIMEOUT_SECONDS,
+            )
+            answer = (final_response.text or "").strip()
+            if final_response.usage:
+                budget.record_usage(final_response.usage.input_tokens, final_response.usage.output_tokens)
+            logger.info(
+                "[%s] Final judge call produced %d chars",
+                _sid, len(answer),
+            )
+        except Exception as exc:
+            logger.warning("[%s] Final judge call failed: %s", _sid, exc)
+            answer = ""
+
+        # Fallback if final judge also produced nothing
+        if not answer and accumulated_text:
             answer = accumulated_text[-1]
             logger.warning(
-                "Agent exhausted %d iterations with empty final text; "
-                "falling back to last thinking text (%d chars)",
-                self._max_iterations, len(answer),
+                "Final judge call empty; falling back to last thinking text (%d chars)",
+                len(answer),
             )
-        trace.finish(answer=answer, error="Max iterations reached", budget_summary=budget.summary())
+
+        trace.finish(answer=answer, error=None, budget_summary=budget.summary())
         self._save_trace(trace)
         yield AgentEvent(kind="done", data={
             "answer": answer,
             "tool_calls_made": total_tool_calls,
             "iterations": self._max_iterations,
             "duration_ms": (time.monotonic() - start) * 1000,
-            "error": "Max iterations reached",
             "thinking_steps": thinking_steps,
             "budget_summary": budget.summary(),
         })
@@ -1150,7 +1241,7 @@ Anything the evidence did not conclusively show. If everything was confirmed, wr
                 max_iterations=sub_max_iters,
                 budget_config=sub_budget,
                 trace_writer=self._trace_writer,
-                _skip_review_delegation=True,  # sub-agents skip multi-agent dispatch
+                _is_sub_agent=True,  # sub-agents skip multi-agent dispatch
             )
             perspective_query = f"{query}\n\n{perspective['hint']}"
             return await agent.run(perspective_query, workspace_path)
@@ -1426,17 +1517,10 @@ Anything the evidence did not conclusively show. If everything was confirmed, wr
         query: str,
         classification: Optional[QueryClassification] = None,
     ) -> List[Dict[str, Any]]:
-        text = query
-        if classification:
-            text += (
-                f"\n\n[Query Classification: {classification.query_type} | "
-                f"Strategy: {classification.strategy} | "
-                f"Suggested tools: {', '.join(classification.initial_tools)}]"
-            )
         return [
             {
                 "role": "user",
-                "content": [{"text": text}],
+                "content": [{"text": query}],
             }
         ]
 

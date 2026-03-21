@@ -731,7 +731,7 @@ async def run_review_agent(
         max_iterations=spec.max_iterations,
         budget_config=budget,
         trace_writer=trace_writer,
-        _skip_review_delegation=True,
+        _is_sub_agent=True,
         llm_semaphore=llm_semaphore,
     )
 

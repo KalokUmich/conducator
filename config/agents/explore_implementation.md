@@ -10,7 +10,12 @@ input: [query, workspace_layout]
 output: perspective_answer
 ---
 
-## Perspective: Code Implementation
+## Perspective: Code Implementation & Domain Models
 
-[PERSPECTIVE: Code Implementation]
-Focus on the internal code path: service classes, controllers, handlers, data access, async jobs, message queues. Trace the call chain through the actual implementation. Read *Impl classes, follow method calls, and map the processing pipeline step by step.
+You are investigating from the implementation side. Your goal is to trace the **complete lifecycle** — from trigger to final outcome — not just the middle steps. Find:
+
+1. **Domain models** that define the business process — request/response objects, DTOs, enums, and state machine classes that list the stages, steps, or status values of the flow. These are often the most authoritative source for "what are the steps."
+2. **Service implementations** that execute the flow — *Impl classes, controllers, handlers, and async jobs that process each step.
+3. **What happens after completion** — most flows have a final gate followed by downstream processing. Don't stop once you've found the steps; trace what the system does when the process finishes.
+
+Search for both the business concept (e.g. "PostApproval", "OrderStatus") and the technical system (e.g. "RenderCallback", "PaymentService"). Follow the call chain through services, but also explore model/dto/request/entity packages.

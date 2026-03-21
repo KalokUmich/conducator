@@ -246,7 +246,7 @@ async def post_ai_message(
     )
 
     # Store in history
-    manager.add_message(room_id, message)
+    await manager.add_message(room_id, message)
 
     # Broadcast to all clients in the room
     await manager.broadcast(
@@ -415,7 +415,7 @@ async def websocket_chat_endpoint(
                 # TODO: CLOUD_BACKUP - Consider backing up files before deletion
                 try:
                     file_service = FileStorageService.get_instance()
-                    deleted_count = file_service.delete_room_files(room_id)
+                    deleted_count = await file_service.delete_room_files(room_id)
                     logger.info(f"[WS] Deleted {deleted_count} files for room {room_id}")
                 except Exception as e:
                     logger.error(f"[WS] Failed to delete files for room {room_id}: {e}")
@@ -426,7 +426,7 @@ async def websocket_chat_endpoint(
                 }, room_id)
 
                 # Clear all room data
-                manager.clear_room(room_id)
+                await manager.clear_room(room_id)
                 continue
 
             # --- Handle TRANSFER_LEAD message (host or current lead only) ---
@@ -616,6 +616,12 @@ async def websocket_chat_endpoint(
                 await manager.broadcast(test_failure_message, room_id)
                 continue
 
+            # --- Handle tool_response (from extension's local tool execution) ---
+            if message_type == "tool_response":
+                from app.code_tools.proxy import tool_proxy
+                tool_proxy.handle_response(data)
+                continue
+
             # --- Handle regular CHAT message ---
             # SECURITY: Use backend-assigned userId and role for all messages
             content = data.get("content", "")
@@ -643,7 +649,7 @@ async def websocket_chat_endpoint(
                 role=assigned_role,
                 content=content
             )
-            manager.add_message(room_id, full_message)
+            await manager.add_message(room_id, full_message)
 
             # Broadcast to all clients in the room
             logger.info(f"[WS] Broadcasting message to {manager.get_room_size(room_id)} connections")
@@ -687,10 +693,10 @@ async def websocket_chat_endpoint(
                 f"[WS] Non-SSO host {pre_user_id} left room {room_id} "
                 "— clearing history and audit logs"
             )
-            manager.clear_message_history(room_id)
+            await manager.clear_message_history(room_id)
             try:
                 from app.audit.service import AuditLogService
-                AuditLogService.get_instance().delete_room_logs(room_id)
+                await AuditLogService.get_instance().delete_room_logs(room_id)
             except Exception as exc:
                 logger.error(f"[WS] Could not delete audit logs for room {room_id}: {exc}")
             await manager.broadcast({

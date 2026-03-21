@@ -39,3 +39,42 @@ def api_client():
     `client = TestClient(app)` pattern used in existing test files.
     """
     return TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# Database fixtures (async SQLAlchemy with aiosqlite for unit tests)
+# ---------------------------------------------------------------------------
+
+import pytest_asyncio  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def db_engine():
+    """Create an async in-memory SQLite engine for tests.
+
+    Uses aiosqlite so tests don't need a real Postgres instance.
+    Tables are created automatically and dropped after the test.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from app.db.models import Base
+
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+@pytest.fixture
+def redis_mock():
+    """Provide a fakeredis async client for tests.
+
+    Falls back to None if fakeredis is not installed.
+    """
+    try:
+        import fakeredis.aioredis
+        return fakeredis.aioredis.FakeRedis(decode_responses=True)
+    except ImportError:
+        return None

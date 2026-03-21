@@ -159,12 +159,16 @@ def _walk_for_definitions(node, source: bytes, file_path: str, symbols: FileSymb
     }
 
     if node.type in DEF_NODE_TYPES:
-        # Find the name child
-        name_node = None
-        for child in node.children:
-            if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
-                name_node = child
-                break
+        # Find the name child — prefer the tree-sitter "name" field over
+        # positional search.  This is critical for Java where the return type
+        # (type_identifier) comes *before* the method name (identifier) in
+        # method_declaration nodes; a naive first-match picks the return type.
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            for child in node.children:
+                if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
+                    name_node = child
+                    break
 
         if name_node is not None:
             name = source[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")

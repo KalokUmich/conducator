@@ -1,248 +1,102 @@
-"""DuckDB-based audit log storage service.
+"""Async PostgreSQL-based audit log storage service.
 
-This module provides persistent storage for audit log entries using DuckDB,
-a fast embedded analytical database. The service implements the singleton
-pattern to ensure only one database connection exists at a time.
-
-Database Schema:
-    audit_logs table:
-        - id: Auto-incrementing primary key
-        - room_id: Session/room identifier
-        - summary_id: Optional reference to the summary
-        - changeset_hash: SHA-256 hash of the applied changeset
-        - applied_by: User ID who applied the change
-        - mode: 'manual' or 'auto'
-        - timestamp: When the change was applied (UTC)
-
-Thread Safety:
-    The DuckDB connection is NOT thread-safe. In production with multiple
-    workers, each process will have its own connection to the same file.
-    DuckDB handles concurrent file access internally.
-
-Usage:
-    service = AuditLogService.get_instance()
-    entry = service.log_apply(create_entry)
-    logs = service.get_logs(room_id="abc-123")
+Provides persistent storage for audit log entries using async SQLAlchemy.
+The service accepts an ``AsyncEngine`` at construction time.
 """
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+
+from ..db.models import AuditLog
+from .schemas import ApplyMode, AuditLogCreate, AuditLogEntry
 
 logger = logging.getLogger(__name__)
 
-import duckdb
-
-from app.config import get_config
-
-from .schemas import ApplyMode, AuditLogCreate, AuditLogEntry
-
 
 class AuditLogService:
-    """Singleton service for managing audit logs in DuckDB.
-
-    This service provides methods to log apply operations and retrieve
-    audit history. It maintains a single database connection for the
-    lifetime of the process.
-
-    Attributes:
-        _instance: Singleton instance of the service.
-        _db_path: Path to the DuckDB database file.
-    """
+    """Service for managing audit logs in PostgreSQL."""
 
     _instance: Optional["AuditLogService"] = None
-    _db_path: str = "audit_logs.duckdb"
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        """Initialize the audit log service.
-
-        Creates the database file and schema if they don't exist.
-
-        Args:
-            db_path: Path to DuckDB file. Defaults to "audit_logs.duckdb".
-        """
-        if db_path:
-            self._db_path = db_path
-        self._connection: Optional[duckdb.DuckDBPyConnection] = None
-        self._initialize_db()
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     @classmethod
-    def get_instance(cls, db_path: Optional[str] = None) -> "AuditLogService":
-        """Get or create the singleton instance.
-
-        Args:
-            db_path: Optional database path (only used on first call).
-
-        Returns:
-            The singleton AuditLogService instance.
-        """
+    def get_instance(cls, engine: Optional[AsyncEngine] = None) -> "AuditLogService":
         if cls._instance is None:
-            resolved_path = db_path
-            if resolved_path is None:
-                try:
-                    configured_path = get_config().logging.audit_path
-                    if configured_path:
-                        resolved_path = configured_path
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to read logging.audit_path from config, using default audit DB path: %s",
-                        exc,
-                    )
-
-            cls._instance = cls(resolved_path)
+            if engine is None:
+                raise RuntimeError("AuditLogService requires an AsyncEngine on first call")
+            cls._instance = cls(engine)
         return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
-        """Reset the singleton instance.
+        cls._instance = None
 
-        Closes the database connection and clears the instance.
-        Primarily used for testing to ensure a clean state.
-        """
-        if cls._instance is not None:
-            cls._instance.close()
-            cls._instance = None
-
-    def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """Get the DuckDB connection, creating if needed.
-
-        Returns:
-            Active DuckDB connection.
-        """
-        if self._connection is None:
-            self._connection = duckdb.connect(self._db_path)
-        return self._connection
-
-    def _initialize_db(self) -> None:
-        """Initialize the database schema.
-
-        Creates the audit_logs table and sequence if they don't exist.
-        Safe to call multiple times (idempotent).
-        """
-        conn = self._get_connection()
-        conn.execute("""
-            CREATE SEQUENCE IF NOT EXISTS audit_logs_seq START 1;
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                id INTEGER DEFAULT nextval('audit_logs_seq') PRIMARY KEY,
-                room_id VARCHAR NOT NULL,
-                summary_id VARCHAR,
-                changeset_hash VARCHAR NOT NULL,
-                applied_by VARCHAR NOT NULL,
-                mode VARCHAR NOT NULL,
-                timestamp TIMESTAMP NOT NULL
-            )
-        """)
-    
-    def log_apply(self, entry: AuditLogCreate) -> AuditLogEntry:
-        """Log an apply operation.
-        
-        Args:
-            entry: The audit log entry to create.
-            
-        Returns:
-            The created audit log entry with timestamp.
-        """
-        timestamp = datetime.utcnow()
-        conn = self._get_connection()
-        conn.execute(
-            """
-            INSERT INTO audit_logs (room_id, summary_id, changeset_hash, applied_by, mode, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                entry.room_id,
-                entry.summary_id,
-                entry.changeset_hash,
-                entry.applied_by,
-                entry.mode.value,
-                timestamp
-            ]
+    async def log_apply(self, entry: AuditLogCreate) -> AuditLogEntry:
+        """Log an apply operation."""
+        timestamp = datetime.now(timezone.utc)
+        row = AuditLog(
+            room_id=entry.room_id,
+            summary_id=entry.summary_id,
+            changeset_hash=entry.changeset_hash,
+            applied_by=entry.applied_by,
+            mode=entry.mode.value,
+            timestamp=timestamp,
         )
-        
+        async with self._session_factory() as session:
+            session.add(row)
+            await session.commit()
+
         return AuditLogEntry(
             room_id=entry.room_id,
             summary_id=entry.summary_id,
             changeset_hash=entry.changeset_hash,
             applied_by=entry.applied_by,
             mode=entry.mode,
-            timestamp=timestamp
+            timestamp=timestamp,
         )
-    
-    def get_logs(
+
+    async def get_logs(
         self,
         room_id: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
     ) -> List[AuditLogEntry]:
-        """Get audit logs, optionally filtered by room_id.
-        
-        Args:
-            room_id: Optional room ID to filter by.
-            limit: Maximum number of logs to return.
-            
-        Returns:
-            List of audit log entries.
-        """
-        conn = self._get_connection()
-        
-        if room_id:
-            result = conn.execute(
-                """
-                SELECT room_id, summary_id, changeset_hash, applied_by, mode, timestamp
-                FROM audit_logs
-                WHERE room_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                [room_id, limit]
-            ).fetchall()
-        else:
-            result = conn.execute(
-                """
-                SELECT room_id, summary_id, changeset_hash, applied_by, mode, timestamp
-                FROM audit_logs
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                [limit]
-            ).fetchall()
-        
-        return [
-            AuditLogEntry(
-                room_id=row[0],
-                summary_id=row[1],
-                changeset_hash=row[2],
-                applied_by=row[3],
-                mode=ApplyMode(row[4]),
-                timestamp=row[5]
-            )
-            for row in result
-        ]
-    
-    def delete_room_logs(self, room_id: str) -> None:
-        """Delete all audit entries for a room (called on non-SSO host disconnect)."""
-        conn = self._get_connection()
-        conn.execute("DELETE FROM audit_logs WHERE room_id = ?", [room_id])
-        logger.info(f"[Audit] Deleted audit logs for room {room_id}")
+        """Get audit logs, optionally filtered by room_id."""
+        async with self._session_factory() as session:
+            stmt = select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(limit)
+            if room_id:
+                stmt = stmt.where(AuditLog.room_id == room_id)
+            result = await session.execute(stmt)
+            return [
+                AuditLogEntry(
+                    room_id=row.room_id,
+                    summary_id=row.summary_id,
+                    changeset_hash=row.changeset_hash,
+                    applied_by=row.applied_by,
+                    mode=ApplyMode(row.mode),
+                    timestamp=row.timestamp,
+                )
+                for row in result.scalars().all()
+            ]
 
-    def close(self) -> None:
-        """Close the database connection."""
-        if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+    async def delete_room_logs(self, room_id: str) -> None:
+        """Delete all audit entries for a room."""
+        async with self._session_factory() as session:
+            await session.execute(
+                delete(AuditLog).where(AuditLog.room_id == room_id)
+            )
+            await session.commit()
+            logger.info("[Audit] Deleted audit logs for room %s", room_id)
 
 
 def compute_changeset_hash(changeset: dict) -> str:
-    """Compute a hash for a changeset.
-    
-    Args:
-        changeset: The changeset dictionary to hash.
-        
-    Returns:
-        SHA-256 hash of the changeset.
-    """
-    # Sort keys for deterministic hashing
+    """Compute a SHA-256 hash (truncated) for a changeset."""
     changeset_str = json.dumps(changeset, sort_keys=True)
     return hashlib.sha256(changeset_str.encode()).hexdigest()[:16]

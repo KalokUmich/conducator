@@ -1,1 +1,13 @@
 eval/
+.git/
+.venv/
+*.pyc
+__pycache__/
+.pytest_cache/
+*.duckdb
+*.duckdb.wal
+node_modules/
+extension/out/
+*.vsix
+.conductor/
+config/conductor.secrets.yaml

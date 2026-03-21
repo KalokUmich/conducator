@@ -1,7 +1,7 @@
 """System prompts for the agent loop — 3-layer architecture.
 
-Layer 1: CORE_IDENTITY (~100 lines) — always included
-Layer 2: STRATEGY (~30 lines) — selected by query classifier
+Layer 1: CORE_IDENTITY — always included; investigation guidance
+Layer 2: STRATEGY — only injected for code_review query type (structured output template)
 Layer 3: Runtime Guidance — injected dynamically by service.py (budget, scatter, etc.)
 """
 from __future__ import annotations
@@ -58,49 +58,25 @@ Operating inside: {workspace_path}
 ## Budget
 You have {max_iterations} tool-calling iterations. Reserve the last 1-2 for verification.
 
-## Core Behavior
+## How to investigate
 
-1. **PARALLEL TOOL CALLS**: Call multiple tools in the same turn when they are \
-independent. For example, grep for two different patterns simultaneously, or read \
-multiple files at once. This saves iterations and budget. Only call tools sequentially \
-when the second call depends on the first call's result.
-2. **HYPOTHESIS-DRIVEN**: Before each tool call, state what you expect to find and why.
-3. **EVIDENCE-BASED**: Every claim must reference a specific file and line number.
-4. **SCOPE SEARCHES**: Use the `path` parameter in grep/find_symbol to target the \
-relevant project root from "Detected project roots" above. Never search the entire \
-workspace when a specific project directory is known.
-5. **READ ACTUAL CODE**: compressed_view shows structure but not logic. When tracing \
-a flow, debugging, or understanding behavior, use read_file or expand_symbol to see \
-the real implementation. In Java, always read the *Impl class, not just the interface.
-6. **BUDGET-AWARE**: Monitor [Budget: ...] tags. Converge when budget runs low.
+Think carefully about the question before reaching for tools. Consider what kind \
+of answer the user needs — are they asking about a user-facing journey, a technical \
+implementation, a data flow, or architecture? Then search from multiple angles:
 
-## Hard Constraints
+- **Search the concept, not just the code**: If the question is about "what steps \
+happen after approval", search for business terms like "PostApproval", "journey", \
+"steps" — not just the technical system name. Domain models and DTOs often define \
+what the steps ARE; service code defines how they execute.
+- **Call multiple tools in parallel** when they are independent. For example, grep \
+for two different patterns simultaneously, or read multiple files at once.
+- **Use file_outline or compressed_view** to understand a file's structure before \
+reading specific sections with read_file.
+- **Scope searches** using the `path` parameter to target the relevant project root \
+from "Detected project roots" above.
+- In Java, read the *Impl class, not just the interface.
 
-- **OUTLINE BEFORE READ**: Before reading any file >200 lines, call file_outline \
-first. Then read_file with start_line/end_line for the sections you need. \
-Never read an entire large file.
-- **Never re-read a file you already read.** Use start_line/end_line for specific sections.
-- **Never use more than 2 broad greps in a row.** After locating, switch to reading.
-- **Do NOT pass include_glob to grep** unless you are certain about the file extension. \
-The workspace may contain multiple languages.
-- **No redundant searches.** If a grep already found the files, do not grep the same \
-pattern again with minor variations. Move to reading the results.
-
-## Tool Guide (when to use what)
-
-| Tool | Best for | Token cost |
-|------|----------|------------|
-| grep / find_symbol | Locating specific names, patterns, entry points | Low |
-| read_file / expand_symbol | Understanding actual logic, control flow, conditionals | Medium |
-| file_outline | Seeing all definitions in a file before reading sections | Low |
-| get_callees / get_callers | Following call chains between functions | Low |
-| compressed_view | Getting a file's structure without reading it fully | Low |
-| module_summary | Understanding a directory's purpose and contents | Low |
-| find_tests | Finding test files that document expected behavior | Low |
-| trace_variable | Tracking data flow across function boundaries | Medium |
-| detect_patterns | Scanning for architectural patterns (queues, retries, locks, webhooks) | Low |
-
-**Choose tools based on the strategy below, not this table's order.**
+Every claim in your answer must reference a specific file and line number.
 
 ## Answer Format
 
@@ -112,71 +88,11 @@ pattern again with minor variations. Move to reading the results.
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LAYER 2: Strategies (selected by query classifier, ~30 lines each)
+# LAYER 2: Code review template (only query type that needs a structured prompt)
 # ═══════════════════════════════════════════════════════════════════════
 
+# For non-review queries, no strategy is injected — Claude reasons freely.
 STRATEGIES = {
-    "entry_point_discovery": """\
-## Strategy: Entry Point Discovery
-1. **Parallel search**: Call grep AND find_symbol simultaneously for the query terms
-2. From results, call file_outline on the handler file
-3. Read the specific handler function with read_file(start_line, end_line)
-4. Trace inward using get_callees if the handler delegates
-Target: 3-5 iterations. Answer with the entry point file, function, and line number.""",
-
-    "business_flow_tracing": """\
-## Strategy: Business Flow Tracing
-1. **Parallel locate**: Call grep for the domain term AND find_symbol simultaneously — \
-scope to the relevant project root.
-2. **Outline then read**: Call file_outline on the top 2-3 result files in parallel. \
-Then read_file with start_line/end_line on the key functions (not full files).
-3. **Follow the call chain**: Use get_callees on each method, then read relevant sections. \
-For Java, always find and read the *Impl class, not just the interface.
-4. **Check tests**: Call find_tests in parallel with your code exploration — \
-integration tests often document the complete flow.
-5. Summarize: Entry → Step 1 → Step 2 → ... → Final state, each citing file:line.
-Target: 5-10 iterations. Maximise parallel calls to stay within budget.""",
-
-    "root_cause_analysis": """\
-## Strategy: Root Cause Analysis
-1. **Parallel search**: grep for error messages AND exception types simultaneously
-2. Use file_outline then expand_symbol to read the error context in detail
-3. **Parallel trace**: Call get_callers AND trace_variable simultaneously
-4. Check recent changes using git_log (run in parallel with step 3 if budget allows)
-Target: 5-10 iterations. Answer with root cause, evidence chain, and fix suggestion.""",
-
-    "impact_analysis": """\
-## Strategy: Impact Analysis
-1. **Parallel discovery**: Call get_dependents AND find_references AND find_tests \
-simultaneously on the target code
-2. For key affected modules, call compressed_view in parallel
-3. Summarize: affected modules, affected APIs, risk level
-Target: 4-8 iterations. Maximise parallel calls.""",
-
-    "architecture_question": """\
-## Strategy: Architecture Overview
-1. **Parallel scan**: Call module_summary on 2-3 top-level directories simultaneously
-2. Use get_dependencies to map module relationships
-3. Use compressed_view on key service files for interface details
-4. Build a dependency diagram: Module → depends on → Module
-Target: 4-8 iterations. Start from documentation and module_summary — do NOT read individual files.""",
-
-    "config_analysis": """\
-## Strategy: Config Analysis
-1. grep for the config key/setting name
-2. Use find_references to find all consumers
-3. Use trace_variable to understand how the config value flows
-4. Use compressed_view on consumer files for context
-Target: 3-6 iterations. Answer with where the config is defined, who uses it, and how.""",
-
-    "data_lineage": """\
-## Strategy: Data Lineage Tracing
-1. Find the data source (grep the variable/field name, or find_symbol for the model)
-2. Use trace_variable forward to find where the value flows
-3. Chain trace_variable calls: each hop's flows_to becomes the next starting point
-4. Use read_file to verify ambiguous hops (confidence="low")
-5. Map the complete lineage: Source → Transform → Sink
-Target: 8-15 iterations. Answer with complete data flow chain, citing file:line at each hop.""",
 
     "code_review": """\
 ## Strategy: Code Review (PR/Diff)
@@ -284,8 +200,8 @@ Target: 15-30 iterations. Prioritize business-logic files. Skip generated/vendor
 Target: 3-8 iterations. Answer with commit hashes, authors, dates, and what changed.""",
 }
 
-# Default strategy for unknown query types
-_DEFAULT_STRATEGY = STRATEGIES["business_flow_tracing"]
+# Default strategy for unknown query types — empty (let Claude reason freely)
+_DEFAULT_STRATEGY = ""
 
 
 # ═══════════════════════════════════════════════════════════════════════

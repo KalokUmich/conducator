@@ -89,9 +89,14 @@ config/
 
 ```
 VS Code Extension
-├── chat.html          — 聊天 WebView，@AI 斜杠命令菜单
-├── workflow.html      — 工作流可视化面板（SVG 图）
-└── workflowPanel.ts   — 面板控制器
+├── chat.html                  — 聊天 WebView，@AI 斜杠命令菜单
+├── workflow.html              — 工作流可视化面板（SVG 图）
+├── workflowPanel.ts           — 面板控制器
+└── services/
+    ├── localToolDispatcher.ts — 三级工具派发：子进程 → AST → 原生 TS
+    ├── astToolRunner.ts       — 6 个 AST 工具（基于 web-tree-sitter）
+    ├── treeSitterService.ts   — web-tree-sitter WASM 封装（8 种语言）
+    └── complexToolRunner.ts   — 6 个复杂工具（compressed_view、trace_variable 等）
 
 FastAPI Backend
 ├── workflow/          — 配置驱动的多 Agent 工作流引擎  ← 核心新增
@@ -100,7 +105,7 @@ FastAPI Backend
 ├── ai_provider/       — 三提供商抽象层（Bedrock / Anthropic / OpenAI）
 ├── git_workspace/     — Git 裸仓库 + Worktree 管理
 ├── chat/              — WebSocket 聊天 + HTTP 历史
-├── code_tools/        — 24 个代码智能工具实现
+├── code_tools/        — 24 个代码智能工具实现 + Python CLI 入口
 └── langextract/       — 多厂商 Bedrock 结构化提取集成
 ```
 
@@ -119,6 +124,10 @@ rg --version      # ripgrep，code tools 的 grep 工具用它
 # Python 依赖
 cd backend
 pip install -r requirements.txt
+
+# Extension 依赖（tree-sitter grammar .wasm 文件）
+# 已提交到 extension/grammars/，开箱即用
+# 如需更新：make update-grammars
 ```
 
 ### 2.2 配置文件
@@ -394,6 +403,7 @@ backend/
 │   │   ├── tools.py               # 所有工具实现 + execute_tool() 调度器
 │   │   ├── schemas.py             # Pydantic 模型 + LLM 工具定义（TOOL_DEFINITIONS）
 │   │   ├── output_policy.py       # 每工具截断策略（预算自适应）
+│   │   ├── __main__.py            # Python CLI 入口：python -m app.code_tools <tool> <ws> '<params>'
 │   │   └── router.py              # /api/code-tools/ 直接调用接口
 │   │
 │   ├── ai_provider/               # LLM 提供商抽象层
@@ -885,16 +895,13 @@ class BudgetController:
 每次 LLM 调用的 system prompt 由三层组成：
 
 ```
-L1: Core Identity（~100 行，始终包含）
-    ├── 硬约束：只能基于工具返回的实际代码回答
-    ├── 探索模式：先广泛搜索再深度阅读
-    └── 答案格式：必须包含文件:行号引用
+L1: Core Identity（~30 行，始终包含）
+    ├── 目标导向：理解代码行为、定位功能、追踪数据流
+    ├── 如何调查：先搜索概念词汇，再深度阅读，理解领域模型
+    └── 答案格式：必须包含文件:行号引用，代码块引用实际代码
 
-L2: Strategy（~30 行，按查询类型选择）
-    ├── business_flow_tracing: "先找入口，再追调用链"
-    ├── root_cause_analysis: "先找错误位置，再追调用链，再看数据流"
-    ├── architecture: "先用 module_summary 看全局结构"
-    └── ...（7 种策略）
+L2: Strategy（仅 code_review 查询类型使用，其余为空）
+    └── code_review: 结构化输出模板（发现摘要格式）
 
 L3: Runtime Guidance（动态生成）
     ├── 当前预算信号（NORMAL / WARN_CONVERGE / FORCE_CONCLUDE）
@@ -902,7 +909,69 @@ L3: Runtime Guidance（动态生成）
     └── 迭代次数 / 剩余迭代次数
 ```
 
-三层合计约 4000 tokens/次（原始单体提示词是 7500 tokens，节省近半）。
+**设计原则：** 遵循 Anthropic 官方提示词工程规范（详见下文 §7.5.1）。
+
+#### 7.5.1 Anthropic 提示词设计规范
+
+以下原则来自 Anthropic 官方文档（[Prompt Engineering Best Practices](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/claude-4-best-practices)、[Context Engineering for Agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)），经 Conductor 项目 Eval 验证。
+
+**1. Right Altitude — 找到正确的抽象高度**
+
+Anthropic 的核心原则：不要过于宽泛（模型缺乏方向），也不要过于具体（模型变得脆弱）。
+
+> "The optimal altitude strikes a balance: specific enough to guide behavior effectively, yet flexible enough to provide the model with strong heuristics to guide behavior."
+
+对于推理类任务，倾向于更高的抽象层次：
+> "Prefer general instructions over prescriptive steps. A prompt like 'think thoroughly' often produces better reasoning than a hand-written step-by-step plan. Claude's reasoning frequently exceeds what a human would prescribe."
+
+```
+# ❌ 过于具体（brittle）
+"if you find isFinished or isComplete, use get_callers to trace downstream"
+
+# ❌ 过于宽泛
+"investigate the code"
+
+# ✅ Right altitude
+"Trace the complete lifecycle from trigger to final outcome — not just the middle steps."
+```
+
+**2. 用示例代替规则清单（Examples Over Rule Lists）**
+
+> "Teams will often stuff a laundry list of edge cases into a prompt... We do not recommend this. We recommend working to curate a set of diverse, canonical examples that effectively portray the expected behavior. For an LLM, examples are the 'pictures' worth a thousand words."
+
+3-5 个多样化的示例比长篇规则更有效。用 `<example>` 标签包裹示例以区分于指令。
+
+**3. 解释动机，而非仅下指令（Explain Why）**
+
+> "Claude is smart enough to generalize from the explanation."
+
+不说 "不要用省略号"，而说 "输出将被 TTS 引擎朗读，省略号无法正确发音"。模型能从动机推导出更多正确行为。
+
+**4. 正面表述优先（Positive Framing）**
+
+> "Tell Claude what to do instead of what not to do."
+
+不说 "Don't stop at the middle steps"，说 "Trace the complete lifecycle from trigger to final outcome."
+
+**5. 上下文优先于指令（Context Over Instructions）**
+
+提供工作区布局、项目文档、依赖关系等上下文，让模型自行判断路径。CORE_IDENTITY 中的 `{workspace_layout_section}` 和 `{project_docs_section}` 体现了这一原则。
+
+**6. 多 Agent 角色分工（Role Specialization）**
+
+每个 agent 有独特的调查视角。共享步骤指令会破坏并行价值。
+
+> **实践教训**：向共享的 `explorer_base.md` 添加 "start broad, follow domain model" 策略导致工作流评分从 60% → 25%，因为两个 agent 都走了相同的实现路径。
+
+**7. 工具集保持精简无歧义（Minimal, Unambiguous Tool Sets）**
+
+> "If a human engineer can't definitively say which tool should be used in a given situation, an AI agent can't be expected to do better."
+
+工具输出应 token-efficient，功能不重叠。
+
+**8. 新模型减少强制性语言（Dial Back for Newer Models）**
+
+> "If your prompts were designed to reduce undertriggering on tools, these models may now overtrigger. Where you might have said 'CRITICAL: You MUST use this tool when...', you can use more normal prompting like 'Use this tool when...'"
 
 ### 7.6 证据评估器（EvidenceEvaluator）
 
@@ -946,6 +1015,44 @@ POST /api/context/query/stream
 POST /api/code-tools/execute/grep
 { "workspace": "/path/to/repo", "params": {"pattern": "authenticate"} }
 ```
+
+### 7.8 本地模式工具派发（Option E）
+
+当用户在本地打开仓库（非 git-worktree 模式）时，工具调用由后端通过 WebSocket 转发给 Extension 执行。Extension 使用三级派发架构（`localToolDispatcher.ts`）：
+
+```
+backend AgentLoopService
+  → RemoteToolExecutor
+  → WebSocket tool_request → Extension _handleLocalToolRequest
+      ↓
+  localToolDispatcher.ts（全部原生 TypeScript，零 Python 依赖）
+      ├── Tier 1: SUBPROCESS (12) → child_process (rg/git)
+      │   grep, read_file, list_files, git_log, git_diff, git_blame,
+      │   git_show, find_tests, run_test, module_summary, ast_search
+      │
+      ├── Tier 2: AST (6) → web-tree-sitter WASM
+      │   file_outline, find_symbol, find_references,
+      │   get_callees, get_callers, expand_symbol
+      │   (treeSitterService.ts + astToolRunner.ts)
+      │
+      └── Tier 3: COMPLEX (6) → 原生 TypeScript
+          compressed_view, trace_variable, detect_patterns,
+          get_dependencies, get_dependents, test_outline
+          (complexToolRunner.ts)
+```
+
+**Fallback 链：** 每一级失败时自动降级到 legacy subprocess 实现。
+
+**全部原生 TypeScript：** .vsix 分发即用，用户无需安装 Python。
+
+**Grammar WASM 管理：**
+
+```bash
+make update-grammars          # 重新下载固定版本的 grammar 文件
+make update-grammars LATEST=1 # 拉取 GitHub 最新 release 版本
+```
+
+Grammar 文件已提交到 `extension/grammars/`，克隆仓库即可使用，无需手动下载。
 
 ---
 
@@ -1438,109 +1545,75 @@ async def _run_agent(self, agent: AgentConfig, ...):
 
 ---
 
-## 16. 代码评审评估系统 (eval/)
+## 16. 评估系统 (eval/)
 
-`eval/` 是独立的评估套件（通过 `.dockerignore` 排除在 Docker 镜像之外），用于衡量 `CodeReviewService` 的质量。
-
-### 16.1 原理
-
-在真实开源代码库中植入已知 bug（git patch），运行完整的代码评审管线，检查发现的结果是否匹配预期。
+`eval/` 是独立的三套评估套件（通过 `.dockerignore` 排除在 Docker 镜像之外）：
 
 ```
-eval/repos/requests/   ← requests v2.31.0 源码（无 .git）
-eval/cases/requests/
-  ├── cases.yaml       ← 12 个测试用例定义（含预期发现）
-  └── patches/         ← 12 个 .patch 文件（植入 bug 的补丁）
-      ├── 001-missing-timeout.patch
-      └── ... (11 more)
+eval/
+├── code_review/          代码评审质量（plants-bug 用例，12 个 requests 测试）
+├── agent_quality/        Agent Loop 答案质量（基线对比）
+└── tool_parity/          Python vs TypeScript 工具输出对比
 ```
 
-**12 个测试用例：**
-- 4 个简单：缺失超时、连接错误处理、编码问题、内容长度
-- 5 个中等：认证泄露、URL scheme 检查、cookie 线程安全、分块编码、代理认证
-- 3 个困难：重定向循环、SSL 绕过、hook 异常被吞
+详细文档见 `eval/README.md`。
 
-### 16.2 使用方法
+### 16.1 代码评审评估（code_review/）
+
+在真实开源代码库中植入已知 bug（git patch），运行完整的 `CodeReviewService` 管线，检查发现的结果是否匹配预期。
 
 ```bash
-cd eval
+cd backend
 
 # 运行全部 12 个用例
-python run.py --provider anthropic --model claude-sonnet-4-20250514
+python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
 
 # 只运行特定用例（快速验证）
-python run.py --filter "requests-001"
-
-# 不使用 LLM Judge（节省成本）
-python run.py --no-judge
+python ../eval/code_review/run.py --filter "requests-001" --no-judge
 
 # 保存当前结果为基线（下次对比用）
-python run.py --save-baseline
+python ../eval/code_review/run.py --save-baseline
 
 # 黄金标准：直接运行 Claude Code CLI（质量上限）
-python run.py --gold --save-baseline
-
-# 与黄金标准对比
-python run.py --compare-gold
+python ../eval/code_review/run.py --gold --gold-model opus --save-baseline
 ```
 
-### 16.3 评分维度
+**12 个测试用例：** 4 简单、5 中等、3 困难（基于 requests v2.31.0）。
 
-**确定性评分（scorer.py）：**
+**评分维度：** 召回率 (35%)、精确率 (20%)、严重程度准确性 (15%)、位置准确性 (10%)、修复建议 (10%)、上下文深度 (10%)。
 
-| 维度 | 权重 | 衡量什么 |
-|------|------|---------|
-| 召回率 | 35% | 植入的 bug 找到了几个 |
-| 精确率 | 20% | 发现的问题有多少是真正的 bug |
-| 严重程度准确性 | 15% | critical/warning/nit 标注是否正确 |
-| 位置准确性 | 10% | 文件 + 行号范围是否正确 |
-| 修复建议 | 10% | 建议的修复是否与预期吻合 |
-| 上下文深度 | 10% | 是否完成了跨文件探索 |
+### 16.2 Agent 质量评估（agent_quality/）
 
-**LLM Judge 评分（judge.py）：** 4 个维度，1-5 分：完整性、推理质量、可操作性、误报质量。
-
-### 16.4 添加新测试用例
+对 Agent Loop 的回答质量进行端到端测试，与基线答案对比：
 
 ```bash
-# 1. 在源码上制造 bug
-cp -r eval/repos/requests /tmp/work && cd /tmp/work
-git init && git add -A && git commit -m "base"
-# 编辑文件制造 bug...
-git diff > /path/to/eval/cases/requests/patches/013-my-bug.patch
+cd backend
 
-# 2. 在 cases.yaml 中定义预期
-cat >> eval/cases/requests/cases.yaml << 'EOF'
-- id: requests-013
-  patch: patches/013-my-bug.patch
-  difficulty: medium
-  title: "Missing connection timeout"
-  expected_findings:
-    - title_pattern: "timeout|deadline"
-      file_pattern: "adapters\\.py"
-      line_range: [100, 150]
-      severity: warning
-      requires_context:
-        - "requests/sessions.py"   # 验证是否探索了跨文件上下文
-EOF
+# 运行全部基线用例
+python ../eval/agent_quality/run.py
+
+# 运行特定用例
+python ../eval/agent_quality/run.py --case abound_render_approval
+
+# 对比直接 Agent vs Workflow（多 Agent）
+python ../eval/agent_quality/run.py --compare
 ```
 
-### 16.5 黄金标准基线
+基线文件在 `eval/agent_quality/baselines/*.json`，每个 JSON 定义 `workspace`、`question`、`required_findings`（含权重和匹配模式）。
 
-黄金标准直接运行 `claude` CLI（Claude Code），完全绕过我们的管线：
+### 16.3 工具一致性评估（tool_parity/）
 
-```python
-# gold_runner.py
-env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-# 去掉 API Key → Claude Code 使用月费订阅而非 API 额度
+对比 Python（tree-sitter）和 TypeScript（extension）实现的工具输出是否一致：
 
-process = subprocess.run(
-    ["claude", "-p", "--output-format", "stream-json",
-     "--dangerously-skip-permissions", prompt],
-    env=env, capture_output=True
-)
+```bash
+cd backend
+
+# 生成 Python 基线
+python ../eval/tool_parity/run.py --generate-baseline
+
+# 对比 TS 输出（需要 extension 运行）
+python ../eval/tool_parity/run.py --compare
 ```
-
-完整的调查轨迹（工具调用顺序、读取了哪些文件、grep 了哪些模式）保存在 `eval/gold_traces/`，可以分析 Claude Code 的探索策略，找出我们管线的不足之处。
 
 ---
 
@@ -1893,6 +1966,30 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 > 不需要 Postgres。所有持久化数据（审计日志、TODO、文件元数据）都在 DuckDB 文件中，随容器卷挂载即可。
+
+### 19.5 Docker 组件网络（本地开发）
+
+本地 Docker Compose 使用三个 compose 文件，共享同一个 `conductor-net` Docker 网络：
+
+```
+docker/docker-compose.data.yaml   → Postgres (conductor-postgres:5432)
+                                    Redis    (conductor-redis:6379)
+docker/docker-compose.app.yaml    → Backend  (使用容器名访问 data 层)
+docker/docker-compose.langfuse.yaml → Langfuse (使用容器名访问 Postgres)
+```
+
+**启动命令：**
+
+```bash
+make data-up       # 先启动 Postgres + Redis
+make langfuse-up   # 启动 Langfuse（共用同一个 Postgres）
+make app-up        # 启动后端（连接到同一个网络）
+
+# 或者一键启动全栈
+make docker-up
+```
+
+**注意（WSL2 场景）：** `host.docker.internal` 在某些 WSL2 配置下无法从容器内解析。所有 compose 文件已改为使用容器名（`conductor-postgres`、`conductor-redis`）代替 `host.docker.internal`，通过共享 `conductor-net` 网络互相通信。
 
 ### 19.5 健康检查与监控
 

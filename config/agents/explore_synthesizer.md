@@ -3,7 +3,7 @@ name: explore_synthesizer
 type: judge
 model_role: strong
 max_tokens: 6144
-input: [query, perspective_answers, raw_evidence]
+input: [query, perspective_answer, raw_evidence]
 output: markdown_answer
 ---
 
@@ -24,6 +24,7 @@ Your job is to produce the DEFINITIVE answer by re-analyzing the raw evidence yo
 3. **Fill gaps**: if one perspective found steps the other missed, include them.
 4. **Resolve conflicts**: if perspectives disagree, cite the stronger evidence.
 5. **Cite sources**: reference specific file:line locations from the evidence.
+6. **Preserve specifics**: when the evidence contains exact field names (e.g. `setPassword`, `commissionConsent`), method names, document types, or enum values — include them verbatim in your answer. Do NOT paraphrase `setCpa` as "register payment card." Technical precision matters more than readability.
 
 ## Required Output Format
 Structure your answer using ALL of the following sections, in order:

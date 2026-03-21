@@ -55,6 +55,17 @@ def _load_yaml(path: Optional[Path]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+class PostgresSecrets(BaseModel):
+    """Postgres credentials (from conductor.secrets.yaml)."""
+    user: str = "conductor"
+    password: str = "conductor"
+
+
+class RedisSecrets(BaseModel):
+    """Redis credentials (from conductor.secrets.yaml)."""
+    password: str = ""
+
+
 class DatabaseSecrets(BaseModel):
     url: Optional[str] = None
 
@@ -72,6 +83,8 @@ class LangfuseSecrets(BaseModel):
 
 class Secrets(BaseModel):
     database:  DatabaseSecrets  = Field(default_factory=DatabaseSecrets)
+    postgres:  PostgresSecrets  = Field(default_factory=PostgresSecrets)
+    redis:     RedisSecrets     = Field(default_factory=RedisSecrets)
     jwt:       JWTSecrets       = Field(default_factory=JWTSecrets)
     langfuse:  LangfuseSecrets  = Field(default_factory=LangfuseSecrets)
 
@@ -99,6 +112,33 @@ class DatabaseSettings(BaseModel):
     max_overflow:  int = 20
     pool_timeout:  int = 30
     echo_sql:      bool = False
+
+
+class PostgresSettings(BaseModel):
+    """PostgreSQL connection settings (async via asyncpg).
+
+    Credentials come from ``secrets.postgres`` in conductor.secrets.yaml.
+    The full URL is built at runtime by ``build_postgres_url()``.
+    Env var ``DATABASE_URL`` always takes priority over config.
+    """
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "conductor"
+    pool_size: int = 10
+    max_overflow: int = 20
+
+
+class RedisSettings(BaseModel):
+    """Redis connection settings.
+
+    Password comes from ``secrets.redis`` in conductor.secrets.yaml.
+    The full URL is built at runtime by ``build_redis_url()``.
+    Env var ``REDIS_URL`` always takes priority over config.
+    """
+    host: str = "localhost"
+    port: int = 6379
+    db: int = 0
+    prefix: str = "conductor:"
 
 
 class AuthSettings(BaseModel):
@@ -168,6 +208,8 @@ class CodeSearchSettings(BaseModel):
 class AppSettings(BaseModel):
     server:         ServerSettings       = Field(default_factory=ServerSettings)
     database:       DatabaseSettings     = Field(default_factory=DatabaseSettings)
+    postgres:       PostgresSettings     = Field(default_factory=PostgresSettings)
+    redis:          RedisSettings        = Field(default_factory=RedisSettings)
     auth:           AuthSettings         = Field(default_factory=AuthSettings)
     rooms:          RoomSettings         = Field(default_factory=RoomSettings)
     live_share:     LiveShareSettings    = Field(default_factory=LiveShareSettings)
@@ -176,6 +218,20 @@ class AppSettings(BaseModel):
     trace:          TraceSettings        = Field(default_factory=TraceSettings)
     langfuse:       LangfuseSettings     = Field(default_factory=LangfuseSettings)
     secrets:        Secrets              = Field(default_factory=Secrets)
+
+    def build_postgres_url(self) -> str:
+        """Build the full async Postgres URL from settings + secrets."""
+        pg = self.postgres
+        sec = self.secrets.postgres
+        return f"postgresql+asyncpg://{sec.user}:{sec.password}@{pg.host}:{pg.port}/{pg.database}"
+
+    def build_redis_url(self) -> str:
+        """Build the full Redis URL from settings + secrets."""
+        r = self.redis
+        sec = self.secrets.redis
+        if sec.password:
+            return f"redis://:{sec.password}@{r.host}:{r.port}/{r.db}"
+        return f"redis://{r.host}:{r.port}/{r.db}"
 
 
 # ---------------------------------------------------------------------------

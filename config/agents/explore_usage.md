@@ -10,7 +10,12 @@ input: [query, workspace_layout]
 output: perspective_answer
 ---
 
-## Perspective: Tests & External Interfaces
+## Perspective: User-Facing Behavior & Tests
 
-[PERSPECTIVE: Tests & External Interfaces]
-Focus on how this feature looks from the outside: E2E tests (Playwright, Cypress, Selenium specs), integration tests, API specs, frontend components, page routes, step wizards, and documentation. Tests describe the actual user-visible behavior and the end-to-end journey in order. Start by searching for test/spec files related to the topic.
+You are investigating how this feature looks from the user's perspective. Your goal is to trace the **complete user journey** — from first interaction to final outcome. Find:
+
+1. **The user-visible steps or states** — search for business-concept terms (e.g. "post.*approval", "journey", "customer.*step") in frontend components, page routes, E2E tests, and documentation. These reveal the actual user experience.
+2. **Tests that document behavior** — integration tests and E2E tests often describe the complete flow in the order a user would experience it.
+3. **API contracts** — controller endpoints, request/response schemas, and API specs that define what the client sees.
+
+Start by searching for the business concept broadly, then narrow to test/spec files and frontend code.

@@ -1,4 +1,4 @@
-"""Query classifier — categorizes user questions to select optimal search strategy.
+"""Query classifier — categorizes user questions for budget and tool selection.
 
 Two modes:
   * **Keyword matching** (default) — zero latency, no LLM cost.
@@ -7,8 +7,11 @@ Two modes:
 
 The classification result determines:
   * Which tools are included in the LLM tool set (dynamic tool selection)
-  * Strategy hint appended to the user message
-  * Token budget recommendation
+  * Token budget allocation
+  * Whether to delegate to specialized pipelines (code review, multi-agent)
+
+It does NOT inject search strategies or tool-call sequences — Claude decides
+its own investigation approach based on the question and available tools.
 """
 from __future__ import annotations
 
@@ -42,12 +45,18 @@ _CORE_TOOLS = [
 @dataclass
 class QueryClassification:
     query_type: str
-    strategy: str
-    initial_tools: List[str]
     budget_level: str                # "low" | "medium" | "high"
     suggested_token_budget: int
     tool_set: List[str]              # dynamic tool set for this query type
     diff_spec: Optional[str] = None  # extracted git ref spec for code_review
+
+    # Legacy fields — kept for backward compatibility, will be removed
+    strategy: str = ""
+    initial_tools: List[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.initial_tools is None:
+            self.initial_tools = []
 
     @property
     def is_high_level(self) -> bool:
@@ -56,9 +65,6 @@ class QueryClassification:
 
 QUERY_TYPES: Dict[str, dict] = {
     "entry_point_discovery": {
-        "description": "Find the entry point for a feature or endpoint",
-        "strategy": "grep routes/endpoints → find_symbol handler → compressed_view → trace inward",
-        "initial_tools": ["grep", "find_symbol"],
         "budget_level": "low",
         "suggested_token_budget": 200_000,
         "keywords": [
@@ -70,15 +76,13 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "business_flow_tracing": {
-        "description": "Trace a complete business process path",
-        "strategy": "find entry → compressed_view → get_callees → trace_variable → map complete flow",
-        "initial_tools": ["find_symbol", "get_callees", "trace_variable"],
         "budget_level": "medium",
         "suggested_token_budget": 400_000,
         "keywords": [
             "flow", "process", "trace", "how does", "what happens",
             "step by step", "lifecycle", "life cycle", "pipeline",
             "workflow", "journey", "sequence",
+            "what is", "how is", "explain",
         ],
         "tools": _CORE_TOOLS + [
             "module_summary", "get_callees", "get_callers",
@@ -87,9 +91,6 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "root_cause_analysis": {
-        "description": "Analyze the root cause of a bug or error",
-        "strategy": "grep error → find_references → get_callers → trace_variable → check git history",
-        "initial_tools": ["grep", "find_references", "get_callers"],
         "budget_level": "high",
         "suggested_token_budget": 500_000,
         "keywords": [
@@ -103,9 +104,6 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "impact_analysis": {
-        "description": "Assess the impact of modifying code",
-        "strategy": "find_references → get_dependents → find_tests → compressed_view affected files",
-        "initial_tools": ["get_dependents", "find_references", "find_tests"],
         "budget_level": "medium",
         "suggested_token_budget": 350_000,
         "keywords": [
@@ -119,9 +117,6 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "architecture_question": {
-        "description": "Understand overall architecture or module relationships",
-        "strategy": "module_summary top dirs → get_dependencies → compressed_view key files",
-        "initial_tools": ["list_files", "module_summary", "get_dependencies"],
         "budget_level": "medium",
         "suggested_token_budget": 300_000,
         "keywords": [
@@ -134,9 +129,6 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "config_analysis": {
-        "description": "Understand the impact of configuration settings",
-        "strategy": "grep config key → find_references → trace_variable → check consumers",
-        "initial_tools": ["grep", "find_references", "trace_variable"],
         "budget_level": "low",
         "suggested_token_budget": 200_000,
         "keywords": [
@@ -148,9 +140,6 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "data_lineage": {
-        "description": "Trace how data flows through the system",
-        "strategy": "find data source → trace_variable forward → find sinks → verify with read_file",
-        "initial_tools": ["trace_variable", "find_references", "grep"],
         "budget_level": "high",
         "suggested_token_budget": 450_000,
         "keywords": [
@@ -163,9 +152,6 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "code_review": {
-        "description": "Review code changes in a PR or diff",
-        "strategy": "git_diff_files → triage → git_diff per file → read context → check tests → summarize",
-        "initial_tools": ["git_diff_files", "git_diff", "read_file"],
         "budget_level": "high",
         "suggested_token_budget": 600_000,
         "keywords": [
@@ -181,9 +167,6 @@ QUERY_TYPES: Dict[str, dict] = {
         ],
     },
     "recent_changes": {
-        "description": "Understand recent commits, diffs, or change history",
-        "strategy": "git_log → git_show interesting commits → git_diff for details → read_file affected code",
-        "initial_tools": ["git_log", "git_diff", "git_show"],
         "budget_level": "low",
         "suggested_token_budget": 250_000,
         "keywords": [
@@ -259,8 +242,6 @@ def classify_query(question: str) -> QueryClassification:
         logger.info("PR pattern detected: ref='%s'", diff_ref)
         return QueryClassification(
             query_type="code_review",
-            strategy=spec["strategy"],
-            initial_tools=spec["initial_tools"],
             budget_level=spec["budget_level"],
             suggested_token_budget=spec["suggested_token_budget"],
             tool_set=spec["tools"],
@@ -280,8 +261,6 @@ def classify_query(question: str) -> QueryClassification:
     spec = QUERY_TYPES[best_type]
     return QueryClassification(
         query_type=best_type,
-        strategy=spec["strategy"],
-        initial_tools=spec["initial_tools"],
         budget_level=spec["budget_level"],
         suggested_token_budget=spec["suggested_token_budget"],
         tool_set=spec["tools"],
@@ -297,10 +276,14 @@ Classify this code question into exactly ONE category. Reply with ONLY the JSON 
 
 Categories:
 - entry_point_discovery: finding where a feature/endpoint is defined
-- business_flow_tracing: understanding a process/workflow/journey end-to-end
+- business_flow_tracing: understanding how a feature, domain concept, or process works in the codebase. \
+Includes "what is X?", "how does X work?", "explain X" when X is a business/domain concept (e.g. \
+"what is open banking?", "how does payment processing work?", "explain the loan approval flow")
 - root_cause_analysis: debugging errors, bugs, crashes
 - impact_analysis: assessing what breaks if code changes
-- architecture_question: understanding overall structure/design/modules
+- architecture_question: understanding overall codebase structure, module layout, or high-level design. \
+Only use this for questions about the project organization itself (e.g. "how is the codebase organized?", \
+"what are the main modules?"), NOT for questions about specific features or domain concepts
 - config_analysis: understanding configuration/settings usage
 - data_lineage: tracing how data flows through the system
 - code_review: reviewing code changes in a PR or diff (e.g. "review PR master...feature/xxx")
@@ -340,8 +323,6 @@ async def classify_query_with_llm(
                 diff_ref = _detect_pr_pattern(question) if query_type == "code_review" else None
                 return QueryClassification(
                     query_type=query_type,
-                    strategy=spec["strategy"],
-                    initial_tools=spec["initial_tools"],
                     budget_level=spec["budget_level"],
                     suggested_token_budget=spec["suggested_token_budget"],
                     tool_set=spec["tools"],

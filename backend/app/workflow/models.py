@@ -60,13 +60,6 @@ class AgentConfig(BaseModel):
     # Source file path (set by loader)
     source_path: Optional[str] = None
 
-    @property
-    def resolved_tools(self) -> List[str]:
-        """Return the full tool list. Core tools must be prepended by the loader
-        after reading the workflow's core_tools list."""
-        # This is a convenience — actual resolution happens in loader.py
-        return list(self.tools.extra)
-
 
 # ---------------------------------------------------------------------------
 # Classifier config
@@ -91,18 +84,10 @@ class ClassifierConfig(BaseModel):
     thresholds: Optional[ThresholdsConfig] = None  # risk_pattern only
 
 
-class LLMFallbackConfig(BaseModel):
-    """LLM fallback configuration for hybrid dispatch."""
-    enabled: bool = False
-    when: str = "active_agents <= 1"
-    model_role: str = "classifier"
-
-
 class DispatchConfig(BaseModel):
     """Dispatch strategy configuration."""
     mode: Literal["classifier", "llm", "hybrid"] = "classifier"
     classifier: ClassifierConfig
-    llm_fallback: Optional[LLMFallbackConfig] = None
 
 
 # ---------------------------------------------------------------------------

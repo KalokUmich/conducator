@@ -17,6 +17,9 @@ make run-backend    # start backend (dev mode, auto-reload)
 make test           # run all tests (backend + extension)
 make package        # compile and package extension as .vsix
 make langfuse-up    # start self-hosted Langfuse (port 3001)
+make update-grammars         # re-download tree-sitter .wasm grammars (pinned versions)
+make update-grammars LATEST=1  # download latest grammar releases
+make update-prompt-library   # download latest prompts.chat CSV (agent design reference)
 ```
 
 ### Backend (Python/FastAPI)
@@ -38,14 +41,20 @@ npm test
 # F5 in VS Code → "Run VS Code Extension" to debug
 ```
 
-### Eval (Code Review Quality)
+### Eval
 ```bash
-cd eval
-python run.py --provider anthropic --model claude-sonnet-4-20250514
-python run.py --filter "requests-001" --no-judge   # fast single case
-python run.py --save-baseline                       # save regression baseline
-python run.py --gold --gold-model opus --save-baseline  # gold-standard ceiling
-python run.py --provider anthropic --compare-gold   # compare vs gold
+cd backend
+
+# Code review quality (12 planted-bug cases)
+python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
+python ../eval/code_review/run.py --filter "requests-001" --no-judge
+
+# Agent answer quality (baseline comparison)
+python ../eval/agent_quality/run.py                  # direct agent
+python ../eval/agent_quality/run.py --compare        # direct vs workflow
+
+# Tool parity (Python vs TS)
+python ../eval/tool_parity/run.py --generate-baseline
 ```
 
 ## Architecture
@@ -85,6 +94,7 @@ backend/app/
 │   ├── schemas.py           # Pydantic models + TOOL_DEFINITIONS for LLM
 │   ├── tools.py             # Tool implementations
 │   ├── output_policy.py     # Per-tool truncation policies (budget-adaptive)
+│   ├── __main__.py          # Python CLI: python -m app.code_tools <tool> <ws> '<params>'
 │   └── router.py            # /api/code-tools/ endpoints
 ├── langextract/             # LangExtract + multi-vendor Bedrock integration
 ├── ai_provider/             # LLM provider abstraction (Bedrock, Direct, OpenAI)
@@ -101,7 +111,8 @@ config/
 ├── conductor.secrets.yaml   # Secrets (gitignored)
 ├── workflows/               # pr_review.yaml (parallel_all_matching), code_explorer.yaml (first_match)
 ├── agents/                  # 17 agent .md files (YAML frontmatter + Markdown body)
-└── prompts/                 # review_base.md, explorer_base.md (shared templates)
+├── prompts/                 # review_base.md, explorer_base.md (shared templates)
+└── prompt-library/          # prompts.chat CSV (1500+ role prompts, `make update-prompt-library`)
 
 tests/
 ├── conftest.py              # Centralized stubs (cocoindex, litellm, etc.)
@@ -123,7 +134,7 @@ tests/
 
 ```
 extension/src/
-├── extension.ts             # Entry point, command registration
+├── extension.ts             # Entry point, command registration, _handleLocalToolRequest
 ├── panels/                  # collabPanel.ts, workspacePanel.ts
 ├── services/
 │   ├── conductorStateMachine.ts   # FSM: Idle → ReadyToHost → Hosting → Joined
@@ -131,12 +142,40 @@ extension/src/
 │   ├── workflowPanel.ts           # Workflow visualization WebView (singleton)
 │   ├── workspaceClient.ts         # /workspace/ HTTP client
 │   ├── workspaceIndexer.ts        # AST symbol extraction
-│   └── conductorFileSystemProvider.ts  # conductor:// URI scheme
+│   ├── conductorFileSystemProvider.ts  # conductor:// URI scheme
+│   ├── localToolDispatcher.ts     # Three-tier tool dispatch (all native TS)
+│   ├── astToolRunner.ts           # 6 AST tools via web-tree-sitter
+│   ├── treeSitterService.ts       # web-tree-sitter WASM wrapper (8 languages)
+│   └── complexToolRunner.ts       # 6 complex tools (compressed_view, trace_variable, etc.)
 └── commands/index.ts
 
 extension/media/
 ├── chat.html      # Main WebView — @AI /ask /pr slash commands, Workflows tab
 └── workflow.html  # Workflow visualization — SVG graph + agent detail panel
+
+extension/grammars/          # tree-sitter .wasm grammar files (committed)
+├── tree-sitter.wasm         # web-tree-sitter runtime
+└── tree-sitter-{lang}.wasm  # Python, JS, TS, Java, Go, Rust, C, C++ (8 files)
+```
+
+### Local Mode Tool Dispatch
+
+When the agent runs in local workspace mode, tools are proxied via WebSocket to the extension. The extension runs ALL 24 tools natively — zero Python dependency:
+
+```
+RemoteToolExecutor → WebSocket → extension._handleLocalToolRequest
+  → localToolDispatcher.ts
+    ├── SUBPROCESS (12): grep, read_file, list_files, git_*, find_tests, run_test, module_summary, ast_search
+    ├── AST (6):         file_outline, find_symbol, find_references, get_callees, get_callers, expand_symbol
+    │                    → web-tree-sitter WASM (treeSitterService + astToolRunner)
+    └── COMPLEX (6):     compressed_view, trace_variable, detect_patterns, get_dependencies, get_dependents, test_outline
+                         → native TypeScript (complexToolRunner)
+```
+
+Grammar WASM files in `extension/grammars/` are committed to the repo. Update with:
+```bash
+make update-grammars          # pinned versions
+make update-grammars LATEST=1 # latest from GitHub
 ```
 
 ### Agentic Code Intelligence
@@ -153,6 +192,8 @@ Query → QueryClassifier (keyword or LLM) → 3-layer system prompt
 ```
 
 **24 code tools** (`code_tools/tools.py`): `grep`, `read_file`, `list_files`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`, `run_test`.
+
+Tools also accessible via `python -m app.code_tools <tool> <workspace> '<json_params>'` (used by extension local mode).
 
 ### Config-Driven Workflow Engine
 
@@ -251,9 +292,48 @@ ANTHROPIC_API_KEY=sk-ant-...     # or AWS_* for Bedrock, OPENAI_API_KEY for Open
 
 ## Eval System
 
-`eval/` — standalone quality measurement for `CodeReviewService`. 12 planted-bug cases against requests v2.31.0. Scoring: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%).
+Three eval suites under `eval/`. See `eval/README.md` for full docs.
 
-To add a new case: create a patch in `eval/cases/{repo}/patches/`, add entry to `cases.yaml` with `expected_findings` (pattern-based ground truth). See `eval/` for details.
+```
+eval/
+├── code_review/        12 planted-bug cases against requests v2.31.0
+├── agent_quality/      Agentic loop answer quality vs baselines
+└── tool_parity/        Python vs TS tool output comparison
+```
+
+- **Code review**: `eval/code_review/run.py` — scoring: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%)
+- **Agent quality**: `eval/agent_quality/run.py` — pattern-match answers against `required_findings` in baseline JSON
+- **Tool parity**: `eval/tool_parity/run.py` — diff Python vs TS tool outputs for the same inputs
+
+## Agent & Prompt Design Principles
+
+When creating or editing agent definitions (`config/agents/*.md`), system prompts (`prompts.py`), or workflow configs, follow these principles. Sources: [Anthropic Prompt Engineering](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/claude-4-best-practices), [Context Engineering for Agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents). We also maintain a local copy of [prompts.chat](https://github.com/f/prompts.chat) (1500+ prompts) at `config/prompt-library/` — primarily used as **example references** when designing new agent roles, not as direct templates.
+
+### Anthropic Core Principles
+
+1. **Right Altitude** — Not too vague ("investigate the code"), not too prescriptive ("call get_callers on the gate method"). Target: "Trace the complete lifecycle from trigger to final outcome."
+2. **Examples over rule lists** — 3-5 diverse examples teach behavior better than a laundry list of edge-case bullets. Wrap in `<example>` tags.
+3. **Explain why, not just what** — Claude generalizes from motivation. "Output will be read by TTS, so avoid ellipses" beats "never use ellipses."
+4. **Positive framing** — Say what to do, not what not to do.
+5. **Context over instructions** — Provide workspace layout, project docs, detected project roots. Let the model decide the investigation path.
+6. **Dial back aggressive language** — "Use this tool when..." not "CRITICAL: You MUST use this tool." Newer models overtrigger on forceful language.
+7. **Minimal tool guidance** — If a human can't definitively say which tool to use, don't prescribe it.
+
+### Multi-Agent Workflow Rules
+
+8. **Role specialization** — Each workflow agent has a distinct perspective. NEVER add shared investigation strategies to `explorer_base.md` — this destroys role separation (proven by eval: 60% → 25% regression).
+9. **Strategy = output format only** — Layer 2 strategies are for structured output templates (code_review). Don't inject investigation procedures for open-ended queries.
+
+### Agent `.md` File Design (informed by prompts.chat patterns)
+
+10. **One clear role sentence** — Open with what the agent IS and what it traces. prompts.chat's "I want you to act as..." pattern works because it's unambiguous. Our equivalent: "You are investigating from the [perspective] side. Your goal is to trace [scope]."
+11. **Goal, not procedure** — Define WHAT to find (domain models, service implementations, completion effects), not HOW to find it (don't say "first grep, then read_file, then get_callers").
+12. **Short** — Agent instructions should be 50-150 words. prompts.chat averages 80 words. If you need more, you're probably being too prescriptive.
+13. **Consult the prompt library** — Before writing a new agent role, search `config/prompt-library/prompts.csv` for similar roles. Study how they define constraints and scope. Use `for_devs=TRUE` filter for developer-focused prompts.
+
+### Validation
+
+14. **Test with eval** — Any prompt change must be validated with `eval/agent_quality/run.py`. Check both direct agent AND workflow mode — changes that help one can break the other.
 
 ## What's Next
 

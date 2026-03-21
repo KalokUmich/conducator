@@ -12,6 +12,7 @@ AgentLoopService (explorers) and provider.call_model() (judges).
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -70,10 +71,15 @@ class WorkflowEngine:
         provider: AIProvider,
         explorer_provider: Optional[AIProvider] = None,
         trace_writer=None,
+        tool_executor=None,
+        classifier_provider: Optional[AIProvider] = None,
     ) -> None:
         self._provider = provider
         self._explorer_provider = explorer_provider or provider
         self._trace_writer = trace_writer
+        self._tool_executor = tool_executor
+        self._classifier_provider = classifier_provider
+        self._event_queue: Optional[asyncio.Queue] = None
 
     # -----------------------------------------------------------------
     # Public API
@@ -108,6 +114,10 @@ class WorkflowEngine:
 
         This is the primary execution method. ``run()`` is a convenience
         wrapper that discards events.
+
+        Agent-level events (thinking, tool_call, tool_result) are collected
+        via an internal queue and yielded alongside workflow-level events,
+        enabling real-time UI updates during agent execution.
         """
         start_time = time.monotonic()
         logger.info("Starting workflow '%s' (route_mode=%s)", workflow.name, workflow.route_mode)
@@ -116,9 +126,30 @@ class WorkflowEngine:
             tags=[workflow.name],
         )
 
-        # Step 1: Classify
-        engine = ClassifierEngine(workflow)
-        classify_result = engine.classify(context)
+        # Set up event queue for agent-level streaming
+        self._event_queue = asyncio.Queue()
+
+        # Step 1: Classify — LLM first, keyword fallback
+        keyword_engine = ClassifierEngine(workflow)
+        classify_result = keyword_engine.classify(context)
+        keyword_route = classify_result.best_route
+        keyword_score = max(classify_result.raw_scores.values()) if classify_result.raw_scores else 0
+
+        # If keyword match is weak and LLM classifier is available, upgrade
+        if keyword_score <= 1 and self._classifier_provider is not None:
+            try:
+                from app.agent_loop.query_classifier import classify_query_with_llm
+                query_text = context.get("query_text") or context.get("query", "")
+                llm_result = await classify_query_with_llm(query_text, self._classifier_provider)
+                if llm_result.query_type and llm_result.query_type in workflow.routes:
+                    classify_result.best_route = llm_result.query_type
+                    logger.info(
+                        "LLM classifier override: keyword=%s(score=%s) → llm=%s",
+                        keyword_route, keyword_score, llm_result.query_type,
+                    )
+            except Exception as exc:
+                logger.warning("LLM classifier failed, using keyword result: %s", exc)
+
         context["_classify_result"] = classify_result
 
         yield WorkflowEvent("classify", {
@@ -126,14 +157,29 @@ class WorkflowEngine:
             "result": classify_result.model_dump(),
         })
 
-        # Step 2: Route and execute
-        if workflow.route_mode == "first_match":
-            async for event in self._run_first_match(workflow, classify_result, context):
-                yield event
+        # Step 2: Route and execute — run in background task so we can
+        # drain the event queue while agents are working
+        async def _execute():
+            if workflow.route_mode == "first_match":
+                async for event in self._run_first_match(workflow, classify_result, context):
+                    await self._event_queue.put(event)
+            elif workflow.route_mode == "parallel_all_matching":
+                async for event in self._run_parallel_all_matching(workflow, classify_result, context):
+                    await self._event_queue.put(event)
+            # Sentinel to signal completion
+            await self._event_queue.put(None)
 
-        elif workflow.route_mode == "parallel_all_matching":
-            async for event in self._run_parallel_all_matching(workflow, classify_result, context):
-                yield event
+        task = asyncio.create_task(_execute())
+
+        # Drain the event queue, yielding events as they arrive
+        while True:
+            event = await self._event_queue.get()
+            if event is None:
+                break
+            yield event
+
+        # Ensure the task completes (propagate exceptions)
+        await task
 
         duration_ms = (time.monotonic() - start_time) * 1000
         context["_duration_ms"] = duration_ms
@@ -142,6 +188,8 @@ class WorkflowEngine:
             "workflow": workflow.name,
             "duration_ms": duration_ms,
         })
+
+        self._event_queue = None
 
     # -----------------------------------------------------------------
     # first_match mode (Code Explorer)
@@ -154,6 +202,10 @@ class WorkflowEngine:
         context: Dict[str, Any],
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Execute the best-matching route's pipeline."""
+        if not workflow.routes:
+            logger.error("Workflow '%s' has no routes", workflow.name)
+            return
+
         route_name = classify_result.best_route
         if not route_name or route_name not in workflow.routes:
             logger.warning("No matching route found, using first route")
@@ -232,7 +284,13 @@ class WorkflowEngine:
 
         async def _run_one_route(rname: str) -> None:
             route = workflow.routes[rname]
-            route_ctx = dict(context)  # shallow copy for isolation
+            # Deep copy for proper isolation — shared mutables (like lists/dicts)
+            # in context could be corrupted by concurrent routes.
+            # Preserve _llm_semaphore (asyncio.Semaphore cannot be deepcopied).
+            semaphore = context.get("_llm_semaphore")
+            route_ctx = copy.deepcopy(context)
+            if semaphore is not None:
+                route_ctx["_llm_semaphore"] = semaphore
             route_ctx["_route_name"] = rname
             async for event in self._run_pipeline(
                 route.pipeline, workflow, route_ctx, f"route:{rname}",
@@ -296,6 +354,9 @@ class WorkflowEngine:
                     self._run_agent(agent, workflow, context)
                     for agent in agents
                 ])
+                for agent, result in zip(agents, results):
+                    if result.get("error"):
+                        logger.warning("Agent '%s' failed: %s", agent.name, result["error"])
                 stage_results[stage.stage] = dict(zip(
                     [a.name for a in agents], results,
                 ))
@@ -303,6 +364,8 @@ class WorkflowEngine:
                 # Sequential agent dispatch
                 for agent in agents:
                     result = await self._run_agent(agent, workflow, context)
+                    if result.get("error"):
+                        logger.warning("Agent '%s' failed: %s", agent.name, result["error"])
                     stage_results[stage.stage] = {agent.name: result}
 
             yield WorkflowEvent("stage_complete", {
@@ -373,24 +436,63 @@ class WorkflowEngine:
         # Resolve tools
         tool_defs = filter_tools(agent.tools.extra) if agent.tools.extra else None
 
-        # Create and run agent loop
+        # Pass the workflow route name so the agent uses the correct classification
+        # (e.g. "business_flow_tracing") instead of re-classifying independently.
+        route_name = context.get("_active_route") or context.get("_route_name", "")
+
+        # Create and run agent loop — use run_stream to collect events for UI.
+        # NOTE: workflow_config takes priority over _is_sub_agent
+        # in service.py classification logic. When both are set,
+        # _is_sub_agent wins (checked first), bypassing the
+        # workflow-driven classification. So we only set _is_sub_agent
+        # when there's NO workflow route to use.
+        use_workflow_classification = bool(route_name)
         svc = AgentLoopService(
             provider=provider,
             max_iterations=max_iterations,
             budget_config=budget_config,
             trace_writer=self._trace_writer,
-            _skip_review_delegation=True,
+            _is_sub_agent=not use_workflow_classification,
             llm_semaphore=context.get("_llm_semaphore"),
+            tool_executor=self._tool_executor,
+            workflow_config=agent if use_workflow_classification else None,
+            workflow_route_name=route_name,
         )
 
-        result: AgentResult = await svc.run(
+        # Collect agent events for streaming to UI
+        collected_events: list = []
+        result: Optional[AgentResult] = None
+
+        async for event in svc.run_stream(
             query=query,
             workspace_path=workspace_path,
-        )
+        ):
+            collected_events.append(event)
+            if event.kind == "done":
+                result = AgentResult(
+                    answer=event.data.get("answer", ""),
+                    context_chunks=event.data.get("context_chunks", []),
+                    thinking_steps=event.data.get("thinking_steps", []),
+                    tool_calls_made=event.data.get("tool_calls_made", 0),
+                    iterations=event.data.get("iterations", 0),
+                    duration_ms=event.data.get("duration_ms", 0),
+                    budget_summary=event.data.get("budget_summary"),
+                )
+
+        # Push events to the engine's event queue if available (for streaming)
+        if self._event_queue is not None:
+            for evt in collected_events:
+                await self._event_queue.put(
+                    WorkflowEvent(evt.kind, {"agent": agent.name, **evt.data})
+                )
+
+        if result is None:
+            return {"answer": "", "error": "Agent produced no result", "context_chunks": []}
 
         return {
             "answer": result.answer,
             "context_chunks": result.context_chunks,
+            "thinking_steps": result.thinking_steps,
             "tool_calls_made": result.tool_calls_made,
             "iterations": result.iterations,
             "tokens_input": result.budget_summary.get("total_input_tokens", 0) if result.budget_summary else 0,
@@ -414,12 +516,13 @@ class WorkflowEngine:
 
         try:
             loop = asyncio.get_event_loop()
+            # prompt already includes agent.instructions + evidence,
+            # so we don't also pass instructions as system to avoid duplication.
             response = await loop.run_in_executor(
                 None,
                 lambda: provider.call_model(
                     prompt=prompt,
                     max_tokens=max_tokens,
-                    system=agent.instructions if agent.type == "judge" else None,
                 ),
             )
             return {
@@ -454,19 +557,20 @@ class WorkflowEngine:
     ) -> str:
         """Build the full query string for an explorer agent.
 
-        Composes: shared prompt template + agent instructions + runtime context.
+        Composes: user's original question + agent-specific instructions.
         """
-        # For now, return agent instructions as the query.
-        # The full template composition (with {agent_instructions}, {diff_spec}, etc.)
-        # will be done in A.5 when we integrate with the existing prompt building code.
-        instructions = agent.instructions
+        parts = []
 
-        # If there's a query in context, prepend it
+        # 1. User's original question
         query = context.get("query", "")
         if query:
-            return f"{query}\n\n{instructions}" if instructions else query
+            parts.append(query)
 
-        return instructions or "Review the code changes."
+        # 2. Agent-specific instructions (from .md file)
+        if agent.instructions:
+            parts.append(f"\n## Your Role\n\n{agent.instructions}")
+
+        return "\n\n".join(parts) if parts else "Review the code changes."
 
     def _build_judge_prompt(
         self,
@@ -475,9 +579,91 @@ class WorkflowEngine:
     ) -> str:
         """Build the prompt for a judge agent from context data.
 
-        The actual prompt assembly (injecting findings JSON, diff snippets, etc.)
-        will be done in A.5 when we integrate with existing code in service.py.
+        Assembles the agent's instructions (markdown template) with actual
+        evidence collected by previous stages. The agent's ``input`` field
+        declares which context keys it expects (e.g. query, perspective_answers,
+        raw_evidence, findings).
         """
-        # For now, return a placeholder. The real implementation injects
-        # findings_json, diff_snippets, pr_context etc. from context.
-        return agent.instructions or ""
+        parts: list[str] = []
+
+        # 1. Agent instructions (the markdown template)
+        if agent.instructions:
+            parts.append(agent.instructions)
+
+        # 2. The original query
+        query = context.get("query") or context.get("query_text") or ""
+        if query:
+            parts.append(f"\n## Question\n\n{query}")
+
+        # 3. Inject evidence from previous stages
+        stage_results = context.get("_stage_results", {})
+
+        # Collect perspective answers and raw evidence from explore/investigate stages
+        perspective_answers: list[str] = []
+        raw_evidence: list[str] = []
+
+        for stage_name, agents_dict in stage_results.items():
+            if stage_name in ("synthesize", "arbitrate"):
+                continue  # skip synthesis stages
+            if not isinstance(agents_dict, dict):
+                continue
+            for agent_name, result in agents_dict.items():
+                if not isinstance(result, dict):
+                    continue
+                answer = result.get("answer", "")
+                if answer:
+                    perspective_answers.append(
+                        f"### Agent: {agent_name}\n\n{answer}"
+                    )
+                # Collect context_chunks as raw evidence
+                chunks = result.get("context_chunks", [])
+                for chunk in chunks:
+                    if hasattr(chunk, 'file_path'):
+                        raw_evidence.append(
+                            f"**{chunk.file_path}:{chunk.start_line}-{chunk.end_line}**\n```\n{chunk.content}\n```"
+                        )
+                    elif isinstance(chunk, dict) and "file_path" in chunk:
+                        raw_evidence.append(
+                            f"**{chunk['file_path']}:{chunk.get('start_line', '?')}-{chunk.get('end_line', '?')}**\n```\n{chunk.get('content', '')}\n```"
+                        )
+
+        if perspective_answers:
+            parts.append("\n## Perspective Answers\n")
+            parts.append("\n\n---\n\n".join(perspective_answers))
+
+        if raw_evidence:
+            parts.append("\n## Raw Evidence\n")
+            # Limit to avoid token explosion
+            parts.append("\n\n".join(raw_evidence[:30]))
+            if len(raw_evidence) > 30:
+                parts.append(f"\n... and {len(raw_evidence) - 30} more evidence blocks")
+
+        # For PR review: collect findings from route results
+        route_results = context.get("_route_results", {})
+        if route_results:
+            findings_parts = []
+            for route_name, stages in route_results.items():
+                if not isinstance(stages, dict):
+                    continue
+                for stage_name, agents_dict in stages.items():
+                    if not isinstance(agents_dict, dict):
+                        continue
+                    for agent_name, result in agents_dict.items():
+                        if isinstance(result, dict) and result.get("answer"):
+                            findings_parts.append(f"### {agent_name}\n\n{result['answer']}")
+            if findings_parts:
+                parts.append("\n## Review Findings\n")
+                parts.append("\n\n---\n\n".join(findings_parts))
+
+        # Inject diff_snippets if available
+        diff_snippets = context.get("diff_snippets", "")
+        if diff_snippets:
+            parts.append(f"\n## Code Diff\n\n```diff\n{diff_snippets}\n```")
+
+        # Inject other PR context
+        for key in ("pr_context", "risk_profile"):
+            value = context.get(key)
+            if value:
+                parts.append(f"\n## {key.replace('_', ' ').title()}\n\n{value}")
+
+        return "\n\n".join(parts)

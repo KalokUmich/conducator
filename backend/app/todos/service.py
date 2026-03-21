@@ -1,62 +1,44 @@
-"""TODOService — DuckDB-backed room-scoped task tracking."""
+"""TODOService — async PostgreSQL-backed room-scoped task tracking."""
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
+
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from ..db.models import Todo
 
 logger = logging.getLogger(__name__)
 
-_CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS todos (
-    id          VARCHAR PRIMARY KEY,
-    room_id     VARCHAR NOT NULL,
-    title       VARCHAR NOT NULL,
-    description VARCHAR,
-    type        VARCHAR NOT NULL DEFAULT 'task',
-    priority    VARCHAR NOT NULL DEFAULT 'medium',
-    status      VARCHAR NOT NULL DEFAULT 'open',
-    file_path   VARCHAR,
-    line_number INTEGER,
-    created_by  VARCHAR NOT NULL DEFAULT '',
-    assignee    VARCHAR,
-    created_at  TIMESTAMP NOT NULL,
-    source      VARCHAR NOT NULL DEFAULT 'manual',
-    source_id   VARCHAR
-)
-"""
-
-_INDEX = "CREATE INDEX IF NOT EXISTS idx_todos_room ON todos(room_id)"
-
 
 class TODOService:
-    """Singleton service for managing room-scoped TODOs in DuckDB.
+    """Service for managing room-scoped TODOs in PostgreSQL.
 
-    All writes are synchronous (DuckDB is embedded and very fast for this
-    volume of data).
+    Accepts an ``AsyncEngine`` at construction time instead of managing
+    its own database connection.
     """
 
     _instance: Optional["TODOService"] = None
-    _default_db_path: str = "todos.duckdb"
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        import duckdb
-        self._db_path = db_path or self._default_db_path
-        self._conn = duckdb.connect(self._db_path)
-        self._conn.execute(_CREATE_TABLE)
-        self._conn.execute(_INDEX)
-        logger.info("[TODOService] Initialized with db=%s", self._db_path)
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+        self._session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        logger.info("[TODOService] Initialized with async engine")
 
     @classmethod
-    def get_instance(cls, db_path: Optional[str] = None) -> "TODOService":
+    def get_instance(cls, engine: Optional[AsyncEngine] = None) -> "TODOService":
         if cls._instance is None:
-            cls._instance = cls(db_path)
+            if engine is None:
+                raise RuntimeError("TODOService requires an AsyncEngine on first call")
+            cls._instance = cls(engine)
         return cls._instance
 
     # -----------------------------------------------------------------------
     # CRUD
     # -----------------------------------------------------------------------
 
-    def create(
+    async def create(
         self,
         room_id: str,
         title: str,
@@ -71,78 +53,97 @@ class TODOService:
         source_id: Optional[str] = None,
     ) -> dict:
         todo_id = str(uuid.uuid4())
-        now = datetime.utcnow()
-        self._conn.execute(
-            """
-            INSERT INTO todos
-              (id, room_id, title, description, type, priority, status,
-               file_path, line_number, created_by, assignee, created_at,
-               source, source_id)
-            VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                todo_id, room_id, title, description, type_, priority,
-                file_path, line_number, created_by, assignee, now,
-                source, source_id,
-            ],
+        now = datetime.now(timezone.utc)
+        todo = Todo(
+            id=todo_id,
+            room_id=room_id,
+            title=title,
+            description=description,
+            type=type_,
+            priority=priority,
+            status="open",
+            file_path=file_path,
+            line_number=line_number,
+            created_by=created_by,
+            assignee=assignee,
+            created_at=now,
+            source=source,
+            source_id=source_id,
         )
-        return self._row_to_dict(self._conn.execute(
-            "SELECT * FROM todos WHERE id = ?", [todo_id]
-        ).fetchone())
+        async with self._session_factory() as session:
+            session.add(todo)
+            await session.commit()
+            await session.refresh(todo)
+            return self._row_to_dict(todo)
 
-    def list_by_room(self, room_id: str) -> List[dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM todos WHERE room_id = ? ORDER BY created_at ASC",
-            [room_id],
-        ).fetchall()
-        return [self._row_to_dict(r) for r in rows]
+    async def list_by_room(self, room_id: str) -> List[dict]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Todo)
+                .where(Todo.room_id == room_id)
+                .order_by(Todo.created_at.asc())
+            )
+            return [self._row_to_dict(r) for r in result.scalars().all()]
 
-    def update(self, todo_id: str, **kwargs) -> Optional[dict]:
+    async def update(self, todo_id: str, **kwargs) -> Optional[dict]:
         allowed = {
             "title", "description", "priority", "status",
             "file_path", "line_number", "assignee",
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
         if not fields:
-            return self.get(todo_id)
+            return await self.get(todo_id)
 
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [todo_id]
-        self._conn.execute(
-            f"UPDATE todos SET {set_clause} WHERE id = ?", values
-        )
-        return self.get(todo_id)
+        async with self._session_factory() as session:
+            await session.execute(
+                update(Todo).where(Todo.id == todo_id).values(**fields)
+            )
+            await session.commit()
+        return await self.get(todo_id)
 
-    def get(self, todo_id: str) -> Optional[dict]:
-        row = self._conn.execute(
-            "SELECT * FROM todos WHERE id = ?", [todo_id]
-        ).fetchone()
-        return self._row_to_dict(row) if row else None
+    async def get(self, todo_id: str) -> Optional[dict]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Todo).where(Todo.id == todo_id)
+            )
+            row = result.scalar_one_or_none()
+            return self._row_to_dict(row) if row else None
 
-    def delete(self, todo_id: str) -> bool:
-        result = self._conn.execute(
-            "DELETE FROM todos WHERE id = ? RETURNING id", [todo_id]
-        ).fetchone()
-        return result is not None
+    async def delete(self, todo_id: str) -> bool:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                delete(Todo).where(Todo.id == todo_id)
+            )
+            await session.commit()
+            return result.rowcount > 0
 
-    def delete_by_room(self, room_id: str) -> int:
-        result = self._conn.execute(
-            "DELETE FROM todos WHERE room_id = ? RETURNING id", [room_id]
-        ).fetchall()
-        return len(result)
+    async def delete_by_room(self, room_id: str) -> int:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                delete(Todo).where(Todo.room_id == room_id)
+            )
+            await session.commit()
+            return result.rowcount
 
     # -----------------------------------------------------------------------
     # Internal
     # -----------------------------------------------------------------------
 
-    _COLUMNS = [
-        "id", "room_id", "title", "description", "type", "priority", "status",
-        "file_path", "line_number", "created_by", "assignee", "created_at",
-        "source", "source_id",
-    ]
-
-    def _row_to_dict(self, row) -> dict:
-        d = dict(zip(self._COLUMNS, row))
-        if isinstance(d.get("created_at"), datetime):
-            d["created_at"] = d["created_at"].isoformat()
-        return d
+    @staticmethod
+    def _row_to_dict(row: Todo) -> dict:
+        return {
+            "id": row.id,
+            "room_id": row.room_id,
+            "title": row.title,
+            "description": row.description,
+            "type": row.type,
+            "priority": row.priority,
+            "status": row.status,
+            "file_path": row.file_path,
+            "line_number": row.line_number,
+            "created_by": row.created_by,
+            "assignee": row.assignee,
+            "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else str(row.created_at),
+            "source": row.source,
+            "source_id": row.source_id,
+        }

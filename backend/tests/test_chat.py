@@ -33,14 +33,13 @@ def receive_history(ws):
 
 @pytest.fixture(autouse=True)
 def reset_audit_service():
-    """Use an in-memory AuditLogService for each test.
+    """Reset AuditLogService singleton for each test.
 
-    Prevents the disconnect handler's delete_room_logs() call from opening
-    the file-based audit_logs.duckdb, which can block if the backend server
-    is running concurrently (DuckDB file lock contention).
+    The service is now async (requires an AsyncEngine). During sync tests
+    that trigger disconnect handlers, calls to delete_room_logs will
+    gracefully fail since no engine is set — which is acceptable in tests.
     """
     AuditLogService.reset_instance()
-    AuditLogService.get_instance(db_path=":memory:")
     yield
     AuditLogService.reset_instance()
 
@@ -49,10 +48,21 @@ def reset_audit_service():
 def cleanup_rooms():
     """Clean up rooms after each test to avoid interference."""
     yield
-    # Clear all rooms after test
+    # Clear all rooms after test (sync cleanup of in-memory state only)
     rooms_to_clear = list(manager.active_connections.keys()) + list(manager.message_history.keys())
     for room_id in set(rooms_to_clear):
-        manager.clear_room(room_id)
+        manager.active_connections.pop(room_id, None)
+        manager.message_history.pop(room_id, None)
+        manager.room_users.pop(room_id, None)
+        manager.guest_counters.pop(room_id, None)
+        manager.seen_message_ids.pop(room_id, None)
+        manager.message_read_by.pop(room_id, None)
+        manager.room_hosts.pop(room_id, None)
+        manager.room_leads.pop(room_id, None)
+        manager.room_sso_hosts.pop(room_id, None)
+        manager.room_settings.pop(room_id, None)
+    # Clean websocket-to-user
+    manager.websocket_to_user.clear()
 
 
 def test_websocket_chat_two_clients_same_room():

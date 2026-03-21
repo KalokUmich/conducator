@@ -82,6 +82,12 @@ logs/
 # conductor.secrets.yaml contains API keys - MUST be gitignored
 config/conductor.secrets.yaml
 conductor.secrets.yaml
+# Docker env file with database credentials
+docker/.env
+# Tool comparison generated outputs
+eval/tool_baseline.json
+eval/tool_lsp_results.json
+tool_lsp_results.json
 # Legacy config file (replaced by separate secrets/settings files)
 config/conductor.yaml
 conductor.yaml

@@ -18,30 +18,15 @@ def _service() -> TODOService:
 
 @router.get("/{room_id}")
 async def list_todos(room_id: str) -> JSONResponse:
-    """List all TODOs for a room, ordered by creation time.
-
-    Args:
-        room_id: The room to list TODOs for.
-
-    Returns:
-        JSON array of TODO objects.
-    """
-    todos = _service().list_by_room(room_id)
+    """List all TODOs for a room, ordered by creation time."""
+    todos = await _service().list_by_room(room_id)
     return JSONResponse(todos)
 
 
 @router.post("/{room_id}", status_code=201)
 async def create_todo(room_id: str, body: TodoCreate) -> JSONResponse:
-    """Create a new TODO in a room.
-
-    Args:
-        room_id: Target room.
-        body: TODO creation payload.
-
-    Returns:
-        The created TODO object (201 Created).
-    """
-    todo = _service().create(
+    """Create a new TODO in a room."""
+    todo = await _service().create(
         room_id=room_id,
         title=body.title,
         description=body.description,
@@ -60,17 +45,8 @@ async def create_todo(room_id: str, body: TodoCreate) -> JSONResponse:
 
 @router.put("/{room_id}/{todo_id}")
 async def update_todo(room_id: str, todo_id: str, body: TodoUpdate) -> JSONResponse:
-    """Update a TODO's fields.
-
-    Args:
-        room_id: Room the TODO belongs to (used for security logging only).
-        todo_id: The TODO to update.
-        body: Fields to update (all optional).
-
-    Returns:
-        The updated TODO object, or 404 if not found.
-    """
-    updated = _service().update(
+    """Update a TODO's fields."""
+    updated = await _service().update(
         todo_id,
         title=body.title,
         description=body.description,
@@ -88,16 +64,8 @@ async def update_todo(room_id: str, todo_id: str, body: TodoUpdate) -> JSONRespo
 
 @router.delete("/{room_id}/{todo_id}", status_code=204)
 async def delete_todo(room_id: str, todo_id: str) -> JSONResponse:
-    """Delete a TODO.
-
-    Args:
-        room_id: Room the TODO belongs to (used for logging).
-        todo_id: The TODO to delete.
-
-    Returns:
-        204 No Content on success, 404 if not found.
-    """
-    deleted = _service().delete(todo_id)
+    """Delete a TODO."""
+    deleted = await _service().delete(todo_id)
     if not deleted:
         return JSONResponse({"error": "TODO not found"}, status_code=404)
     logger.info("[todos] Deleted %s from room %s", todo_id, room_id)

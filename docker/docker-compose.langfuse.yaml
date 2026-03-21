@@ -1,52 +1,41 @@
 # Langfuse Self-Hosted Stack for Conductor
 # ==========================================
+# Requires data tier to be running first:
+#   make data-up
+#
+# Langfuse connects to the shared Postgres in the data tier
+# (database: langfuse, created by docker/init-db.sql).
+#
 # Usage:
 #   docker compose -f docker/docker-compose.langfuse.yaml up -d
-#   Open http://localhost:3001 to access Langfuse UI
-#   Create a project, copy the API keys into config/conductor.secrets.yaml
-#
-# Or use Makefile shortcuts:
 #   make langfuse-up
 #   make langfuse-down
 #   make langfuse-logs
 
 services:
-  langfuse-db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: langfuse
-      POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: langfuse-local
-    volumes:
-      - langfuse-db-data:/var/lib/postgresql/data
-    ports:
-      - "5433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langfuse"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   langfuse:
     image: langfuse/langfuse:2
+    container_name: conductor-langfuse
     restart: unless-stopped
-    depends_on:
-      langfuse-db:
-        condition: service_healthy
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql://langfuse:langfuse-local@langfuse-db:5432/langfuse
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@conductor-postgres:5432/langfuse
       NEXTAUTH_SECRET: conductor-langfuse-dev-secret
       NEXTAUTH_URL: http://localhost:3001
       SALT: conductor-langfuse-dev-salt
       TELEMETRY_ENABLED: "false"
+      HOSTNAME: "0.0.0.0"
     ports:
       - "3001:3000"
+    networks:
+      - conductor
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/public/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/public/health"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-volumes:
-  langfuse-db-data:
+networks:
+  conductor:
+    external: true
+    name: conductor-net

@@ -3,3 +3,6 @@ out
 *.vsix
 .vscode-test
 
+# tree-sitter grammar binaries are committed as project files
+# (no need to re-download on clone)
+

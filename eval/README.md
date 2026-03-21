@@ -1,149 +1,126 @@
-# Code Review Eval System
+# Eval System
 
-Integration test / eval system for `CodeReviewService` that measures review quality against known bugs planted in real open-source repos.
-
-## Architecture
+Three independent evaluation suites for measuring Conductor quality.
 
 ```
 eval/
-├── run.py              # CLI entrypoint
-├── runner.py           # Workspace setup + CodeReviewService execution
-├── scorer.py           # Deterministic scoring (recall, precision, etc.)
-├── judge.py            # LLM-as-Judge qualitative evaluation
-├── report.py           # Report generation + baseline comparison
-├── repos.yaml          # Repo manifest
-├── repos/              # Plain source trees (no .git)
-│   └── requests/       # requests v2.31.0 source
-├── cases/
-│   └── requests/
-│       ├── cases.yaml  # 12 case definitions with ground truth
-│       └── patches/    # 12 .patch files
-└── baselines/          # Timestamped JSON baselines for regression detection
+├── code_review/          Code Review pipeline quality (planted-bug cases)
+├── agent_quality/        Agentic loop answer quality (baseline comparison)
+└── tool_parity/          Python vs TS tool output comparison
 ```
 
-## How It Works
+---
 
-1. **Runner** copies a clean source tree to a temp dir, initializes git, applies a patch (planting a bug), and commits
-2. **CodeReviewService.review()** runs against `HEAD~1..HEAD` — the full multi-agent pipeline
-3. **Scorer** matches findings against ground truth using regex pattern matching on title, file, line range, severity, and category
-4. **Judge** (optional) uses an LLM to qualitatively evaluate completeness, reasoning, actionability, and false positive quality
-5. **Report** compares against the latest baseline and flags regressions (>10% composite drop)
+## 1. Code Review Eval (`code_review/`)
 
-## CLI Usage
+Measures `CodeReviewService` quality against 12 planted-bug cases in `requests` v2.31.0.
 
 ```bash
-# Run all cases
-python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
+cd backend
 
-# Run a single case
-python eval/run.py --filter "requests-001"
+# Run all 12 cases
+python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
 
-# Deterministic scoring only (no LLM judge cost)
-python eval/run.py --no-judge
+# Single case, no LLM judge
+python ../eval/code_review/run.py --filter "requests-001" --no-judge
 
-# Save results as baseline for future regression detection
-python eval/run.py --save-baseline
+# Save baseline for regression detection
+python ../eval/code_review/run.py --save-baseline
 
-# Use Bedrock provider
-python eval/run.py --provider bedrock --model us.anthropic.claude-sonnet-4-5-20250929-v1:0
-
-# Use a lighter model for sub-agents
-python eval/run.py --provider anthropic --model claude-sonnet-4-20250514 --explorer-model claude-haiku-4-5-20251001
-
-# Run 3 cases in parallel
-python eval/run.py --parallelism 3
+# Gold-standard ceiling
+python ../eval/code_review/run.py --gold --gold-model opus --save-baseline
 ```
 
-## Scoring Rubric
+**Scoring**: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%).
 
-### Deterministic Scores (scorer.py)
+```
+code_review/
+├── run.py              CLI entrypoint
+├── runner.py           Workspace setup + CodeReviewService execution
+├── scorer.py           Deterministic scoring
+├── judge.py            LLM-as-Judge qualitative evaluation
+├── report.py           Report generation + baseline comparison
+├── gold_runner.py      Gold-standard (single-agent) runner
+├── repos.yaml          Repo manifest
+├── repos/requests/     requests v2.31.0 source tree
+├── cases/requests/     12 case definitions + patches
+├── gold_baselines/     Gold-standard baselines
+└── gold_traces/        Per-case gold agent traces
+```
 
-| Dimension | Weight | What It Measures |
-|-----------|--------|-----------------|
-| Recall | 35% | Fraction of planted bugs found |
-| Precision | 20% | Fraction of findings that are true positives |
-| Severity Accuracy | 15% | Correct severity assignment |
-| Location Accuracy | 10% | Correct file + line range |
-| Recommendation | 10% | Suggested fix matches expected |
-| Context Depth | 10% | Cross-file exploration completed |
+---
 
-**Composite** = weighted sum of all dimensions (0.0–1.0).
+## 2. Agent Quality Eval (`agent_quality/`)
 
-### LLM Judge Scores (judge.py)
-
-4 criteria, each scored 1–5:
-
-| Criterion | What It Measures |
-|-----------|-----------------|
-| Completeness | Did the review find all planted bugs? |
-| Reasoning Quality | Is the analysis well-reasoned with evidence? |
-| Actionability | Are suggestions concrete and fixable? |
-| False Positive Quality | Are non-bug findings legitimate? |
-
-## Adding a New Repo
-
-1. Clone the repo at a specific version and remove `.git`:
-   ```bash
-   git clone --depth 1 --branch v1.0.0 https://github.com/org/repo.git eval/repos/repo
-   rm -rf eval/repos/repo/.git
-   ```
-
-2. Add to `eval/repos.yaml`:
-   ```yaml
-   repos:
-     repo:
-       source_dir: repos/repo
-       version: "1.0.0"
-       language: python
-   ```
-
-3. Create `eval/cases/repo/cases.yaml` and `eval/cases/repo/patches/`
-
-## Adding a New Case
-
-1. Create a patch against the source tree:
-   ```bash
-   cd eval/repos/requests
-   # Make your buggy change
-   git diff > ../../cases/requests/patches/NNN-description.patch
-   ```
-
-2. Add the case definition to `cases.yaml`:
-   ```yaml
-   - id: requests-NNN
-     patch: patches/NNN-description.patch
-     difficulty: easy|medium|hard
-     title: "Short description"
-     description: "What the bug is"
-     expected_findings:
-       - title_pattern: "regex matching expected finding title"
-         file_pattern: "file\\.py"
-         line_range: [start, end]
-         severity: critical|warning|nit
-         category: correctness|security|reliability|concurrency|performance
-         requires_context:  # optional
-           - "path/to/related/file.py"
-         recommendation: "Expected fix suggestion"
-   ```
-
-## Baseline & Regression Detection
-
-- Baselines are saved as timestamped JSON in `eval/baselines/`
-- Each run automatically compares against the latest baseline
-- A **regression** is flagged when any case's composite score drops by >10%
-- The CLI exits with code 1 when regressions are detected (useful for CI)
-
-## Environment Variables
+Measures agentic loop answer quality by running questions against real codebases and scoring answers against expected findings.
 
 ```bash
-# Anthropic provider
-ANTHROPIC_API_KEY=sk-ant-...
+cd backend
 
-# Bedrock provider
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_DEFAULT_REGION=us-east-1
+# Run all baselines (direct agent, ~30s per case)
+python ../eval/agent_quality/run.py
 
-# OpenAI provider
-OPENAI_API_KEY=sk-...
+# Compare direct agent vs workflow (multi-agent)
+python ../eval/agent_quality/run.py --compare
+
+# Run specific case
+python ../eval/agent_quality/run.py --case abound_render_approval
+
+# Workflow only
+python ../eval/agent_quality/run.py --workflow
+```
+
+**Scoring**: pattern-match against `required_findings` in baseline JSON. Each finding has a weight and minimum pattern matches required.
+
+### Adding a baseline case
+
+Create a JSON file in `agent_quality/baselines/`:
+
+```json
+{
+  "id": "unique_case_id",
+  "workspace": "/path/to/codebase",
+  "question": "The question to ask the agent",
+  "baseline_model": "claude-opus-4-6",
+  "thinking_steps": [ ... ],
+  "answer": "The reference answer from Claude Code",
+  "required_findings": [
+    {
+      "id": "finding_id",
+      "description": "What must be found",
+      "weight": 0.40,
+      "check_patterns": ["regex1", "regex2"],
+      "min_matches": 2
+    }
+  ]
+}
+```
+
+```
+agent_quality/
+├── run.py              CLI entrypoint
+├── baselines/          Baseline case definitions (JSON)
+└── results.json        Latest run results
+```
+
+---
+
+## 3. Tool Parity Eval (`tool_parity/`)
+
+Compares tool output between Python (tree-sitter) and TypeScript (extension) implementations.
+
+```bash
+cd backend
+
+# Generate Python baseline
+python ../eval/tool_parity/run.py --generate-baseline
+
+# Compare TS output against baseline (requires extension running)
+python ../eval/tool_parity/run.py --compare
+```
+
+```
+tool_parity/
+├── run.py              Comparison script
+└── baseline.json       Python tool output baseline
 ```

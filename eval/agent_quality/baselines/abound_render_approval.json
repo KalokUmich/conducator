@@ -1,0 +1,102 @@
+{
+  "id": "abound_render_approval",
+  "workspace": "/home/kalok/abound-server",
+  "question": "After being approved by Render, what are the remaining steps in the journey for customers?",
+  "baseline_model": "claude-opus-4-6",
+  "created": "2026-03-20",
+  "thinking_steps": [
+    {
+      "step": 1,
+      "action": "grep PostApproval|postApprovalData|post_approval in abound-server",
+      "tool": "grep",
+      "params": {"pattern": "PostApproval|postApprovalData|post_approval", "path": "abound-server"},
+      "rationale": "Search for the business concept 'post approval' — domain models define what steps exist",
+      "key_finding": "Found PostApprovalDataRequest.java + 14 other files referencing it"
+    },
+    {
+      "step": 2,
+      "action": "grep registrationObCallback|DECISION_STATUS_ACCEPT in abound-server",
+      "tool": "grep",
+      "params": {"pattern": "registrationObCallback|DECISION_STATUS_ACCEPT", "path": "abound-server"},
+      "rationale": "Find the Render approval callback handler — the trigger for the post-approval journey",
+      "key_finding": "Found RenderCallBackServiceImpl.java as the callback handler"
+    },
+    {
+      "step": 3,
+      "action": "read PostApprovalDataRequest.java",
+      "tool": "read_file",
+      "params": {"path": "common/.../PostApprovalDataRequest.java"},
+      "rationale": "Read the domain model that defines the post-approval steps",
+      "key_finding": "Found 7 boolean steps: set_password, set_phone, commission_consent, confirmation_payee, set_cpa, signature, idv. updateIsFinished() requires all 7 = true."
+    },
+    {
+      "step": 4,
+      "action": "read RenderCallBackServiceImpl.registrationObCallback() lines 1207-1306",
+      "tool": "read_file",
+      "params": {"path": "loan/.../RenderCallBackServiceImpl.java", "start_line": 1207, "end_line": 1306},
+      "rationale": "Understand what happens when Render sends ACCEPT callback",
+      "key_finding": "On ACCEPT: approvalStatus=1, async doc generation + email, voice message queued via ActiveMQ, decision log updated"
+    },
+    {
+      "step": 5,
+      "action": "read ApproveServiceImpl.approveIdv() lines 123-185",
+      "tool": "read_file",
+      "params": {"path": "common/.../ApproveServiceImpl.java", "start_line": 123, "end_line": 185},
+      "rationale": "Understand what happens after all post-approval steps complete — IDV admin review → disbursement",
+      "key_finding": "Admin approves IDV → createNewLoan in ledger → handleApproveAndPayout → renderWebClientService.disburseApplication()"
+    },
+    {
+      "step": 6,
+      "action": "read doc generation flow lines 518-567",
+      "tool": "read_file",
+      "params": {"path": "loan/.../RenderCallBackServiceImpl.java", "start_line": 518, "end_line": 567},
+      "rationale": "Understand the async document generation pipeline",
+      "key_finding": "3 PDFs via AWS Lambda: PCCI (type 6), Credit Agreement (type 7), Adequate Explanations (type 8). Polled every 10s, max 100s."
+    }
+  ],
+  "answer": "After being approved by Render (credit decision = ACCEPT), the remaining steps in the customer journey are:\n\n## Immediate Backend Actions (triggered by Render ACCEPT callback)\n\nWhen Render sends a decision callback with ACCEPT status (`RenderCallBackServiceImpl.registrationObCallback()` line 1207):\n1. **Approval status updated** — `approvalStatus` set to 1, `approvalDecisionTime` recorded (line 1227-1228)\n2. **Loan documents generated** — Async via AWS Lambda, 3 PDFs: PCCI/Key Facts (type 6), Credit Agreement (type 7), Adequate Explanations (type 8) (line 1236-1237)\n3. **Conditional approval email sent** — With document attachments and magic login link (line 935+)\n4. **Voice message queued** — Via ActiveMQ delay queue for follow-up contact (line 1240-1251)\n\n## 7 Customer Self-Service Steps (PostApprovalDataRequest)\n\nThe customer must complete all 7 steps, tracked in `PostApprovalDataRequest.java`. Each step is a boolean flag; `isFinished` becomes true only when ALL 7 are true (line 103-111):\n\n1. **Set Password** (`set_password`) — Create account password\n2. **Set Phone** (`set_phone`) — Verify phone number\n3. **Commission Consent** (`commission_consent`) — Consent to commission disclosure\n4. **Confirmation of Payee** (`confirmation_payee`) — Confirm bank account details\n5. **Set CPA** (`set_cpa`) — Register repayment card / Continuous Payment Authority\n6. **Contract Signature** (`signature`) — E-sign loan agreement via Dropbox Sign\n7. **IDV** (`idv`) — Complete Identity Verification through Render\n\n## Final Processing (after all steps complete)\n\n8. **IDV Review by Admin** — Goes to CMS admin panel (`ApproveServiceImpl.approveIdv()` line 124)\n9. **Loan Creation in Ledger** — `ledgerCommonService.createNewLoan()` (line 156)\n10. **Payout/Disbursement** — `handleApproveAndPayout()` processes bank transfer (line 163)\n11. **Render Disburse Notification** — `renderWebClientService.disburseApplication()` (line 165)",
+  "required_findings": [
+    {
+      "id": "post_approval_7_steps",
+      "description": "Must find PostApprovalDataRequest.java and list all 7 customer self-service steps",
+      "weight": 0.40,
+      "check_patterns": ["set_password|setPassword|Set Password", "set_phone|setPhone|Set Phone", "commission_consent|commissionConsent|Commission Consent", "confirmation_payee|confirmationPayee|Confirmation.*Payee", "set_cpa|setCpa|Set CPA|CPA", "signature|Signature", "idv|IDV|Identity Verification"],
+      "min_matches": 7
+    },
+    {
+      "id": "render_callback_trigger",
+      "description": "Must identify RenderCallBackServiceImpl as the entry point for the approval flow",
+      "weight": 0.15,
+      "check_patterns": ["RenderCallBackService", "registrationObCallback", "ACCEPT"],
+      "min_matches": 2
+    },
+    {
+      "id": "doc_generation",
+      "description": "Must mention async document generation (PCCI, Credit Agreement, AE)",
+      "weight": 0.10,
+      "check_patterns": ["PCCI|Pre-Contract|Key Facts", "Credit Agreement", "Adequate Explanations|AE"],
+      "min_matches": 2
+    },
+    {
+      "id": "is_finished_gate",
+      "description": "Must explain that all 7 steps must be true for isFinished",
+      "weight": 0.15,
+      "check_patterns": ["isFinished|is_finished", "all.*true|all 7|all seven"],
+      "min_matches": 2
+    },
+    {
+      "id": "idv_to_disbursement",
+      "description": "Must trace the path from IDV approval to loan disbursement",
+      "weight": 0.10,
+      "check_patterns": ["approveIdv|IDV.*review|admin.*review", "disburse|disbursement|payout"],
+      "min_matches": 2
+    },
+    {
+      "id": "approval_email",
+      "description": "Should mention the approval email sent to the customer",
+      "weight": 0.10,
+      "check_patterns": ["approval.*email|email.*approv|conditional.*approv"],
+      "min_matches": 1
+    }
+  ]
+}

@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .graph import DependencyGraph, build_dependency_graph, rank_files
+from .graph import DependencyGraph, build_dependency_graph, build_dependency_graph_from_json, rank_files
 from .parser import FileSymbols, SymbolDef
 
 logger = logging.getLogger(__name__)
@@ -165,6 +165,21 @@ class RepoMapService:
                     break
 
         return result
+
+    def load_graph_from_json(self, workspace_path: str, raw_data: Dict) -> DependencyGraph:
+        """Build and cache a graph from JSON data sent by the VS Code extension.
+
+        Called in local-mode when the extension sends the repo graph it built
+        using LSP.  This replaces the tree-sitter scan entirely.
+        """
+        graph = build_dependency_graph_from_json(raw_data)
+        self._graph_cache[workspace_path] = graph
+        logger.info(
+            "Loaded repo graph from extension: %d files, %d edges",
+            graph.stats.get("total_files", 0),
+            graph.stats.get("total_edges", 0),
+        )
+        return graph
 
     def invalidate_cache(self, workspace_path: Optional[str] = None) -> None:
         """Clear cached graphs.

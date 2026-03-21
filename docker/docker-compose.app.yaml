@@ -1,0 +1,67 @@
+# Conductor App Tier — Backend + Langfuse
+# =========================================
+# Requires data tier to be running first:
+#   docker compose -f docker/docker-compose.data.yaml up -d
+#
+# Both backend and langfuse connect to the shared Postgres in the data tier.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.app.yaml up -d
+#   make app-up
+
+services:
+  backend:
+    image: conductor/backend:latest
+    container_name: conductor-backend
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@conductor-postgres:5432/${POSTGRES_DB}"
+      REDIS_URL: "redis://conductor-redis:6379/0"
+      BACKEND_HOST: "0.0.0.0"
+      BACKEND_PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../config:/app/config:ro
+      - conductor-uploads:/app/uploads
+      - conductor-workspaces:/app/workspaces
+    networks:
+      - conductor
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: conductor-langfuse
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@conductor-postgres:5432/langfuse
+      NEXTAUTH_SECRET: conductor-langfuse-dev-secret
+      NEXTAUTH_URL: http://localhost:3001
+      SALT: conductor-langfuse-dev-salt
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "3001:3000"
+    networks:
+      - conductor
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/public/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  conductor:
+    external: true
+    name: conductor-net
+
+volumes:
+  conductor-uploads:
+  conductor-workspaces:

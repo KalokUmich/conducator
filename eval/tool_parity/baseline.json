@@ -1,0 +1,75 @@
+{
+  "file_outline": {
+    "count": 10,
+    "names": [
+      "ToolExecutor",
+      "execute",
+      "LocalToolExecutor",
+      "__init__",
+      "workspace_path",
+      "execute",
+      "RemoteToolExecutor",
+      "__init__",
+      "workspace_path",
+      "execute"
+    ],
+    "kinds": [
+      "class",
+      "function",
+      "class",
+      "function",
+      "function",
+      "function",
+      "class",
+      "function",
+      "function",
+      "function"
+    ],
+    "lines": [
+      22,
+      26,
+      30,
+      37,
+      41,
+      44,
+      50,
+      58,
+      63,
+      66
+    ]
+  },
+  "find_symbol": {
+    "count": 1,
+    "files": [
+      "backend/app/code_tools/executor.py"
+    ],
+    "lines": [
+      50
+    ]
+  },
+  "expand_symbol": {
+    "start_line": 50,
+    "end_line": 73,
+    "has_body": true
+  },
+  "compressed_view": {
+    "symbol_count": 10,
+    "has_ToolExecutor": true,
+    "has_LocalToolExecutor": true,
+    "has_RemoteToolExecutor": true,
+    "has_call_info": true
+  },
+  "get_callers": {
+    "count": 12,
+    "files": [
+      "backend/app/code_tools/router.py",
+      "backend/tests/test_local_tools_parity.py",
+      "backend/tests/test_detect_patterns.py",
+      "eval/tool_comparison.py",
+      "backend/tests/test_code_tools.py"
+    ]
+  },
+  "module_summary": {
+    "success": true
+  }
+}

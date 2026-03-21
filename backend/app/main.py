@@ -65,6 +65,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application startup / shutdown lifecycle."""
     settings: AppSettings = load_settings()
 
+    # ---- PostgreSQL ----
+    from .db.engine import init_db, close_db
+    try:
+        engine = await init_db(
+            url=settings.build_postgres_url(),
+            pool_size=settings.postgres.pool_size,
+            max_overflow=settings.postgres.max_overflow,
+            echo=settings.database.echo_sql,
+        )
+        app.state.db_engine = engine
+        logger.info("PostgreSQL connected")
+    except Exception as exc:
+        logger.warning("PostgreSQL unavailable (%s) — services will use fallback storage", exc)
+        app.state.db_engine = None
+
+    # ---- Redis ----
+    from .db.redis import init_redis, close_redis
+    redis_client = await init_redis(url=settings.build_redis_url())
+    app.state.redis = redis_client
+
     # ---- Git Workspace ----
     git_service    = GitWorkspaceService()
     delegate_broker = DelegateBroker()
@@ -136,7 +156,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ---- Session Trace Writer ----
     from .agent_loop.trace import TraceWriter
-    trace_writer = TraceWriter.from_settings(settings.trace)
+    trace_writer = TraceWriter.from_settings(settings.trace, engine=app.state.db_engine)
     app.state.trace_writer = trace_writer
     logger.info(
         "Trace writer: enabled=%s, backend=%s",
@@ -232,6 +252,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from .workflow.observability import flush as langfuse_flush
     langfuse_flush()
     await git_service.shutdown()
+    await close_redis()
+    await close_db()
     logger.info("Conducator shutdown complete.")
 
 

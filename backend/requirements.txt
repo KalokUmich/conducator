@@ -10,6 +10,14 @@ pyngrok
 python-multipart
 boto3
 
+# --- PostgreSQL + Redis (OLTP data layer) ---
+sqlalchemy[asyncio]>=2.0
+asyncpg
+redis[hiredis]>=5.0
+alembic
+aiosqlite            # test only — async SQLite for unit tests
+fakeredis[aioredis]  # test only
+
 # --- RepoMap (Graph-Based Context) ---
 # Dependency graph construction and PageRank
 networkx
