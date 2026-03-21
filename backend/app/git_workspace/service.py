@@ -156,14 +156,13 @@ class GitWorkspaceService:
         self._workspaces_dir.mkdir(parents=True, exist_ok=True)
         await self._credential_store.start()
 
-        # Persistent repo-scoped token cache (survives restarts)
+        # Persistent repo-scoped token cache (PostgreSQL-backed via shared engine)
         try:
-            self._token_cache = RepoTokenCache(
-                db_path=self._workspaces_dir / "token_cache.db",
-            )
-            self._token_cache.open()
+            from ..db.engine import get_engine
+            db_engine = get_engine()
+            self._token_cache = RepoTokenCache(engine=db_engine)
         except Exception as exc:
-            logger.warning("Failed to open token cache: %s", exc)
+            logger.warning("Failed to initialise token cache: %s", exc)
             self._token_cache = None
 
         await self._recover_worktrees()
@@ -177,8 +176,7 @@ class GitWorkspaceService:
     async def shutdown(self) -> None:
         """Graceful shutdown — wipe credentials."""
         await self._credential_store.stop()
-        if self._token_cache:
-            self._token_cache.close()
+        # Token cache uses shared DB engine — no separate close needed
         self._initialized = False
         logger.info("GitWorkspaceService shut down.")
 
@@ -248,7 +246,7 @@ class GitWorkspaceService:
         # 2. Fall back to cached token for this repo (if available)
         effective_creds = req.credentials
         if effective_creds is None and self._token_cache:
-            cached = self._token_cache.get(req.repo_url)
+            cached = await self._token_cache.get(req.repo_url)
             if cached:
                 effective_creds = cached
                 logger.info(
@@ -341,7 +339,7 @@ class GitWorkspaceService:
             # avoid accidentally resetting their original expiry.
             if req.credentials and self._token_cache:
                 try:
-                    self._token_cache.put(req.repo_url, req.credentials)
+                    await self._token_cache.put(req.repo_url, req.credentials)
                 except Exception as exc:
                     logger.warning("Could not cache token for repo %s: %s", req.repo_url, exc)
 
@@ -416,13 +414,13 @@ class GitWorkspaceService:
 
         This is the "Local Mode" — the backend does NOT clone anything; it
         simply records that the given path is the workspace root for the room.
-        Guests joining this room get read-only access.
+        The path lives on the developer's machine and may not exist on the
+        server (e.g. when backend runs on ECS).  Path validation is done
+        by the VS Code extension before calling this endpoint.
 
-        Raises ``ValueError`` if the path does not exist or is not a directory.
+        Tool calls for this room are proxied to the extension via WebSocket.
         """
-        path = Path(local_path).resolve()
-        if not path.is_dir():
-            raise ValueError(f"Path does not exist or is not a directory: {local_path}")
+        path = Path(local_path)
 
         self._local_workspaces[room_id] = path
         logger.info("Local workspace registered for room %s at %s", room_id, path)

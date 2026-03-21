@@ -197,23 +197,24 @@ class ConnectionManager:
 
     This class maintains the state for all active chat rooms, including:
     - Active WebSocket connections per room
-    - Message history per room (in-memory, append-only)
+    - Message history per room (in-memory + optional Redis persistence)
     - User registrations per room
     - Guest numbering counters
     - Room host tracking (for permission validation)
 
-    Security Model:
-        - Backend assigns userId on WebSocket connection (not client-provided)
-        - Backend determines role: first user in room = host, others = guest
-        - Backend validates permissions for sensitive operations (end_session, etc.)
-
-    Note:
-        This is a singleton-style global instance. All WebSocket handlers
-        share the same ConnectionManager to maintain consistent state.
+    When a ``redis_store`` is provided, state writes go to both in-memory
+    and Redis.  On cold start, rooms can be hydrated from Redis.
+    ``active_connections`` / ``websocket_to_user`` are always in-memory only
+    (WebSocket objects cannot be serialised).
     """
 
-    def __init__(self) -> None:
-        """Initialize empty connection manager."""
+    def __init__(self, redis_store=None) -> None:
+        """Initialize empty connection manager.
+
+        Args:
+            redis_store: Optional ``RedisChatStore`` for durable state.
+        """
+        self._redis_store = redis_store
         # room_id -> list of active WebSocket connections
         self.active_connections: Dict[str, List[WebSocket]] = {}
 
@@ -446,8 +447,8 @@ class ConnectionManager:
 
         return (disconnected_user, lead_reverted)
 
-    def add_message(self, room_id: str, message: ChatMessage) -> ChatMessage:
-        """Add a message to the room's history.
+    async def add_message(self, room_id: str, message: ChatMessage) -> ChatMessage:
+        """Add a message to the room's history (in-memory + Redis).
 
         Args:
             room_id: Room to add message to.
@@ -459,6 +460,12 @@ class ConnectionManager:
         if room_id not in self.message_history:
             self.message_history[room_id] = []
         self.message_history[room_id].append(message)
+        # Write-through to Redis
+        if self._redis_store:
+            try:
+                await self._redis_store.append_message(room_id, message.model_dump())
+            except Exception as exc:
+                logger.warning("Redis write failed for message in room %s: %s", room_id, exc)
         return message
 
     async def broadcast(self, message: dict, room_id: str) -> None:
@@ -577,7 +584,7 @@ class ConnectionManager:
         """Get the message history for a room."""
         return self.message_history.get(room_id, [])
 
-    def clear_message_history(self, room_id: str) -> None:
+    async def clear_message_history(self, room_id: str) -> None:
         """Clear only message-related state; preserves live connections and user list.
 
         Called when a non-SSO host disconnects.
@@ -585,9 +592,14 @@ class ConnectionManager:
         self.message_history.pop(room_id, None)
         self.seen_message_ids.pop(room_id, None)
         self.message_read_by.pop(room_id, None)
-        logger.info(f"[Manager] Message history cleared for room {room_id}")
+        if self._redis_store:
+            try:
+                await self._redis_store.clear_messages(room_id)
+            except Exception as exc:
+                logger.warning("Redis clear_messages failed for room %s: %s", room_id, exc)
+        logger.info("[Manager] Message history cleared for room %s", room_id)
 
-    def clear_room(self, room_id: str) -> None:
+    async def clear_room(self, room_id: str) -> None:
         """Clear all data for a room (used when host ends session).
 
         This removes all connections, message history, user registrations,
@@ -615,6 +627,40 @@ class ConnectionManager:
         ]
         for ws in to_remove:
             del self.websocket_to_user[ws]
+
+        # Clear Redis state
+        if self._redis_store:
+            try:
+                await self._redis_store.clear_room(room_id)
+            except Exception as exc:
+                logger.warning("Redis clear_room failed for room %s: %s", room_id, exc)
+
+    # =========================================================================
+    # Targeted messaging (for tool proxy)
+    # =========================================================================
+
+    async def send_to_host(self, room_id: str, message: dict) -> bool:
+        """Send a message to the host's WebSocket connection only.
+
+        Used by the tool proxy to send tool_request messages to the
+        extension that owns the local workspace.
+
+        Returns True if sent successfully, False if host is not connected.
+        """
+        host_id = self.room_hosts.get(room_id)
+        if not host_id:
+            return False
+
+        for ws, (rid, uid) in self.websocket_to_user.items():
+            if rid == room_id and uid == host_id:
+                try:
+                    await ws.send_json(message)
+                    return True
+                except Exception as exc:
+                    logger.warning("Failed to send to host in room %s: %s", room_id, exc)
+                    return False
+
+        return False
 
     # =========================================================================
     # Permission Validation (Security)

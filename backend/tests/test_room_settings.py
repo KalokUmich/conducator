@@ -67,11 +67,12 @@ class TestRoomSettingsManager:
         assert settings["code_style"] == "PEP 8"
         assert settings["output_mode"] == "plan_then_diff"
 
-    def test_clear_room_clears_settings(self):
+    @pytest.mark.asyncio
+    async def test_clear_room_clears_settings(self):
         """clear_room should remove room settings."""
         mgr = ConnectionManager()
         mgr.update_room_settings("room-1", {"code_style": "PEP 8"})
-        mgr.clear_room("room-1")
+        await mgr.clear_room("room-1")
         settings = mgr.get_room_settings("room-1")
         assert settings == {"code_style": "", "output_mode": ""}
 

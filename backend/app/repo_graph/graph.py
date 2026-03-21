@@ -60,6 +60,45 @@ class DependencyGraph:
 # ---------------------------------------------------------------------------
 
 
+def build_dependency_graph_from_json(raw_data: Dict) -> DependencyGraph:
+    """Build a DependencyGraph from JSON data sent by the VS Code extension.
+
+    The extension builds the graph using LSP and sends it as a JSON dict
+    with a ``files`` key containing per-file symbol data.  This function
+    converts that into the same ``DependencyGraph`` that tree-sitter produces.
+    """
+    from .parser import FileSymbols, SymbolDef, SymbolRef
+
+    files_raw = raw_data.get("files", {})
+    file_symbols: Dict[str, FileSymbols] = {}
+
+    for rel_path, fdata in files_raw.items():
+        defs = [
+            SymbolDef(
+                name=d["name"], kind=d["kind"],
+                file_path=d["file_path"],
+                start_line=d["start_line"], end_line=d["end_line"],
+                signature=d.get("signature", d["name"]),
+            )
+            for d in fdata.get("definitions", [])
+        ]
+        refs = [
+            SymbolRef(name=r["name"], file_path=r["file_path"], line=r["line"])
+            for r in fdata.get("references", [])
+        ]
+        file_symbols[rel_path] = FileSymbols(
+            file_path=rel_path,
+            definitions=defs,
+            references=refs,
+            language=fdata.get("language"),
+        )
+
+    return build_dependency_graph(
+        workspace_path=".",  # not used when file_symbols is provided
+        file_symbols=file_symbols,
+    )
+
+
 def build_dependency_graph(
     workspace_path: str,
     file_symbols: Optional[Dict[str, FileSymbols]] = None,

@@ -424,8 +424,10 @@ function extractFromJava(content: string): ExtractedSymbols {
     const importRe = /^import\s+(?:static\s+)?[\w.*]+;/;
     // class / interface / enum with optional access + modifier keywords
     const typeRe   = /^(?:(?:public|private|protected|abstract|final|static)\s+)*(?:(class|interface|enum)\s+(\w+))/;
-    // Method: at least one access/modifier keyword, then return type + name + (
-    const methodRe = /^(?:(?:public|private|protected|static|final|abstract|synchronized|native)\s+)+(?:<[^>]*>\s+)?(?:[\w$[\]<>,? ]+\s+)?(\w+)\s*\([^;]*\)\s*(?:throws\s+[\w,\s]+)?\s*[{;]/;
+    // Method: optional access/modifier keywords, return type, name, (params)
+    // Handles: public void foo(), void foo() (package-private),
+    //          ResponseEntity<String> foo(), static <T> T foo()
+    const methodRe = /^(?:(?:public|private|protected|static|final|abstract|synchronized|native|default)\s+)*(?:<[^>]*>\s+)?(?:[\w$][\w$<>\[\],?]*)\s+(\w+)\s*\([^;]*\)\s*(?:throws\s+[\w,\s]+)?\s*[{;]/;
 
     for (let i = 0; i < lines.length; i++) {
         const trimmed = lines[i].trim();
@@ -454,17 +456,32 @@ function extractFromJava(content: string): ExtractedSymbols {
             continue;
         }
 
-        const methodMatch = methodRe.exec(trimmed);
+        // Java methods often span multiple lines:
+        //   public void renderObCallback(
+        //       @RequestBody Request req, HttpServletRequest request) {
+        // Join continuation lines when the current line has an unmatched '('
+        let joined = trimmed;
+        let endLine = i;
+        if (trimmed.includes('(') && !trimmed.includes(')')) {
+            // Collect up to 5 continuation lines until we find ')' and '{' or ';'
+            for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+                joined += ' ' + lines[j].trim();
+                endLine = j;
+                if (joined.includes(')') && /[{;]/.test(joined)) { break; }
+            }
+        }
+
+        const methodMatch = methodRe.exec(joined);
         if (methodMatch) {
             const name = methodMatch[1];
             if (JAVA_KEYWORDS.has(name)) continue;
             symbols.push({
                 name,
                 kind:      'function',
-                signature: trimmed.replace(/\s*\{.*$/, '').replace(/;$/, '').trim().slice(0, 200),
+                signature: joined.replace(/\s*\{.*$/, '').replace(/;$/, '').trim().slice(0, 200),
                 range: {
                     start: { line: i, character: 0 },
-                    end:   { line: i, character: lines[i].length },
+                    end:   { line: endLine, character: lines[endLine].length },
                 },
             });
         }

@@ -75,6 +75,19 @@ Docs:
 | GET | `/api/code-tools/available` | List all available code tools |
 | POST | `/api/code-tools/execute/{tool_name}` | Directly execute a single code tool |
 
+**Python CLI (for local-mode extension tool calls):**
+
+```bash
+# List all available tools
+python -m app.code_tools list
+
+# Execute a tool (JSON output)
+python -m app.code_tools grep /path/to/workspace '{"pattern": "authenticate"}'
+python -m app.code_tools file_outline /path/to/workspace '{"path": "src/auth.py"}'
+```
+
+The `code_tools/__main__.py` module is invoked by the VS Code extension's `pythonCliRunner.ts` to execute the 7 "complex" tools that require Python (ast_search, trace_variable, compressed_view, module_summary, test_outline, find_todo, detect_patterns).
+
 #### Workflow Engine (`/api/workflows/`)
 
 | Method | Path | Description |
@@ -144,7 +157,7 @@ Docs:
 
 ### Agentic Code Intelligence
 
-`POST /api/context/query` runs an LLM agent loop (up to **25 iterations**, **500K token budget**). The Query Classifier categorises the query into one of 7 types, selects an optimal 8-12 tool subset, and injects a 3-layer system prompt (Core Identity + Strategy + Runtime Guidance). A token-based Budget Controller emits NORMAL / WARN_CONVERGE / FORCE_CONCLUDE signals. An Evidence Evaluator rejects weak answers before finalising. Session Traces are saved as JSON for offline analysis.
+`POST /api/context/query` runs an LLM agent loop (up to **25 iterations**, **500K token budget**). The Query Classifier categorises the query into one of 7 types and selects an optimal 8-12 tool subset. A 3-layer system prompt is injected following Anthropic's prompt design guidelines (goal-oriented, not prescriptive): Core Identity (investigation guidance, ~30 lines) + optional Strategy (structured output for `code_review` only) + Runtime Guidance (budget signal, iteration count). Key principle: tell the model WHAT to achieve, not HOW to do it step by step — Claude's autonomous reasoning outperforms hand-written exploration scripts. A token-based Budget Controller emits NORMAL / WARN_CONVERGE / FORCE_CONCLUDE signals. An Evidence Evaluator rejects weak answers before finalising. Session Traces are saved as JSON for offline analysis.
 
 **24 code tools:**
 
@@ -236,6 +249,18 @@ curl -X POST http://localhost:8000/api/code-tools/execute/grep \
 - Git workspaces: `workspaces/{room_id}/` (bare clone + worktree)
 - Chat room state: in-memory per process
 
+> The backend itself uses DuckDB (embedded) for all persistence — no Postgres required.
+> Postgres is only used by **Langfuse** (observability). Start it with `make data-up` before `make langfuse-up`.
+
+### Docker Networking
+
+All Docker Compose files share the `conductor-net` network. Services communicate via container names:
+
+- `conductor-postgres:5432` — Postgres (used by Langfuse)
+- `conductor-redis:6379` — Redis (used by backend)
+
+This avoids `host.docker.internal` resolution issues in WSL2 / Linux Docker environments.
+
 ### Tests
 
 Total: **900+ tests**.
@@ -278,42 +303,44 @@ Additional test files:
 - `tests/test_room_settings.py`: 18 — room settings
 - `tests/test_audit.py`: 14 — audit log
 
-### Code Review Eval
+### Eval System
 
-A standalone eval system in `eval/` (excluded from Docker) measures `CodeReviewService` quality against known bugs planted in real open-source repos. 12 cases against requests v2.31.0 (4 easy, 5 medium, 3 hard).
+Three independent evaluation suites in `eval/` (excluded from Docker). See `eval/README.md` for full documentation.
+
+**Code Review Eval** (`eval/code_review/`) — measures `CodeReviewService` quality against 12 planted-bug cases in requests v2.31.0.
 
 ```bash
-# Pipeline mode: run CodeReviewService against all 12 cases
-python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
+cd backend
 
-# Single case
-python eval/run.py --filter "requests-001"
+# Run all 12 cases
+python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
 
-# Deterministic only (no LLM judge)
-python eval/run.py --no-judge
+# Single case, no LLM judge
+python ../eval/code_review/run.py --filter "requests-001" --no-judge
 
 # Save baseline for regression detection
-python eval/run.py --save-baseline
+python ../eval/code_review/run.py --save-baseline
 
-# Gold-standard mode: invoke Claude Code CLI directly (quality ceiling)
-python eval/run.py --gold --save-baseline
-python eval/run.py --gold --gold-model opus --gold-max-budget 5.0
-
-# Compare pipeline run against gold baseline
-python eval/run.py --compare-gold
+# Gold-standard ceiling (Claude Code CLI)
+python ../eval/code_review/run.py --gold --gold-model opus --save-baseline
 ```
 
-**Two baseline types:**
-- **Pipeline baseline** (`eval/baselines/`) — your own previous runs; detect regressions
-- **Gold baseline** (`eval/gold_baselines/`) — Claude Code CLI (Opus) direct run; quality ceiling
+Scoring: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%).
 
-Gold runner invokes `claude -p --output-format stream-json --dangerously-skip-permissions`, strips `ANTHROPIC_API_KEY` (uses subscription), and saves full `GoldTrace` (tool calls, files read, cost) to `eval/gold_traces/`.
+**Agent Quality Eval** (`eval/agent_quality/`) — measures agentic loop answer quality against baseline cases.
 
-Scoring: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%). Optional LLM-as-Judge evaluates completeness, reasoning, actionability, and false positive quality (1-5 scale). Regressions flagged at >10% composite drop; CLI exits with code 1 for CI integration.
+```bash
+python ../eval/agent_quality/run.py                          # all baselines
+python ../eval/agent_quality/run.py --case abound_render_approval  # specific case
+python ../eval/agent_quality/run.py --compare                # direct vs workflow
+```
 
-**Adding a new repo:** clone at a specific version → remove `.git` → add to `eval/repos.yaml` → create `eval/cases/<repo>/cases.yaml` and patches.
+**Tool Parity Eval** (`eval/tool_parity/`) — compares Python vs TypeScript tool output.
 
-See `docs/GUIDE.md` section 11 for full documentation.
+```bash
+python ../eval/tool_parity/run.py --generate-baseline
+python ../eval/tool_parity/run.py --compare
+```
 
 ---
 
@@ -382,8 +409,22 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | Method | Path | 说明 |
 |---|---|---|
 | POST | `/api/context/query` | LLM Agent Loop — 迭代调用 24 个代码工具回答代码查询（最多 25 轮 / 500K token） |
+| POST | `/api/context/query/stream` | SSE 流式接口 — 实时工具调用进度事件 |
 | GET | `/api/code-tools/available` | 列出所有可用代码工具 |
 | POST | `/api/code-tools/execute/{tool_name}` | 直接执行单个代码工具 |
+
+**Python CLI（供 Extension 本地模式调用）：**
+
+```bash
+# 列出所有工具
+python -m app.code_tools list
+
+# 执行工具（JSON 格式输出）
+python -m app.code_tools grep /path/to/workspace '{"pattern": "authenticate"}'
+python -m app.code_tools compressed_view /path/to/workspace '{"path": "src/auth.py"}'
+```
+
+Extension 的 `pythonCliRunner.ts` 通过此 CLI 执行 7 个复杂工具（ast_search、trace_variable、compressed_view、module_summary、test_outline 等）。
 
 #### Git 工作区（`/api/git-workspace/`）
 
@@ -444,7 +485,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ### 智能代码分析
 
-`POST /api/context/query` 运行 LLM Agent Loop（最多 25 轮迭代，500K token 预算）。QueryClassifier 将查询分类为 7 种类型，选出最优 8-12 工具子集，注入三层 System Prompt（核心身份 + 策略 + 运行时指导）。BudgetController 发出 NORMAL / WARN_CONVERGE / FORCE_CONCLUDE 信号。EvidenceEvaluator 在最终输出前拒绝证据不足的答案。Session Trace 以 JSON 保存供离线分析。
+`POST /api/context/query` 运行 LLM Agent Loop（最多 25 轮迭代，500K token 预算）。QueryClassifier 将查询分类为 7 种类型并选出最优 8-12 工具子集。注入三层 System Prompt（遵循 Anthropic 提示词设计规范：目标导向，非逐步脚本）：核心身份（调查引导，约 30 行）+ 可选策略（仅 `code_review` 使用结构化输出模板）+ 运行时指导（预算信号、迭代次数）。核心原则：告诉模型要达成什么目标，而非如何逐步执行——Claude 的自主推理优于手写的探索策略。BudgetController 发出 NORMAL / WARN_CONVERGE / FORCE_CONCLUDE 信号。EvidenceEvaluator 在最终输出前拒绝证据不足的答案。Session Trace 以 JSON 保存供离线分析。
 
 **24 个代码工具：**
 
@@ -488,6 +529,17 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - Git 工作区：`workspaces/{room_id}/`（裸克隆 + worktree）
 - 聊天房间状态：进程内存
 
+> 后端本身使用嵌入式 DuckDB，**无需独立部署 Postgres**。Postgres 仅供 Langfuse 可观测性使用，通过 `make data-up` 启动。
+
+### Docker 网络
+
+所有 Docker Compose 文件共享 `conductor-net` 网络，服务间通过容器名通信：
+
+- `conductor-postgres:5432` — Postgres（Langfuse 使用）
+- `conductor-redis:6379` — Redis（后端使用）
+
+避免 WSL2 / Linux Docker 环境下 `host.docker.internal` 解析失败的问题。
+
 ### 测试
 
 共 **900+ 个测试**。
@@ -516,39 +568,31 @@ pytest --cov=. --cov-report=html   # 覆盖率报告
 | `test_repo_graph.py` | 72 | Parser + 依赖图 + PageRank + Service |
 | `test_config_new.py` | 27 | Config + Secrets |
 
-### 代码评审评估
+### 评估系统
 
-独立的 `eval/` 目录（通过 `.dockerignore` 排除在 Docker 镜像之外）提供 `CodeReviewService` 质量评估系统。在真实开源仓库中植入已知 bug，衡量评审质量。目前有 12 个用例（基于 requests v2.31.0）。
+`eval/` 目录（通过 `.dockerignore` 排除在 Docker 镜像之外）包含三套独立评估套件，详见 `eval/README.md`。
+
+**代码评审评估**（`eval/code_review/`）— 衡量 `CodeReviewService` 质量，基于 requests v2.31.0 的 12 个植入 bug 用例。
 
 ```bash
-# Pipeline 模式：运行我们的 CodeReviewService
-python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
-
-# 单个用例
-python eval/run.py --filter "requests-001"
-
-# 仅确定性评分（不使用 LLM Judge）
-python eval/run.py --no-judge
-
-# 保存 Pipeline 基线用于回归检测
-python eval/run.py --save-baseline
-
-# Gold 模式：直接调用 Claude Code CLI（质量天花板基线）
-python eval/run.py --gold --save-baseline
-python eval/run.py --gold --gold-model opus --gold-max-budget 5.0
-
-# 将 Pipeline 结果与 Gold 基线对比
-python eval/run.py --compare-gold
+cd backend
+python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
+python ../eval/code_review/run.py --filter "requests-001" --no-judge
+python ../eval/code_review/run.py --save-baseline
+python ../eval/code_review/run.py --gold --gold-model opus --save-baseline
 ```
 
-**两种基线：**
-- **Pipeline 基线**（`eval/baselines/`）— 自身上次的运行结果，用于检测回归
-- **Gold 基线**（`eval/gold_baselines/`）— Claude Code CLI（Opus）直接运行的结果，代表质量天花板
+**Agent 质量评估**（`eval/agent_quality/`）— 衡量 Agent Loop 答案质量，与基线对比。
 
-Gold Runner 直接调用 `claude -p --output-format stream-json --dangerously-skip-permissions`，自动去除 `ANTHROPIC_API_KEY`（使用月费订阅而非 API 额度），并将完整调查轨迹（工具调用、读取文件、费用等）保存至 `eval/gold_traces/`。
+```bash
+python ../eval/agent_quality/run.py
+python ../eval/agent_quality/run.py --case abound_render_approval
+python ../eval/agent_quality/run.py --compare
+```
 
-评分维度：召回率 (35%)、精确率 (20%)、严重程度准确性 (15%)、定位准确性 (10%)、修复建议 (10%)、上下文深度 (10%)。可选 LLM Judge 评估完整性、推理质量、可操作性和误报质量（1-5 分）。综合分数下降 >10% 触发回归警告，CLI 返回退出码 1 便于 CI 集成。
+**工具一致性评估**（`eval/tool_parity/`）— 对比 Python 和 TypeScript 工具输出。
 
-**添加新仓库：** 克隆指定版本 → 删除 `.git` → 添加到 `eval/repos.yaml` → 创建 `eval/cases/<repo>/cases.yaml` 和补丁文件。
-
-详见 `docs/GUIDE.md` 第 11 节。
+```bash
+python ../eval/tool_parity/run.py --generate-baseline
+python ../eval/tool_parity/run.py --compare
+```

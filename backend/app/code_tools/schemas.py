@@ -459,7 +459,10 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "description": (
             "Find all functions/methods called within a specific function body. "
             "Requires the function name and file path. "
-            "Useful for understanding what a function does internally."
+            "ESSENTIAL for tracing business flows: after finding an entry point, "
+            "call get_callees to discover ALL downstream services it invokes "
+            "(e.g. email, payment, verification). This reveals the complete "
+            "chain of steps without reading the entire file."
         ),
         "input_schema": GetCalleesParams.model_json_schema(),
     },

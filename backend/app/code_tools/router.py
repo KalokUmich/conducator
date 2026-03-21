@@ -89,4 +89,13 @@ async def execute(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No workspace for room_id={room_id!r}.",
         )
+    # Local-mode workspaces: proxy tool call to the VS Code extension
+    if git_workspace.is_local_workspace(room_id):
+        from .proxy import tool_proxy
+        return await tool_proxy.execute(
+            room_id=room_id,
+            tool_name=tool_name,
+            params=params,
+            workspace=str(worktree_path),
+        )
     return execute_tool(tool_name, str(worktree_path), params)

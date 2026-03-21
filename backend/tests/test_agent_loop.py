@@ -785,22 +785,24 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(str(tmp_path))
         assert "Directory layout" in prompt
         assert "package.json" in prompt
-        assert "Core Behavior" in prompt
+        assert "How to investigate" in prompt
 
     def test_precomputed_layout(self, tmp_path: Path):
         """Passing pre-computed layout skips scanning."""
         prompt = build_system_prompt(str(tmp_path), workspace_layout="CUSTOM_LAYOUT_HERE")
         assert "CUSTOM_LAYOUT_HERE" in prompt
 
-    def test_strategy_selects_by_query_type(self, tmp_path: Path):
-        prompt = build_system_prompt(str(tmp_path), query_type="root_cause_analysis")
-        assert "Root Cause Analysis" in prompt
-        prompt2 = build_system_prompt(str(tmp_path), query_type="architecture_question")
-        assert "Architecture Overview" in prompt2
+    def test_code_review_strategy_injected(self, tmp_path: Path):
+        """Code review is the only query type that injects a strategy template."""
+        prompt = build_system_prompt(str(tmp_path), query_type="code_review")
+        assert "Code Review" in prompt
 
-    def test_default_strategy_when_no_query_type(self, tmp_path: Path):
-        prompt = build_system_prompt(str(tmp_path))
-        assert "Business Flow Tracing" in prompt
+    def test_non_review_queries_have_no_strategy(self, tmp_path: Path):
+        """Non-review queries should NOT inject prescriptive strategies."""
+        for qt in ("root_cause_analysis", "architecture_question", "business_flow_tracing"):
+            prompt = build_system_prompt(str(tmp_path), query_type=qt)
+            assert "## Strategy" not in prompt
+            assert "## Goal" not in prompt
 
 
 class TestMultiPerspective:

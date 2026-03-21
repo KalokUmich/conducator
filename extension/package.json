@@ -9,6 +9,13 @@
   "categories": [
     "Other"
   ],
+  "extensionPack": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "golang.go",
+    "rust-lang.rust-analyzer",
+    "redhat.java"
+  ],
   "activationEvents": [
     "onView:aiCollabView",
     "onFileSystem:conductor"
@@ -50,6 +57,10 @@
       {
         "command": "conductor.showWorkflow",
         "title": "Conductor: View Agent Workflows"
+      },
+      {
+        "command": "conductor.compareTools",
+        "title": "Conductor: Compare Local Tools (LSP vs grep vs tree-sitter)"
       }
     ],
     "configuration": {
@@ -84,7 +95,8 @@
     "pretest": "npm run compile",
     "test": "node --test out/tests/*.test.js",
     "lint": "eslint src --ext ts",
-    "build:css": "tailwindcss -i ./media/input.css -o ./media/tailwind.css --minify"
+    "build:css": "tailwindcss -i ./media/input.css -o ./media/tailwind.css --minify",
+    "download-grammars": "bash scripts/download-grammars.sh"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
@@ -102,6 +114,7 @@
     "better-sqlite3": "^11.7.0",
     "js-tiktoken": "^1.0.12",
     "typescript": "^5.3.3",
-    "vsls": "^1.0.4753"
+    "vsls": "^1.0.4753",
+    "web-tree-sitter": "^0.24.7"
   }
 }

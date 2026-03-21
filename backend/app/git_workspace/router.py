@@ -72,7 +72,7 @@ async def list_token_cache(
     cache = svc.token_cache
     if cache is None:
         return {"enabled": False, "entries": []}
-    entries = cache.list_entries()
+    entries = await cache.list_entries()
     return {"enabled": True, "count": len(entries), "entries": entries}
 
 

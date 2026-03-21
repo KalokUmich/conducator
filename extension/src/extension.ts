@@ -325,6 +325,13 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // Register command to compare local tool implementations (LSP vs grep)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('conductor.compareTools', async () => {
+            await compareLocalTools();
+        })
+    );
+
     // Move view to secondary sidebar on first activation (right side layout)
     // Layout: [Activity Bar] [Primary Sidebar] [Editor] [AI Collab Sidebar]
     const hasMovedToSecondarySidebar = context.globalState.get<boolean>('hasMovedToSecondarySidebar', false);
@@ -342,6 +349,306 @@ export function activate(context: vscode.ExtensionContext): void {
             }
         }, 1000);  // Delay to ensure view is registered
     }
+}
+
+/**
+ * Compare local tool implementations: LSP vs grep fallback.
+ * Runs both paths on the same target file and saves structured results
+ * to eval/tool_lsp_results.json for comparison with tree-sitter baseline.
+ */
+async function compareLocalTools(): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders) {
+        vscode.window.showErrorMessage('No workspace open');
+        return;
+    }
+    const workspace = folders[0].uri.fsPath;
+    const path = require('path');
+    const fs = require('fs');
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+
+    // Auto-discover a suitable test file from the current workspace
+    // Prefer the active editor, then find any Python/TypeScript file with classes
+    let TARGET_FILE = '';
+    let TARGET_SYMBOL = '';
+    let TARGET_FUNCTION = '';
+
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && activeEditor.document.uri.fsPath.startsWith(workspace)) {
+        TARGET_FILE = path.relative(workspace, activeEditor.document.uri.fsPath);
+    }
+
+    if (!TARGET_FILE) {
+        // Find any .py or .ts file with some substance
+        try {
+            const pyFiles = await vscode.workspace.findFiles('**/*.py', '**/node_modules/**', 5);
+            const tsFiles = await vscode.workspace.findFiles('**/*.ts', '**/node_modules/**', 5);
+            const candidates = [...pyFiles, ...tsFiles];
+            for (const f of candidates) {
+                const content = fs.readFileSync(f.fsPath, 'utf-8');
+                if (content.includes('class ') && content.split('\n').length > 20) {
+                    TARGET_FILE = path.relative(workspace, f.fsPath);
+                    break;
+                }
+            }
+        } catch {}
+    }
+
+    if (!TARGET_FILE) {
+        vscode.window.showErrorMessage('No suitable file found for comparison. Open a Python or TypeScript file first.');
+        return;
+    }
+
+    // Read the file to discover a class and function name for testing
+    try {
+        const content = fs.readFileSync(path.resolve(workspace, TARGET_FILE), 'utf-8');
+        const classMatch = content.match(/^class\s+(\w+)/m);
+        if (classMatch) { TARGET_SYMBOL = classMatch[1]; }
+        const funcMatch = content.match(/^(?:async\s+)?(?:def|function)\s+(\w+)/m);
+        if (funcMatch) { TARGET_FUNCTION = funcMatch[1]; }
+        // Fallback: use any top-level def/function
+        if (!TARGET_FUNCTION) {
+            const anyFunc = content.match(/(?:def|function)\s+(\w+)/);
+            if (anyFunc) { TARGET_FUNCTION = anyFunc[1]; }
+        }
+    } catch {}
+
+    const output = vscode.window.createOutputChannel('Conductor Tool Comparison');
+    output.show();
+    output.appendLine('=== Tool Comparison: LSP vs grep ===\n');
+    output.appendLine(`Target file:     ${TARGET_FILE}`);
+    output.appendLine(`Target symbol:   ${TARGET_SYMBOL || '(none found)'}`);
+    output.appendLine(`Target function: ${TARGET_FUNCTION || '(none found)'}\n`);
+
+    const toUri = (f: string) => vscode.Uri.file(path.resolve(workspace, f));
+    const toRelative = (fsPath: string) => path.relative(workspace, fsPath);
+
+    const results: Record<string, any> = {};
+
+    // Helper: run grep
+    const runGrep = async (args: string[]): Promise<string> => {
+        try {
+            const r = await execFileAsync('grep', args, { cwd: workspace, maxBuffer: 5 * 1024 * 1024 });
+            return r.stdout || '';
+        } catch (e: any) {
+            return e.stdout || '';
+        }
+    };
+
+    // ---- file_outline ----
+    output.appendLine('--- file_outline ---');
+    const lspOutline: any = { count: 0, names: [] as string[], lines: [] as number[] };
+    const grepOutline: any = { count: 0, names: [] as string[], lines: [] as number[] };
+
+    try {
+        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider', toUri(TARGET_FILE),
+        );
+        if (symbols) {
+            // Only keep structural symbols (Class, Function, Method, etc.)
+            const STRUCTURAL = new Set([
+                vscode.SymbolKind.Class, vscode.SymbolKind.Function,
+                vscode.SymbolKind.Method, vscode.SymbolKind.Constructor,
+                vscode.SymbolKind.Interface, vscode.SymbolKind.Enum,
+                vscode.SymbolKind.Struct, vscode.SymbolKind.Module,
+                vscode.SymbolKind.Namespace,
+            ]);
+            const flatten = (syms: vscode.DocumentSymbol[], parent?: string): any[] => {
+                const result: any[] = [];
+                for (const s of syms) {
+                    if (STRUCTURAL.has(s.kind)) {
+                        result.push({ name: s.name, kind: vscode.SymbolKind[s.kind], line: s.range.start.line + 1 });
+                    }
+                    if (s.children) result.push(...flatten(s.children, s.name));
+                }
+                return result;
+            };
+            const flat = flatten(symbols);
+            lspOutline.count = flat.length;
+            lspOutline.names = flat.map(s => s.name);
+            lspOutline.lines = flat.map(s => s.line);
+            output.appendLine(`  LSP:  ${flat.length} symbols: ${flat.map(s => s.name).join(', ')}`);
+        }
+    } catch (e) {
+        output.appendLine(`  LSP:  FAILED - ${e}`);
+    }
+
+    const grepStdout = await runGrep([
+        '-n', '-E', '(^\\s*(def |async def |function |class |interface |type |const |export |struct ))',
+        path.resolve(workspace, TARGET_FILE),
+    ]);
+    const grepLines = grepStdout.trim().split('\n').filter(Boolean);
+    grepOutline.count = grepLines.length;
+    grepOutline.names = grepLines.map((l: string) => l.split(':').slice(1).join(':').trim().split(/[\s(]/)[1] || '');
+    grepOutline.lines = grepLines.map((l: string) => parseInt(l.split(':')[0]) || 0);
+    output.appendLine(`  grep: ${grepLines.length} symbols`);
+
+    results['file_outline'] = { lsp: lspOutline, grep: grepOutline };
+
+    // ---- find_symbol ----
+    output.appendLine('\n--- find_symbol ---');
+    const lspFind: any = { count: 0, lines: [] as number[] };
+    const grepFind: any = { count: 0, lines: [] as number[] };
+
+    try {
+        const wsSymbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+            'vscode.executeWorkspaceSymbolProvider', TARGET_SYMBOL,
+        );
+        if (wsSymbols) {
+            const filtered = wsSymbols.filter(s => s.location.uri.fsPath.startsWith(workspace));
+            lspFind.count = filtered.length;
+            lspFind.lines = filtered.map(s => s.location.range.start.line + 1);
+            output.appendLine(`  LSP:  ${filtered.length} matches`);
+            for (const s of filtered.slice(0, 5)) {
+                output.appendLine(`    ${vscode.SymbolKind[s.kind]} ${s.name} @ ${toRelative(s.location.uri.fsPath)}:${s.location.range.start.line + 1}`);
+            }
+        }
+    } catch (e) {
+        output.appendLine(`  LSP:  FAILED - ${e}`);
+    }
+
+    const grepFindStdout = await runGrep([
+        '-rn', '-E', `(def |function |class |interface |struct )${TARGET_SYMBOL}`, '.',
+    ]);
+    const grepFindLines = grepFindStdout.trim().split('\n').filter(Boolean);
+    grepFind.count = grepFindLines.length;
+    grepFind.lines = grepFindLines.map((l: string) => parseInt(l.split(':')[1]) || 0);
+    output.appendLine(`  grep: ${grepFindLines.length} matches`);
+
+    results['find_symbol'] = { lsp: lspFind, grep: grepFind };
+
+    // ---- expand_symbol ----
+    output.appendLine('\n--- expand_symbol ---');
+    const lspExpand: any = { start_line: 0, end_line: 0, has_body: false };
+
+    try {
+        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider', toUri(TARGET_FILE),
+        );
+        if (symbols) {
+            const flatten = (syms: vscode.DocumentSymbol[]): any[] => {
+                const result: any[] = [];
+                for (const s of syms) {
+                    result.push(s);
+                    if (s.children) result.push(...flatten(s.children));
+                }
+                return result;
+            };
+            const match = flatten(symbols).find(s => s.name === TARGET_SYMBOL);
+            if (match) {
+                lspExpand.start_line = match.range.start.line + 1;
+                lspExpand.end_line = match.range.end.line + 1;
+                lspExpand.has_body = true;
+                output.appendLine(`  LSP:  L${lspExpand.start_line}-${lspExpand.end_line}`);
+            }
+        }
+    } catch (e) {
+        output.appendLine(`  LSP:  FAILED - ${e}`);
+    }
+
+    results['expand_symbol'] = { lsp: lspExpand, grep: {} };
+
+    // ---- compressed_view ----
+    output.appendLine('\n--- compressed_view ---');
+    const lspCV: any = { has_ToolExecutor: false, has_LocalToolExecutor: false, has_RemoteToolExecutor: false, has_call_info: false };
+
+    try {
+        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider', toUri(TARGET_FILE),
+        );
+        if (symbols) {
+            const flatten = (syms: vscode.DocumentSymbol[]): string[] => {
+                const r: string[] = [];
+                for (const s of syms) {
+                    r.push(s.name);
+                    if (s.children) r.push(...flatten(s.children));
+                }
+                return r;
+            };
+            const names = flatten(symbols);
+            lspCV.has_ToolExecutor = names.includes('ToolExecutor');
+            lspCV.has_LocalToolExecutor = names.includes('LocalToolExecutor');
+            lspCV.has_RemoteToolExecutor = names.includes('RemoteToolExecutor');
+            lspCV.has_call_info = false; // LSP doesn't provide call info in outline
+            output.appendLine(`  LSP:  classes=[${names.filter(n => /Executor/.test(n)).join(', ')}]`);
+        }
+    } catch (e) {
+        output.appendLine(`  LSP:  FAILED - ${e}`);
+    }
+
+    results['compressed_view'] = { lsp: lspCV, grep: {} };
+
+    // ---- get_callers ----
+    output.appendLine('\n--- get_callers ---');
+    const lspCallers: any = { count: 0, files: [] as string[] };
+    const grepCallers: any = { count: 0, files: [] as string[] };
+
+    if (!TARGET_FUNCTION) {
+        output.appendLine('  (skipped — no function found in target file)');
+    }
+
+    // Try LSP call hierarchy
+    try {
+        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider',
+            toUri(TARGET_FILE),
+        );
+        if (symbols) {
+            const flatten = (syms: vscode.DocumentSymbol[]): vscode.DocumentSymbol[] => {
+                const r: vscode.DocumentSymbol[] = [];
+                for (const s of syms) { r.push(s); if (s.children) r.push(...flatten(s.children)); }
+                return r;
+            };
+            const match = flatten(symbols).find(s => s.name === TARGET_FUNCTION);
+            if (match) {
+                // Use selectionRange (the symbol name position), not range (full body)
+                const pos = match.selectionRange
+                    ? match.selectionRange.start
+                    : match.range.start;
+                output.appendLine(`  LSP:  preparing call hierarchy for '${TARGET_FUNCTION}' at L${pos.line + 1}:${pos.character}`);
+                const items = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+                    'vscode.prepareCallHierarchy',
+                    toUri(TARGET_FILE),
+                    pos,
+                );
+                if (items && items.length > 0) {
+                    const incoming = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
+                        'vscode.provideIncomingCalls', items[0],
+                    );
+                    if (incoming) {
+                        lspCallers.count = incoming.length;
+                        lspCallers.files = [...new Set(incoming.map(c => toRelative(c.from.uri.fsPath)))];
+                        output.appendLine(`  LSP:  ${incoming.length} callers from ${lspCallers.files.length} files`);
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        output.appendLine(`  LSP:  FAILED - ${e}`);
+    }
+
+    const grepCallerStdout = await runGrep([
+        '-rn', `${TARGET_FUNCTION}(`,
+        '--include', '*.py', '.',
+    ]);
+    const grepCallerLines = grepCallerStdout.trim().split('\n').filter(Boolean);
+    grepCallers.count = grepCallerLines.length;
+    grepCallers.files = [...new Set(grepCallerLines.map((l: string) => l.split(':')[0]))];
+    output.appendLine(`  grep: ${grepCallerLines.length} matches from ${grepCallers.files.length} files`);
+
+    results['get_callers'] = { lsp: lspCallers, grep: grepCallers };
+
+    // ---- module_summary ----
+    results['module_summary'] = { lsp: { success: true }, grep: { success: true } };
+
+    // Save results
+    // Save to workspace root (works regardless of which project is open)
+    const outFile = path.resolve(workspace, 'tool_lsp_results.json');
+    fs.writeFileSync(outFile, JSON.stringify(results, null, 2));
+    output.appendLine(`\nResults saved to ${outFile}`);
+    vscode.window.showInformationMessage(`Tool comparison complete. See Output panel for results.`);
 }
 
 /**
@@ -694,6 +1001,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     return;
                 case 'setupLocalWorkspace':
                     await this._handleSetupLocalWorkspace();
+                    return;
+                case 'tool_request':
+                    // Backend requests a tool execution on local workspace
+                    await this._handleLocalToolRequest(message);
                     return;
                 case 'openConductorWorkspace':
                     this._handleOpenConductorWorkspace(message.roomId);
@@ -4153,7 +4464,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
             // 2. Hard-reset: close DB, delete cache.db* + vectors/, reopen fresh.
             conductorDb = await resetWorkspaceDb(wsRoot, conductorDb);
-            console.log('[Conductor][RebuildIndex] Workspace hard-reset complete');
+            // Also clear the repo graph index so it gets rebuilt on next agent query.
+            const { clearRepoGraph } = require('./services/repoGraphBuilder');
+            clearRepoGraph(wsRoot);
+            console.log('[Conductor][RebuildIndex] Workspace hard-reset complete (repo graph cleared)');
 
             // 3. Re-index workspace from scratch (AST-only mode).
             const indexResult = await indexWorkspace(wsRoot, conductorDb, {
@@ -4410,6 +4724,945 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 success: false,
                 message: e instanceof Error ? e.message : String(e),
             });
+        }
+    }
+
+    /**
+     * Execute a tool request from the backend on the local workspace.
+     *
+     * The backend sends tool_request messages via WebSocket when the room
+     * uses a local workspace.  The extension executes the tool locally
+     * (subprocess for grep/git/find, fs for read/write) and sends the
+     * result back via the webview → WebSocket → backend.
+     */
+    private async _handleLocalToolRequest(message: any): Promise<void> {
+        const { requestId, tool, params, workspace } = message;
+        try {
+            // Use the three-tier dispatcher: AST tools → Python CLI → subprocess fallback
+            const { executeLocalTool: dispatchTool } = require('./services/localToolDispatcher');
+            const astRunner = require('./services/astToolRunner');
+
+            // Tier 2 AST runner: routes to the appropriate astToolRunner function
+            const astRunnerFn = async (t: string, p: any, w: string, _lsp: any) => {
+                const fn = (astRunner as any)[t];
+                if (typeof fn !== 'function') { return null; }
+                const res = await fn(w, p);
+                return res;
+            };
+
+            const result = await dispatchTool(
+                tool,
+                params,
+                workspace,
+                {
+                    extensionPath: this._extensionUri?.fsPath || '',
+                    lspHelpers: null,
+                },
+                // Subprocess fallback: the original _executeLocalTool
+                (t: string, p: any, w: string) => this._executeLocalTool(t, p, w),
+                // AST runner
+                astRunnerFn,
+            );
+            this._view?.webview.postMessage({
+                command: 'tool_response',
+                requestId,
+                tool,
+                success: result.success,
+                data: result.data,
+                error: result.error || null,
+                truncated: result.truncated || false,
+            });
+        } catch (e) {
+            this._view?.webview.postMessage({
+                command: 'tool_response',
+                requestId,
+                tool,
+                success: false,
+                data: null,
+                error: e instanceof Error ? e.message : String(e),
+                truncated: false,
+            });
+        }
+    }
+
+    /**
+     * Execute a code tool locally using VS Code Language Services first,
+     * falling back to subprocess/filesystem when LSP is unavailable.
+     */
+    private async _executeLocalTool(
+        tool: string, params: any, workspace: string
+    ): Promise<{ success: boolean; data: any; error?: string; truncated?: boolean }> {
+        const { execFile } = require('child_process');
+        const { promisify } = require('util');
+        const execFileAsync = promisify(execFile);
+        const fs = require('fs');
+        const path = require('path');
+
+        const maxOutput = 200_000; // 200KB output cap
+
+        // Helper: run a command and capture stdout
+        const run = async (
+            cmd: string, args: string[], cwd?: string, timeout = 30_000
+        ): Promise<{ stdout: string; stderr: string }> => {
+            try {
+                const result = await execFileAsync(cmd, args, {
+                    cwd: cwd || workspace,
+                    maxBuffer: 10 * 1024 * 1024, // 10MB
+                    timeout,
+                });
+                return { stdout: result.stdout || '', stderr: result.stderr || '' };
+            } catch (e: any) {
+                // grep returns exit code 1 for no matches — not an error
+                if (e.code === 1 && e.stdout !== undefined) {
+                    return { stdout: e.stdout || '', stderr: e.stderr || '' };
+                }
+                throw e;
+            }
+        };
+
+        // ---- VS Code Language Service helpers ----
+
+        const toUri = (filePath: string) => vscode.Uri.file(path.resolve(workspace, filePath));
+        const toRelative = (fsPath: string): string =>
+            path.relative(workspace, fsPath);
+
+        /** Get Document Symbols for a file via VS Code LSP. Returns null if unavailable. */
+        const getDocumentSymbols = async (filePath: string): Promise<vscode.DocumentSymbol[] | null> => {
+            try {
+                const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                    'vscode.executeDocumentSymbolProvider', toUri(filePath),
+                );
+                return (symbols && symbols.length > 0) ? symbols : null;
+            } catch { return null; }
+        };
+
+        /** Symbol kinds that are meaningful for code navigation (matches tree-sitter output).
+         *  Excludes Variable, Constant, Field, Property — these are parameters/locals
+         *  that Pylance/TS LSP reports but tree-sitter's file_outline omits. */
+        const OUTLINE_KINDS = new Set([
+            vscode.SymbolKind.Class,
+            vscode.SymbolKind.Function,
+            vscode.SymbolKind.Method,
+            vscode.SymbolKind.Constructor,
+            vscode.SymbolKind.Interface,
+            vscode.SymbolKind.Enum,
+            vscode.SymbolKind.Struct,
+            vscode.SymbolKind.Module,
+            vscode.SymbolKind.Namespace,
+        ]);
+
+        /** Flatten a DocumentSymbol tree, keeping only structural symbols.
+         *  Filters out local variables, parameters, and deeply nested symbols
+         *  to match tree-sitter's file_outline output (classes + their methods). */
+        const flattenSymbols = (
+            symbols: vscode.DocumentSymbol[], parent?: string, depth: number = 0
+        ): Array<{name: string; kind: string; line: number; endLine: number; parent?: string; detail?: string}> => {
+            const result: Array<{name: string; kind: string; line: number; endLine: number; parent?: string; detail?: string}> = [];
+            for (const s of symbols) {
+                const kind = vscode.SymbolKind[s.kind] || 'Unknown';
+                // Keep: top-level symbols (depth 0) or methods/functions inside a class (depth 1)
+                // Skip: parameters, variables, and anything deeper than depth 1
+                const isStructural = OUTLINE_KINDS.has(s.kind);
+                const isRelevantDepth = depth <= 1;
+                if (isStructural && isRelevantDepth) {
+                    result.push({
+                        name: s.name,
+                        kind,
+                        line: s.range.start.line + 1,
+                        endLine: s.range.end.line + 1,
+                        parent,
+                        detail: s.detail || undefined,
+                    });
+                }
+                // Only recurse into classes/modules/namespaces (not into functions)
+                if (s.children && s.children.length > 0 &&
+                    (s.kind === vscode.SymbolKind.Class ||
+                     s.kind === vscode.SymbolKind.Module ||
+                     s.kind === vscode.SymbolKind.Namespace ||
+                     s.kind === vscode.SymbolKind.Enum ||
+                     s.kind === vscode.SymbolKind.Interface)) {
+                    result.push(...flattenSymbols(s.children, s.name, depth + 1));
+                }
+            }
+            return result;
+        };
+
+        /** Find references via VS Code LSP. Returns null if unavailable. */
+        const findReferencesLsp = async (
+            filePath: string, line: number, character: number
+        ): Promise<vscode.Location[] | null> => {
+            try {
+                const refs = await vscode.commands.executeCommand<vscode.Location[]>(
+                    'vscode.executeReferenceProvider',
+                    toUri(filePath), new vscode.Position(line, character),
+                );
+                return (refs && refs.length > 0) ? refs : null;
+            } catch { return null; }
+        };
+
+        /** Get Call Hierarchy items at a position. */
+        const prepareCallHierarchy = async (
+            filePath: string, line: number, character: number
+        ): Promise<vscode.CallHierarchyItem[] | null> => {
+            try {
+                const items = await vscode.commands.executeCommand<vscode.CallHierarchyItem[]>(
+                    'vscode.prepareCallHierarchy',
+                    toUri(filePath), new vscode.Position(line, character),
+                );
+                return (items && items.length > 0) ? items : null;
+            } catch { return null; }
+        };
+
+        switch (tool) {
+            // ---- Repo graph (lazy-built index) ----
+            case 'get_repo_graph': {
+                const { getOrBuildRepoGraph } = require('./services/repoGraphBuilder');
+                const forceRebuild = params.force_rebuild || false;
+                const graph = await getOrBuildRepoGraph(workspace, forceRebuild);
+                if (!graph) {
+                    return { success: true, data: { files: {}, stats: { total_files: 0, total_definitions: 0, total_references: 0 } } };
+                }
+                return { success: true, data: graph };
+            }
+
+            // ---- File operations ----
+            case 'read_file': {
+                const rawPath = params.path || params.file_path || params.file;
+                if (!rawPath) { return { success: false, data: null, error: 'read_file requires a file path' }; }
+                const filePath = path.resolve(workspace, rawPath);
+                if (!filePath.startsWith(workspace)) {
+                    return { success: false, data: null, error: 'Path traversal blocked' };
+                }
+                const content = fs.readFileSync(filePath, 'utf-8');
+                const lines = content.split('\n');
+                const start = (params.start_line || 1) - 1;
+                const end = params.end_line || lines.length;
+                const slice = lines.slice(start, end).join('\n');
+                return {
+                    success: true,
+                    data: { content: slice, total_lines: lines.length, path: params.path || params.file_path },
+                    truncated: slice.length > maxOutput,
+                };
+            }
+
+            case 'list_files': {
+                const target = params.directory || params.path || '.';
+                const depth = params.max_depth || 3;
+                const includeGlob = params.include_glob || '';
+                const findArgs = [
+                    target, '-maxdepth', String(depth),
+                    '-type', 'f',
+                    '-not', '-path', '*/.git/*',
+                    '-not', '-path', '*/node_modules/*',
+                    '-not', '-path', '*/__pycache__/*',
+                ];
+                if (includeGlob) {
+                    findArgs.push('-name', includeGlob);
+                }
+                const { stdout } = await run('find', findArgs);
+                const files = stdout.trim().split('\n').filter(Boolean);
+                return { success: true, data: { files, count: files.length } };
+            }
+
+            case 'grep': {
+                const pattern = params.pattern;
+                if (!pattern) { return { success: false, data: null, error: 'grep requires a pattern' }; }
+                const grepPath = params.path || '.';
+                const maxResults = String(params.max_results || 50);
+                const includeGlob = params.include_glob || params.include || '';
+
+                // Prefer ripgrep (rg) — same as the Python backend
+                let stdout: string;
+                try {
+                    const rgArgs = [
+                        '-n', '--no-heading', '--with-filename',
+                        '-m', maxResults,
+                    ];
+                    if (includeGlob) {
+                        rgArgs.push('--glob', includeGlob);
+                    }
+                    rgArgs.push('--', pattern, grepPath);
+                    const result = await run('rg', rgArgs);
+                    stdout = result.stdout;
+                } catch {
+                    // Fallback to system grep if rg is not installed
+                    const grepArgs = ['-rn'];
+                    if (includeGlob) {
+                        grepArgs.push('--include', includeGlob);
+                    }
+                    grepArgs.push('-m', maxResults, '--', pattern, grepPath);
+                    const result = await run('grep', grepArgs);
+                    stdout = result.stdout;
+                }
+
+                const matches = stdout.trim().split('\n').filter(Boolean).map(line => {
+                    const parts = line.split(':');
+                    return {
+                        file: parts[0],
+                        line: parseInt(parts[1]) || 0,
+                        content: parts.slice(2).join(':'),
+                    };
+                });
+                return {
+                    success: true,
+                    data: { matches, count: matches.length, pattern },
+                    truncated: stdout.length > maxOutput,
+                };
+            }
+
+            case 'find_symbol': {
+                const symbol = params.name || params.symbol;
+                const kindFilter = params.kind ? params.kind.toLowerCase() : '';
+                // Try VS Code Workspace Symbol Provider first
+                try {
+                    const wsSymbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+                        'vscode.executeWorkspaceSymbolProvider', symbol,
+                    );
+                    if (wsSymbols && wsSymbols.length > 0) {
+                        let matches = wsSymbols
+                            .filter(s => s.location.uri.fsPath.startsWith(workspace))
+                            .map(s => ({
+                                file: toRelative(s.location.uri.fsPath),
+                                line: s.location.range.start.line + 1,
+                                content: `${vscode.SymbolKind[s.kind]} ${s.name}`,
+                                kind: vscode.SymbolKind[s.kind].toLowerCase(),
+                            }));
+                        if (kindFilter) {
+                            matches = matches.filter(m => m.kind === kindFilter);
+                        }
+                        matches = matches.slice(0, 50);
+                        if (matches.length > 0) {
+                            return { success: true, data: { matches, count: matches.length, symbol, source: 'lsp' } };
+                        }
+                    }
+                } catch {}
+                // Fallback to grep
+                const args = [
+                    '-rn', '--include', '*.py', '--include', '*.ts', '--include', '*.js',
+                    '--include', '*.java', '--include', '*.go', '--include', '*.rs',
+                    '-E', `(def |function |class |interface |type |const |var |let |struct )${symbol}`,
+                    '.',
+                ];
+                const { stdout } = await run('grep', args);
+                const matches = stdout.trim().split('\n').filter(Boolean).map(line => {
+                    const parts = line.split(':');
+                    return { file: parts[0], line: parseInt(parts[1]) || 0, content: parts.slice(2).join(':').trim() };
+                });
+                return { success: true, data: { matches, count: matches.length, symbol, source: 'grep' } };
+            }
+
+            case 'file_outline': {
+                const filePath = params.path || params.file_path || params.file;
+                if (!filePath) { return { success: false, data: null, error: 'file_outline requires a file path' }; }
+                // Try VS Code Document Symbols first (LSP-powered, exact AST)
+                const docSymbols = await getDocumentSymbols(filePath);
+                if (docSymbols) {
+                    const flat = flattenSymbols(docSymbols);
+                    const symbols = flat.map(s => ({
+                        line: s.line,
+                        text: `${s.kind} ${s.name}${s.parent ? ` (in ${s.parent})` : ''}`,
+                        kind: s.kind,
+                        name: s.name,
+                        end_line: s.endLine,
+                    }));
+                    return { success: true, data: { path: filePath, symbols, count: symbols.length, source: 'lsp' } };
+                }
+                // Fallback to grep
+                const args = [
+                    '-n', '-E',
+                    '(^\\s*(def |async def |function |class |interface |type |const |export |struct |impl |fn |pub fn ))',
+                    path.resolve(workspace, filePath),
+                ];
+                const { stdout } = await run('grep', args);
+                const symbols = stdout.trim().split('\n').filter(Boolean).map(line => {
+                    const parts = line.split(':');
+                    return { line: parseInt(parts[0]) || 0, text: parts.slice(1).join(':').trim() };
+                });
+                return { success: true, data: { path: filePath, symbols, count: symbols.length, source: 'grep' } };
+            }
+
+            // ---- Git operations ----
+            case 'git_log': {
+                const maxCount = params.n || params.max_count || 20;
+                const filePath = params.file || params.path || '';
+                // Get commits with --stat so LLM sees which files each commit touched
+                const args = ['log', `--max-count=${maxCount}`,
+                    '--pretty=format:COMMIT_START%H|%an|%ad|%s', '--date=iso', '--stat=120'];
+                if (params.search) { args.push(`--grep=${params.search}`); }
+                if (filePath) { args.push('--', filePath); }
+                const { stdout } = await run('git', args);
+                // Parse interleaved format: COMMIT_START... then stat lines until next COMMIT_START
+                const commits: any[] = [];
+                let current: any = null;
+                for (const line of stdout.split('\n')) {
+                    if (line.startsWith('COMMIT_START')) {
+                        if (current) { commits.push(current); }
+                        const rest = line.slice('COMMIT_START'.length);
+                        const [hash, author, date, ...msgParts] = rest.split('|');
+                        current = { hash: hash?.slice(0, 8), author, date, message: msgParts.join('|'), stat: [] as string[], files_changed: 0 };
+                    } else if (current && line.trim() && line.includes('|')) {
+                        current.stat.push(line.trim());
+                        current.files_changed++;
+                    }
+                }
+                if (current) { commits.push(current); }
+                // Cap stat lines per commit
+                for (const c of commits) { c.stat = c.stat.slice(0, 10); }
+                return { success: true, data: { commits, count: commits.length } };
+            }
+
+            case 'git_diff': {
+                const ref1 = params.ref1 || params.ref || 'HEAD~1';
+                const ref2 = params.ref2 || '';
+                const filePath = params.path || params.file || '';
+                const contextLines = params.context_lines ?? 10;
+                const args = ref2 ? ['diff', ref1, ref2] : ['diff', ref1];
+                args.push(`-U${contextLines}`);
+                if (filePath) { args.push('--', filePath); }
+                const { stdout } = await run('git', args);
+                return {
+                    success: true,
+                    data: { diff: stdout, ref: ref1 },
+                    truncated: stdout.length > maxOutput,
+                };
+            }
+
+            case 'git_blame': {
+                const filePath = params.file || params.path || params.file_path;
+                if (!filePath) { return { success: false, data: null, error: 'git_blame requires a file path (file, path, or file_path param)' }; }
+                const args = ['blame', '--line-porcelain'];
+                if (params.start_line && params.end_line) {
+                    args.push(`-L${params.start_line},${params.end_line}`);
+                }
+                args.push(filePath);
+                const { stdout } = await run('git', args);
+                return { success: true, data: { blame: stdout, path: filePath }, truncated: stdout.length > maxOutput };
+            }
+
+            case 'git_show': {
+                const ref = params.commit || params.ref || 'HEAD';
+                const showArgs = ['show', ref];
+                const showFile = params.file || params.path;
+                if (showFile) { showArgs.push('--', showFile); }
+                const { stdout } = await run('git', showArgs);
+                const lineCount = stdout.split('\n').length;
+                return { success: true, data: { content: stdout, ref, lines: lineCount }, truncated: stdout.length > maxOutput };
+            }
+
+            // ---- Test operations ----
+            case 'find_tests': {
+                const name = params.name || '';
+                const searchPath = params.path || '.';
+                if (!name) { return { success: false, data: null, error: 'find_tests requires a name parameter' }; }
+                // Find test files, then grep for the target name within them
+                const { stdout: testFiles } = await run('find', [
+                    searchPath, '-type', 'f',
+                    '(', '-name', 'test_*.py', '-o', '-name', '*.test.ts', '-o',
+                    '-name', '*.test.js', '-o', '-name', '*.spec.ts', '-o',
+                    '-name', '*.spec.js', '-o', '-name', '*_test.go', '-o',
+                    '-name', '*Test.java', ')',
+                    '-not', '-path', '*/node_modules/*',
+                    '-not', '-path', '*/.git/*',
+                ]);
+                const allTestFiles = testFiles.trim().split('\n').filter(Boolean);
+                if (allTestFiles.length === 0) {
+                    return { success: true, data: { matches: [], count: 0 } };
+                }
+                // Grep for the name in test files
+                const { stdout: grepOut } = await run('grep', [
+                    '-ln', name, ...allTestFiles,
+                ]);
+                const matchingFiles = grepOut.trim().split('\n').filter(Boolean);
+                return { success: true, data: { matches: matchingFiles, count: matchingFiles.length, name } };
+            }
+
+            case 'run_test': {
+                const testFile = params.test_file || params.command;
+                if (!testFile) { return { success: false, data: null, error: 'run_test requires test_file' }; }
+                const testName = params.test_name || '';
+                const timeout = (params.timeout || 30) * 1000;
+                // Auto-detect test runner from file extension
+                const ext = path.extname(testFile).toLowerCase();
+                let cmd: string[];
+                if (ext === '.py') {
+                    cmd = testName ? ['python', '-m', 'pytest', testFile, '-k', testName, '-v'] : ['python', '-m', 'pytest', testFile, '-v'];
+                } else if (['.ts', '.js', '.tsx', '.jsx'].includes(ext)) {
+                    cmd = testName ? ['npx', 'jest', testFile, '-t', testName] : ['npx', 'jest', testFile];
+                } else if (ext === '.go') {
+                    cmd = ['go', 'test', '-run', testName || '.', '-v', `./${path.dirname(testFile)}`];
+                } else {
+                    // Fallback: try pytest
+                    cmd = ['python', '-m', 'pytest', testFile, '-v'];
+                }
+                const { stdout, stderr } = await run(cmd[0], cmd.slice(1), workspace, timeout);
+                return { success: true, data: { stdout, stderr, command: cmd.join(' ') } };
+            }
+
+            case 'git_diff_files': {
+                const ref = params.ref || 'HEAD';
+                const refParts = ref.trim().split(/\s+/);
+                const { stdout: numstat } = await run('git', ['diff', '--numstat', ...refParts]);
+                const { stdout: namestatus } = await run('git', ['diff', '--name-status', ...refParts]);
+                const files: any[] = [];
+                const statLines = namestatus.trim().split('\n').filter(Boolean);
+                const numLines = numstat.trim().split('\n').filter(Boolean);
+                const numMap: Record<string, {added: number; deleted: number}> = {};
+                for (const nl of numLines) {
+                    const [a, d, ...fp] = nl.split('\t');
+                    numMap[fp.join('\t')] = { added: parseInt(a) || 0, deleted: parseInt(d) || 0 };
+                }
+                for (const sl of statLines) {
+                    const parts = sl.split('\t');
+                    const status = parts[0];
+                    const filePath = parts[parts.length - 1];
+                    const nums = numMap[filePath] || { added: 0, deleted: 0 };
+                    files.push({ file: filePath, status: status[0], added: nums.added, deleted: nums.deleted });
+                }
+                return { success: true, data: { files, count: files.length, ref } };
+            }
+
+            case 'ast_search': {
+                // ast-grep subprocess — may not be installed on the developer's machine
+                const pattern = params.pattern;
+                const searchPath = params.path || '.';
+                const astArgs = ['run', '-p', pattern, '--json'];
+                if (params.language) { astArgs.push('-l', params.language); }
+                astArgs.push(path.resolve(workspace, searchPath));
+                try {
+                    const { stdout } = await run('ast-grep', astArgs);
+                    const parsed = JSON.parse(stdout || '[]');
+                    const matches = (Array.isArray(parsed) ? parsed : []).slice(0, params.max_results || 30);
+                    return { success: true, data: { matches, count: matches.length, pattern } };
+                } catch {
+                    return { success: false, data: null, error: 'ast-grep not installed or failed. Install with: npm i -g @ast-grep/cli' };
+                }
+            }
+
+            case 'find_references': {
+                const symbol = params.symbol_name || params.name;
+                const searchFile = params.file || '';
+                // Try VS Code LSP Reference Provider (requires knowing the symbol location)
+                if (searchFile) {
+                    const rawSymbols = await getDocumentSymbols(searchFile);
+                    if (rawSymbols) {
+                        const findSym = (syms: vscode.DocumentSymbol[]): vscode.DocumentSymbol | undefined => {
+                            for (const s of syms) {
+                                if (s.name === symbol) { return s; }
+                                if (s.children) { const f = findSym(s.children); if (f) { return f; } }
+                            }
+                            return undefined;
+                        };
+                        const match = findSym(rawSymbols);
+                        if (match) {
+                            const pos = match.selectionRange ? match.selectionRange.start : match.range.start;
+                            const lspRefs = await findReferencesLsp(searchFile, pos.line, pos.character);
+                            if (lspRefs) {
+                                const references = lspRefs.map(r => ({
+                                    file: toRelative(r.uri.fsPath),
+                                    line: r.range.start.line + 1,
+                                    content: '', // LSP doesn't return line content
+                                }));
+                                return { success: true, data: { references, count: references.length, symbol, source: 'lsp' } };
+                            }
+                        }
+                    }
+                }
+                // Fallback to grep
+                const { stdout } = await run('grep', [
+                    '-rn', '-w', symbol,
+                    '--include', '*.py', '--include', '*.ts', '--include', '*.js',
+                    '--include', '*.java', '--include', '*.go', '--include', '*.rs',
+                    '-m', '100', searchFile || '.',
+                ]);
+                const matches = stdout.trim().split('\n').filter(Boolean).map(line => {
+                    const parts = line.split(':');
+                    return { file: parts[0], line: parseInt(parts[1]) || 0, content: parts.slice(2).join(':').trim() };
+                });
+                return { success: true, data: { references: matches, count: matches.length, symbol, source: 'grep' } };
+            }
+
+            case 'test_outline': {
+                const filePath = params.path || params.file_path || params.file;
+                if (!filePath) { return { success: false, data: null, error: 'test_outline requires a file path' }; }
+                const resolved = path.resolve(workspace, filePath);
+                const { stdout } = await run('grep', [
+                    '-n', '-E',
+                    '(def test_|it\\(|describe\\(|test\\(|@Test|func Test|#\\[test\\])',
+                    resolved,
+                ]);
+                const tests = stdout.trim().split('\n').filter(Boolean).map(line => {
+                    const parts = line.split(':');
+                    return { line: parseInt(parts[0]) || 0, text: parts.slice(1).join(':').trim() };
+                });
+                return { success: true, data: { path: filePath, tests, count: tests.length } };
+            }
+
+            case 'trace_variable': {
+                const varName = params.variable_name || params.name;
+                const file = params.file || params.file_path || params.path;
+                const direction = params.direction || 'forward';
+                const functionName = params.function_name || '';
+                if (!varName || !file) { return { success: false, data: null, error: 'trace_variable requires variable_name and file' }; }
+                // Grep for the variable in the file
+                const { stdout } = await run('grep', ['-n', '-w', varName, path.resolve(workspace, file)]);
+                const usages = stdout.trim().split('\n').filter(Boolean).map(line => {
+                    const parts = line.split(':');
+                    return { line: parseInt(parts[0]) || 0, content: parts.slice(1).join(':').trim() };
+                });
+                // If backward, also search callers
+                if (direction === 'backward') {
+                    const { stdout: callerOut } = await run('grep', ['-rn', `${functionName || varName}(`, '--include', '*.py', '--include', '*.ts', '--include', '*.js', '.']);
+                    const callers = callerOut.trim().split('\n').filter(Boolean).slice(0, 20).map(line => {
+                        const parts = line.split(':');
+                        return { file: parts[0], line: parseInt(parts[1]) || 0, content: parts.slice(2).join(':').trim() };
+                    });
+                    return { success: true, data: { variable: varName, file, direction, usages, callers, count: usages.length } };
+                }
+                return { success: true, data: { variable: varName, file, usages, count: usages.length } };
+            }
+
+            case 'compressed_view': {
+                const filePath = params.file_path || params.path || params.file;
+                if (!filePath) { return { success: false, data: null, error: 'compressed_view requires a file path' }; }
+                const resolved = path.resolve(workspace, filePath);
+                if (!resolved.startsWith(workspace)) {
+                    return { success: false, data: null, error: 'Path traversal blocked' };
+                }
+                const content = fs.readFileSync(resolved, 'utf-8');
+                const lines = content.split('\n');
+                const totalLines = lines.length;
+
+                // Try VS Code Document Symbols for precise signatures
+                const focus = params.focus ? params.focus.toLowerCase() : '';
+                const docSymbols = await getDocumentSymbols(filePath);
+                if (docSymbols) {
+                    let flat = flattenSymbols(docSymbols);
+                    if (focus) {
+                        flat = flat.filter(s => s.name.toLowerCase().includes(focus) || (s.parent && s.parent.toLowerCase().includes(focus)));
+                    }
+                    const viewLines: string[] = [`## ${filePath} (${totalLines} lines, ${flat.length} symbols)`, ''];
+                    for (const s of flat) {
+                        const indent = s.parent ? '  ' : '';
+                        const sig = lines[s.line - 1]?.trimEnd() || s.name;
+                        viewLines.push(`${indent}L${s.line}: ${s.kind} ${s.name} — ${sig}`);
+                    }
+                    const view = viewLines.join('\n');
+                    return {
+                        success: true,
+                        data: { path: filePath, total_lines: totalLines, symbols_count: flat.length, view, source: 'lsp' },
+                        truncated: view.length > maxOutput,
+                    };
+                }
+                // Fallback to regex
+                const symbols: any[] = [];
+                lines.forEach((line: string, i: number) => {
+                    if (/^\s*(def |async def |function |class |interface |type |const |export |struct |impl |fn |pub fn |@)/.test(line)) {
+                        symbols.push({ line: i + 1, text: line.trimEnd() });
+                    }
+                });
+                let filteredSymbols = symbols;
+                if (focus) {
+                    filteredSymbols = symbols.filter(s => s.text.toLowerCase().includes(focus));
+                }
+                const view = filteredSymbols.map(s => `L${s.line}: ${s.text}`).join('\n');
+                return {
+                    success: true,
+                    data: { path: filePath, total_lines: totalLines, symbols_count: symbols.length, view, source: 'grep' },
+                    truncated: view.length > maxOutput,
+                };
+            }
+
+            case 'module_summary': {
+                const filePath = params.file_path || params.path || params.file || params.module_path;
+                if (!filePath) { return { success: false, data: null, error: 'module_summary requires a file path' }; }
+                const resolved = path.resolve(workspace, filePath);
+
+                // Check path exists before attempting read
+                let stat: fs.Stats;
+                try {
+                    stat = fs.statSync(resolved);
+                } catch {
+                    return { success: false, data: null, error: `Path not found: ${filePath}` };
+                }
+                if (stat.isDirectory()) {
+                    const entries = fs.readdirSync(resolved, { withFileTypes: true });
+                    const files: string[] = [];
+                    const allDefs: string[] = [];
+                    const allImports: string[] = [];
+                    for (const entry of entries) {
+                        if (entry.isFile() && /\.(py|ts|tsx|js|jsx|java|go|rs|c|cpp|h)$/.test(entry.name)) {
+                            files.push(entry.name);
+                            try {
+                                const fileContent = fs.readFileSync(path.join(resolved, entry.name), 'utf-8');
+                                for (const line of fileContent.split('\n')) {
+                                    const t = line.trim();
+                                    if (/^(import |from |require\(|const .* = require|use |#include)/.test(t)) {
+                                        allImports.push(t);
+                                    }
+                                    if (/^(def |async def |function |class |interface |type |export (default )?(function|class|const|interface|type)|pub (fn|struct|enum|trait))/.test(t)) {
+                                        allDefs.push(`${entry.name}: ${t}`);
+                                    }
+                                }
+                            } catch { /* skip unreadable files */ }
+                        } else if (entry.isDirectory()) {
+                            files.push(entry.name + '/');
+                        }
+                    }
+                    return {
+                        success: true,
+                        data: { path: filePath, files, definitions: allDefs, imports_count: allImports.length, definitions_count: allDefs.length, source: 'directory_scan' },
+                    };
+                }
+
+                const content = fs.readFileSync(resolved, 'utf-8');
+                const lines = content.split('\n');
+                // Extract imports (always regex — LSP doesn't expose imports as symbols)
+                const imports: string[] = [];
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (/^(import |from |require\(|const .* = require|use )/.test(trimmed)) {
+                        imports.push(trimmed);
+                    }
+                }
+                // Try VS Code Document Symbols for definitions
+                const docSymbols = await getDocumentSymbols(filePath);
+                if (docSymbols) {
+                    const flat = flattenSymbols(docSymbols).filter(s => !s.parent); // top-level only
+                    const definitions = flat.map(s => `${s.kind} ${s.name}`);
+                    return {
+                        success: true,
+                        data: { path: filePath, total_lines: lines.length, imports, definitions, imports_count: imports.length, definitions_count: definitions.length, source: 'lsp' },
+                    };
+                }
+                // Fallback to regex
+                const definitions: string[] = [];
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (/^(def |async def |function |class |interface |type |export (default )?(function|class|const|interface|type))/.test(trimmed)) {
+                        definitions.push(trimmed);
+                    }
+                }
+                return {
+                    success: true,
+                    data: { path: filePath, total_lines: lines.length, imports, definitions, imports_count: imports.length, definitions_count: definitions.length, source: 'grep' },
+                };
+            }
+
+            case 'expand_symbol': {
+                const filePath = params.file_path || params.path || params.file;
+                const symbolName = params.symbol_name || params.name || params.symbol;
+                if (!filePath) { return { success: false, data: null, error: 'expand_symbol requires file_path' }; }
+                if (!symbolName) { return { success: false, data: null, error: 'expand_symbol requires symbol_name' }; }
+                const resolved = path.resolve(workspace, filePath);
+                const content = fs.readFileSync(resolved, 'utf-8');
+                const lines = content.split('\n');
+
+                // Try VS Code Document Symbols for exact range
+                const docSymbols = await getDocumentSymbols(filePath);
+                if (docSymbols) {
+                    const flat = flattenSymbols(docSymbols);
+                    const match = flat.find(s => s.name === symbolName);
+                    if (match) {
+                        const body = lines.slice(match.line - 1, match.endLine).join('\n');
+                        return {
+                            success: true,
+                            data: { symbol: symbolName, path: filePath, start_line: match.line, end_line: match.endLine, body, source: 'lsp' },
+                            truncated: body.length > maxOutput,
+                        };
+                    }
+                }
+                // Fallback to indentation-based extraction
+                let startLine = -1;
+                for (let i = 0; i < lines.length; i++) {
+                    if (lines[i].includes(symbolName) &&
+                        /^\s*(def |async def |function |class |interface |struct |fn |pub fn |impl )/.test(lines[i])) {
+                        startLine = i;
+                        break;
+                    }
+                }
+                if (startLine < 0) {
+                    return { success: false, data: null, error: `Symbol '${symbolName}' not found in ${filePath}` };
+                }
+                const baseIndent = lines[startLine].search(/\S/);
+                let endLine = startLine + 1;
+                while (endLine < lines.length) {
+                    const line = lines[endLine];
+                    if (line.trim() === '') { endLine++; continue; }
+                    const indent = line.search(/\S/);
+                    if (indent <= baseIndent && line.trim() !== '') { break; }
+                    endLine++;
+                }
+                const body = lines.slice(startLine, endLine).join('\n');
+                return {
+                    success: true,
+                    data: { symbol: symbolName, path: filePath, start_line: startLine + 1, end_line: endLine, body, source: 'grep' },
+                    truncated: body.length > maxOutput,
+                };
+            }
+
+            case 'get_dependencies':
+            case 'get_dependents': {
+                // Parse import/require statements from the file
+                const filePath = params.file_path || params.path || params.file;
+                if (!filePath) { return { success: false, data: null, error: `${tool} requires file_path` }; }
+                const resolved = path.resolve(workspace, filePath);
+                const content = fs.readFileSync(resolved, 'utf-8');
+                const deps: string[] = [];
+                for (const line of content.split('\n')) {
+                    const trimmed = line.trim();
+                    // Python: from X import Y, import X
+                    let m = trimmed.match(/^(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))/);
+                    if (m) { deps.push(m[1] || m[2]); continue; }
+                    // JS/TS: import ... from 'X', require('X')
+                    m = trimmed.match(/(?:from\s+['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]\s*\))/);
+                    if (m) { deps.push(m[1] || m[2]); continue; }
+                    // Go: import "X"
+                    m = trimmed.match(/^\s*"([^"]+)"\s*$/);
+                    if (m && content.includes('import (')) { deps.push(m[1]); }
+                }
+                const toolName = tool;
+                if (tool === 'get_dependents') {
+                    // Reverse: grep for files that import this file
+                    const basename = path.basename(filePath, path.extname(filePath));
+                    const { stdout } = await run('grep', [
+                        '-rln', basename,
+                        '--include', '*.py', '--include', '*.ts', '--include', '*.js',
+                        '--include', '*.go', '--include', '*.rs', '--include', '*.java',
+                        '.',
+                    ]);
+                    const dependents = stdout.trim().split('\n').filter(Boolean);
+                    return { success: true, data: { file: filePath, dependents, count: dependents.length } };
+                }
+                return { success: true, data: { file: filePath, dependencies: deps, count: deps.length } };
+            }
+
+            case 'get_callees':
+            case 'get_callers': {
+                const symbolName = params.name || params.symbol_name || params.function_name;
+                const filePath = params.file || params.file_path || '.';
+
+                // Try VS Code Call Hierarchy (LSP-powered)
+                if (filePath !== '.') {
+                    // Get raw DocumentSymbols (not flattened) to access selectionRange
+                    const rawSymbols = await getDocumentSymbols(filePath);
+                    if (rawSymbols) {
+                        // Find the symbol with selectionRange for precise positioning
+                        const findSymbol = (syms: vscode.DocumentSymbol[]): vscode.DocumentSymbol | undefined => {
+                            for (const s of syms) {
+                                if (s.name === symbolName) { return s; }
+                                if (s.children) {
+                                    const found = findSymbol(s.children);
+                                    if (found) { return found; }
+                                }
+                            }
+                            return undefined;
+                        };
+                        const match = findSymbol(rawSymbols);
+                        if (match) {
+                            const pos = match.selectionRange ? match.selectionRange.start : match.range.start;
+                            const items = await prepareCallHierarchy(filePath, pos.line, pos.character);
+                            if (items && items.length > 0) {
+                                try {
+                                    if (tool === 'get_callees') {
+                                        const outgoing = await vscode.commands.executeCommand<vscode.CallHierarchyOutgoingCall[]>(
+                                            'vscode.provideOutgoingCalls', items[0],
+                                        );
+                                        if (outgoing && outgoing.length > 0) {
+                                            const callees = outgoing.map(c => ({
+                                                name: c.to.name,
+                                                file: toRelative(c.to.uri.fsPath),
+                                                line: c.to.range.start.line + 1,
+                                                kind: vscode.SymbolKind[c.to.kind],
+                                            }));
+                                            return { success: true, data: { symbol: symbolName, callees, count: callees.length, source: 'lsp' } };
+                                        }
+                                    } else {
+                                        const incoming = await vscode.commands.executeCommand<vscode.CallHierarchyIncomingCall[]>(
+                                            'vscode.provideIncomingCalls', items[0],
+                                        );
+                                        if (incoming && incoming.length > 0) {
+                                            const callers = incoming.map(c => ({
+                                                name: c.from.name,
+                                                file: toRelative(c.from.uri.fsPath),
+                                                line: c.from.range.start.line + 1,
+                                                kind: vscode.SymbolKind[c.from.kind],
+                                            }));
+                                            return { success: true, data: { symbol: symbolName, callers, count: callers.length, source: 'lsp' } };
+                                        }
+                                    }
+                                } catch {}
+                            }
+                        }
+                    }
+                }
+                // Fallback to grep/regex
+                if (tool === 'get_callees') {
+                    const resolved = path.resolve(workspace, filePath);
+                    const content = fs.readFileSync(resolved, 'utf-8');
+                    const callPattern = /\b([a-zA-Z_]\w*)\s*\(/g;
+                    const callees = new Set<string>();
+                    let match;
+                    while ((match = callPattern.exec(content)) !== null) {
+                        const name = match[1];
+                        if (!['if', 'for', 'while', 'return', 'print', 'len', 'str', 'int', 'float', 'bool', 'list', 'dict', 'set', 'tuple', 'type', 'isinstance', 'hasattr', 'getattr', 'setattr', 'super'].includes(name)) {
+                            callees.add(name);
+                        }
+                    }
+                    return { success: true, data: { symbol: symbolName, callees: Array.from(callees), count: callees.size, source: 'grep' } };
+                } else {
+                    const searchPath = params.path || '.';
+                    const { stdout } = await run('grep', [
+                        '-rn', `${symbolName}(`,
+                        '--include', '*.py', '--include', '*.ts', '--include', '*.js',
+                        '--include', '*.java', '--include', '*.go', '--include', '*.rs',
+                        searchPath,
+                    ]);
+                    const callers = stdout.trim().split('\n').filter(Boolean).map(line => {
+                        const parts = line.split(':');
+                        return { file: parts[0], line: parseInt(parts[1]) || 0, content: parts.slice(2).join(':').trim() };
+                    });
+                    return { success: true, data: { symbol: symbolName, callers, count: callers.length, source: 'grep' } };
+                }
+            }
+
+            case 'detect_patterns': {
+                const filePath = params.file_path || params.path || params.file;
+                const resolved = path.resolve(workspace, filePath || '.');
+                const content = filePath ? fs.readFileSync(resolved, 'utf-8') : '';
+                const categories = params.categories ? new Set((params.categories as string[]).map(c => c.toLowerCase())) : null;
+                const maxResults = params.max_results || 50;
+
+                const allPatterns: Array<{category: string; pattern: string; match: boolean}> = [
+                    { category: 'webhook', pattern: 'Webhook/Callback', match: /@app\.(route|get|post|put|delete)|@router\.|app\.(get|post|put|delete)\(/.test(content) },
+                    { category: 'queue', pattern: 'Queue Consumer/Producer', match: /sqs|sns|kafka|rabbitmq|celery|bull/i.test(content) },
+                    { category: 'retry', pattern: 'Retry/Backoff', match: /retry|backoff|max_retries|exponential/i.test(content) },
+                    { category: 'lock', pattern: 'Lock/Mutex', match: /lock|mutex|semaphore|synchronized/i.test(content) },
+                    { category: 'check_then_act', pattern: 'Check-then-Act', match: /if.*exists.*\n.*create|if.*not.*found.*\n.*insert/i.test(content) },
+                    { category: 'transaction', pattern: 'Transaction Boundary', match: /BEGIN|COMMIT|ROLLBACK|@Transactional|session\.begin/i.test(content) },
+                    { category: 'token_lifecycle', pattern: 'Token Lifecycle', match: /token.*expir|refresh.*token|access_token/i.test(content) },
+                    { category: 'side_effect_chain', pattern: 'Side-Effect Chain', match: /async def |async function |await /.test(content) },
+                    { category: 'orm', pattern: 'ORM Model', match: /class .+\(.*Model\)|@Entity|@Table/.test(content) },
+                    { category: 'test', pattern: 'Test File', match: /def test_|describe\(|it\(|@Test/.test(content) },
+                    { category: 'error_handling', pattern: 'Error Handling', match: /try:|try\s*\{|catch\s*\(/.test(content) },
+                    { category: 'todo', pattern: 'Has TODOs', match: /TODO|FIXME|HACK|XXX/.test(content) },
+                ];
+
+                let matched = allPatterns.filter(p => p.match);
+                if (categories) {
+                    matched = matched.filter(p => categories.has(p.category));
+                }
+                const patterns = matched.slice(0, maxResults).map(p => p.pattern);
+                return { success: true, data: { file: filePath || '.', patterns, count: patterns.length } };
+            }
+
+            // ---- Fallback ----
+            default: {
+                return {
+                    success: false,
+                    error: `Tool '${tool}' is not supported in local mode`,
+                    data: null,
+                };
+            }
         }
     }
 

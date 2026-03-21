@@ -15,7 +15,7 @@ class TestClassifyQuery:
     def test_entry_point_discovery(self):
         result = classify_query("Where is the endpoint for user login?")
         assert result.query_type == "entry_point_discovery"
-        assert "grep" in result.initial_tools
+        assert "grep" in result.tool_set
 
     def test_business_flow_tracing(self):
         result = classify_query("How does the payment flow work step by step?")
@@ -30,7 +30,7 @@ class TestClassifyQuery:
     def test_impact_analysis(self):
         result = classify_query("What will break if I refactor the UserService class?")
         assert result.query_type == "impact_analysis"
-        assert "get_dependents" in result.initial_tools
+        assert "get_dependents" in result.tool_set
 
     def test_architecture_question(self):
         result = classify_query("What is the overall architecture and module structure?")
@@ -54,17 +54,14 @@ class TestClassifyQuery:
         result = classify_query("Where is the login handler?")
         assert isinstance(result, QueryClassification)
         assert result.query_type
-        assert result.strategy
-        assert isinstance(result.initial_tools, list)
         assert result.budget_level in ("low", "medium", "high")
         assert result.suggested_token_budget > 0
+        assert isinstance(result.tool_set, list)
 
     def test_all_query_types_have_keywords(self):
         for qtype, spec in QUERY_TYPES.items():
             assert "keywords" in spec, f"{qtype} missing keywords"
             assert len(spec["keywords"]) > 0, f"{qtype} has empty keywords"
-            assert "strategy" in spec
-            assert "initial_tools" in spec
             assert "budget_level" in spec
             assert "suggested_token_budget" in spec
 

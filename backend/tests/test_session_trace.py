@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
+
+import pytest
+import pytest_asyncio
 
 from app.agent_loop.trace import (
     IterationTrace,
@@ -183,101 +185,98 @@ class TestTraceWriterDatabase:
         st.finish(answer="Auth uses JWT tokens.", budget_summary={"total": 5200})
         return st
 
-    def test_save_to_sqlite(self, tmp_path):
-        db_path = tmp_path / "traces.db"
-        writer = TraceWriter(backend="database", database_url=f"sqlite:///{db_path}")
+    @pytest.mark.asyncio
+    async def test_save_to_db_async(self, db_engine):
+        """Test saving a trace to the async database backend."""
+        writer = TraceWriter(backend="database", engine=db_engine)
         trace = self._make_trace()
-        assert writer.save(trace) is True
+        assert await writer.save_async(trace) is True
 
-        # Verify the row was written
-        conn = sqlite3.connect(str(db_path))
-        row = conn.execute(
-            "SELECT session_id, total_input_tokens, total_tool_calls, trace_json "
-            "FROM session_traces WHERE session_id = ?",
-            ("db_trace001",),
-        ).fetchone()
-        conn.close()
+        # Verify by querying with SQLAlchemy
+        from sqlalchemy import select, text
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        from app.db.models import SessionTraceRecord
 
-        assert row is not None
-        assert row[0] == "db_trace001"
-        assert row[1] == 5000
-        assert row[2] == 1
-        # trace_json should be valid JSON
-        data = json.loads(row[3])
-        assert data["query"] == "how does auth work?"
+        session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(SessionTraceRecord).where(
+                    SessionTraceRecord.session_id == "db_trace001"
+                )
+            )
+            row = result.scalar_one_or_none()
+            assert row is not None
+            assert row.total_input_tokens == 5000
+            assert row.total_tool_calls == 1
+            data = json.loads(row.trace_json)
+            assert data["query"] == "how does auth work?"
 
-    def test_save_multiple_sessions(self, tmp_path):
-        db_path = tmp_path / "traces.db"
-        writer = TraceWriter(backend="database", database_url=f"sqlite:///{db_path}")
-        writer.save(self._make_trace("sess1"))
-        writer.save(self._make_trace("sess2"))
-        writer.save(self._make_trace("sess3"))
+    @pytest.mark.asyncio
+    async def test_save_multiple_sessions(self, db_engine):
+        writer = TraceWriter(backend="database", engine=db_engine)
+        for sid in ("sess1", "sess2", "sess3"):
+            await writer.save_async(self._make_trace(sid))
 
-        conn = sqlite3.connect(str(db_path))
-        count = conn.execute("SELECT COUNT(*) FROM session_traces").fetchone()[0]
-        conn.close()
-        assert count == 3
+        from sqlalchemy import select, func
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        from app.db.models import SessionTraceRecord
 
-    def test_upsert_on_duplicate_session_id(self, tmp_path):
-        db_path = tmp_path / "traces.db"
-        writer = TraceWriter(backend="database", database_url=f"sqlite:///{db_path}")
-        writer.save(self._make_trace("dup001"))
-        writer.save(self._make_trace("dup001"))
+        session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(func.count()).select_from(SessionTraceRecord)
+            )
+            assert result.scalar() == 3
 
-        conn = sqlite3.connect(str(db_path))
-        count = conn.execute(
-            "SELECT COUNT(*) FROM session_traces WHERE session_id = 'dup001'"
-        ).fetchone()[0]
-        conn.close()
-        assert count == 1
+    @pytest.mark.asyncio
+    async def test_upsert_on_duplicate_session_id(self, db_engine):
+        writer = TraceWriter(backend="database", engine=db_engine)
+        await writer.save_async(self._make_trace("dup001"))
+        await writer.save_async(self._make_trace("dup001"))
 
-    def test_bare_path_treated_as_sqlite(self, tmp_path):
-        db_path = tmp_path / "bare.db"
-        writer = TraceWriter(backend="database", database_url=str(db_path))
-        assert writer.save(self._make_trace("bare001")) is True
+        from sqlalchemy import select, func
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        from app.db.models import SessionTraceRecord
 
-        conn = sqlite3.connect(str(db_path))
-        row = conn.execute(
-            "SELECT session_id FROM session_traces WHERE session_id = 'bare001'"
-        ).fetchone()
-        conn.close()
-        assert row is not None
-
-    def test_db_creates_parent_directory(self, tmp_path):
-        db_path = tmp_path / "deep" / "nested" / "traces.db"
-        writer = TraceWriter(backend="database", database_url=f"sqlite:///{db_path}")
-        assert writer.save(self._make_trace()) is True
-        assert db_path.exists()
+        session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(func.count()).select_from(SessionTraceRecord).where(
+                    SessionTraceRecord.session_id == "dup001"
+                )
+            )
+            assert result.scalar() == 1
 
     def test_disabled_db_returns_false(self, tmp_path):
-        writer = TraceWriter(
-            enabled=False, backend="database",
-            database_url=f"sqlite:///{tmp_path / 'x.db'}",
-        )
+        writer = TraceWriter(enabled=False, backend="database")
         assert writer.save(self._make_trace()) is False
 
-    def test_query_by_token_usage(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_query_by_token_usage(self, db_engine):
         """Verify structured columns support analytical queries."""
-        db_path = tmp_path / "analysis.db"
-        writer = TraceWriter(backend="database", database_url=f"sqlite:///{db_path}")
+        writer = TraceWriter(backend="database", engine=db_engine)
 
-        # Save traces with different token usage
         for i, tokens in enumerate([1000, 50000, 200000]):
             t = SessionTrace(session_id=f"q{i}", query=f"query {i}")
             t.begin()
             t.add_iteration(IterationTrace(input_tokens=tokens))
             t.finish(answer="ok")
-            writer.save(t)
+            await writer.save_async(t)
 
-        conn = sqlite3.connect(str(db_path))
-        # Find the most expensive query
-        row = conn.execute(
-            "SELECT session_id, total_input_tokens FROM session_traces "
-            "ORDER BY total_input_tokens DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
-        assert row[0] == "q2"
-        assert row[1] == 200000
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        from app.db.models import SessionTraceRecord
+
+        session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(SessionTraceRecord).order_by(
+                    SessionTraceRecord.total_input_tokens.desc()
+                ).limit(1)
+            )
+            row = result.scalar_one()
+            assert row.session_id == "q2"
+            assert row.total_input_tokens == 200000
 
 
 # ---------------------------------------------------------------------------

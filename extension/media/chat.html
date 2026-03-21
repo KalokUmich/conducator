@@ -3366,6 +3366,23 @@
                 case 'endChatConfirmed':
                     handleEndChatConfirmed();
                     break;
+                case 'tool_response':
+                    // Extension host finished a local tool execution — relay back to backend via WebSocket
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: 'tool_response',
+                            requestId: message.requestId,
+                            tool: message.tool,
+                            success: message.success,
+                            data: message.data,
+                            error: message.error,
+                            truncated: message.truncated,
+                        }));
+                        console.log('[WebView] tool_response sent for', message.tool, message.requestId);
+                    } else {
+                        console.warn('[WebView] Cannot send tool_response — WebSocket not open');
+                    }
+                    break;
                 case 'conductorStateChanged':
                     // Restore SSO identity from extension's globalState if available
                     if (message.ssoIdentity && !ssoIdentity) {
@@ -6143,6 +6160,16 @@
                         seenMessageIds.clear();
                         lastMessageTimestamp = 0;
                         renderSystemMessage('⚠️ The host has left. Chat history has been cleared.');
+                    } else if (data.type === 'tool_request') {
+                        // Backend requests local tool execution — relay to extension host
+                        console.log('[WebView] Tool request:', data.tool, data.requestId);
+                        vscode.postMessage({
+                            command: 'tool_request',
+                            requestId: data.requestId,
+                            tool: data.tool,
+                            params: data.params,
+                            workspace: data.workspace,
+                        });
                     } else if (data.type === 'error') {
                         // SECURITY: Handle backend error messages (e.g., permission denied)
                         console.error('[WebView] Backend error:', data.error);

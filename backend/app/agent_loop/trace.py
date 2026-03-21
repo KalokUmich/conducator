@@ -5,21 +5,12 @@ signals) and persists them for later analysis.
 
 Storage backends:
   * **local** — one JSON file per session in a configurable directory
-  * **database** — rows in a ``session_traces`` table (SQLite or PostgreSQL)
-
-The trace is designed for:
-  * Offline evaluation of agent behaviour
-  * Prompt optimization (which tools waste tokens?)
-  * Query pattern analysis (what query types cost the most?)
-
-Reference: RAG-Gym — Process Supervision for Agents
-https://arxiv.org/abs/2502.13957
+  * **database** — rows in a ``session_traces`` table via async SQLAlchemy
 """
 from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -119,30 +110,46 @@ class TraceWriter:
         backend: str = "local",
         local_path: str = ".conductor/session_traces",
         database_url: str = "",
+        engine=None,
     ) -> None:
         self.enabled = enabled
         self.backend = backend
         self.local_path = local_path
         self.database_url = database_url
-        self._db_initialized = False
+        self._engine = engine  # async SQLAlchemy engine (shared)
 
     @classmethod
-    def from_settings(cls, settings) -> "TraceWriter":
+    def from_settings(cls, settings, engine=None) -> "TraceWriter":
         """Create from a ``TraceSettings`` config object."""
         return cls(
             enabled=settings.enabled,
             backend=settings.backend,
             local_path=settings.local_path,
             database_url=settings.database_url,
+            engine=engine,
         )
 
     def save(self, trace: SessionTrace) -> bool:
-        """Persist a trace.  Returns True on success."""
+        """Persist a trace (sync wrapper).  Returns True on success."""
         if not self.enabled or not trace.session_id:
             return False
         try:
-            if self.backend == "database" and self.database_url:
-                return self._save_to_db(trace)
+            if self.backend == "database" and self._engine:
+                # For async engine, caller should use save_async instead
+                logger.warning("Use save_async() with async engine; falling back to local")
+                return self._save_to_local(trace)
+            return self._save_to_local(trace)
+        except Exception as exc:
+            logger.warning("Failed to save session trace %s: %s", trace.session_id, exc)
+            return False
+
+    async def save_async(self, trace: SessionTrace) -> bool:
+        """Persist a trace asynchronously.  Returns True on success."""
+        if not self.enabled or not trace.session_id:
+            return False
+        try:
+            if self.backend == "database" and self._engine:
+                return await self._save_to_db_async(trace)
             return self._save_to_local(trace)
         except Exception as exc:
             logger.warning("Failed to save session trace %s: %s", trace.session_id, exc)
@@ -161,83 +168,45 @@ class TraceWriter:
         logger.info("Session trace saved: %s", path)
         return True
 
-    # -- Database backend ----------------------------------------------------
+    # -- Async database backend -----------------------------------------------
 
-    _CREATE_TABLE_SQL = """\
-CREATE TABLE IF NOT EXISTS session_traces (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      TEXT UNIQUE NOT NULL,
-    query           TEXT,
-    workspace_path  TEXT,
-    duration_ms     REAL,
-    total_input_tokens  INTEGER,
-    total_output_tokens INTEGER,
-    total_tool_calls    INTEGER,
-    iterations_count    INTEGER,
-    final_answer_chars  INTEGER,
-    error           TEXT,
-    trace_json      TEXT,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-"""
+    async def _save_to_db_async(self, trace: SessionTrace) -> bool:
+        from ..db.models import SessionTraceRecord
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    _INSERT_SQL = """\
-INSERT OR REPLACE INTO session_traces (
-    session_id, query, workspace_path, duration_ms,
-    total_input_tokens, total_output_tokens, total_tool_calls,
-    iterations_count, final_answer_chars, error, trace_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-"""
+        session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
+        d = trace.to_dict()
+        trace_json = json.dumps(d, default=str)
 
-    def _get_db_connection(self) -> sqlite3.Connection:
-        """Parse database_url and return a sqlite3 connection.
+        async with session_factory() as session:
+            # Upsert: delete existing then insert (works with all backends)
+            existing = await session.execute(
+                select(SessionTraceRecord).where(
+                    SessionTraceRecord.session_id == trace.session_id
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                await session.execute(
+                    delete(SessionTraceRecord).where(
+                        SessionTraceRecord.session_id == trace.session_id
+                    )
+                )
 
-        Supports:
-          * ``sqlite:///path/to/file.db`` — file-based SQLite
-          * ``sqlite:///traces.db``       — relative path
-          * ``/path/to/file.db``          — bare path (treated as SQLite)
-        """
-        url = self.database_url
-        if url.startswith("sqlite:///"):
-            db_path = url[len("sqlite:///"):]
-        elif url.startswith("sqlite://"):
-            db_path = url[len("sqlite://"):]
-        else:
-            # Bare path — treat as SQLite file
-            db_path = url
-
-        # Ensure parent directory exists
-        p = Path(db_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-
-        return sqlite3.connect(str(p))
-
-    def _ensure_table(self, conn: sqlite3.Connection) -> None:
-        if not self._db_initialized:
-            conn.execute(self._CREATE_TABLE_SQL)
-            conn.commit()
-            self._db_initialized = True
-
-    def _save_to_db(self, trace: SessionTrace) -> bool:
-        conn = self._get_db_connection()
-        try:
-            self._ensure_table(conn)
-            d = trace.to_dict()
-            conn.execute(self._INSERT_SQL, (
-                trace.session_id,
-                trace.query[:2000],  # cap query length
-                trace.workspace_path,
-                trace.duration_ms,
-                trace.total_input_tokens,
-                trace.total_output_tokens,
-                trace.total_tool_calls,
-                len(trace.iterations),
-                trace.final_answer_chars,
-                trace.error,
-                json.dumps(d, default=str),
-            ))
-            conn.commit()
+            row = SessionTraceRecord(
+                session_id=trace.session_id,
+                query=trace.query[:2000],
+                workspace_path=trace.workspace_path,
+                duration_ms=trace.duration_ms,
+                total_input_tokens=trace.total_input_tokens,
+                total_output_tokens=trace.total_output_tokens,
+                total_tool_calls=trace.total_tool_calls,
+                iterations_count=len(trace.iterations),
+                final_answer_chars=trace.final_answer_chars,
+                error=trace.error,
+                trace_json=trace_json,
+            )
+            session.add(row)
+            await session.commit()
             logger.info("Session trace saved to DB: %s", trace.session_id)
             return True
-        finally:
-            conn.close()

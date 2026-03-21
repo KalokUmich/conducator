@@ -875,27 +875,63 @@ def git_log(
     n: int = 10,
     search: Optional[str] = None,
 ) -> ToolResult:
-    """Show recent git commits, optionally filtering by message content."""
+    """Show recent git commits with changed-file summaries.
+
+    Each commit includes a ``files`` list showing which files were touched
+    and how many lines were added/deleted.  This lets the LLM decide which
+    commits are relevant without needing to call ``git_show`` on each one.
+    """
+    # Step 1: get commit metadata
     args = ["log", f"-{n}", "--format=%H|%s|%an|%ai"]
     if search:
-        args += [f"--grep={search}", "-i"]  # case-insensitive search
+        args += [f"--grep={search}", "-i"]
     if file:
         fp = _resolve(workspace, file)
         args += ["--", str(fp)]
 
     raw = _run_git(workspace, args)
     commits: List[Dict] = []
+    hashes: List[str] = []
     for line in raw.strip().split("\n"):
         if not line or line.startswith("("):
             continue
         parts = line.split("|", 3)
         if len(parts) >= 2:
+            full_hash = parts[0]
+            hashes.append(full_hash)
             commits.append(GitCommit(
-                hash=parts[0][:8],
+                hash=full_hash[:8],
                 message=parts[1],
                 author=parts[2] if len(parts) > 2 else "",
                 date=parts[3] if len(parts) > 3 else "",
             ).model_dump())
+
+    # Step 2: get --stat for each commit (files changed + line counts)
+    if hashes:
+        stat_args = ["log", f"-{n}", "--format=%H", "--stat=120"]
+        if search:
+            stat_args += [f"--grep={search}", "-i"]
+        if file:
+            stat_args += ["--", str(_resolve(workspace, file))]
+        stat_raw = _run_git(workspace, stat_args, max_output=50_000)
+
+        # Parse stat output: group lines by commit hash
+        current_hash = ""
+        hash_files: Dict[str, List[str]] = {}
+        for line in stat_raw.split("\n"):
+            line = line.strip()
+            if len(line) == 40 and all(c in "0123456789abcdef" for c in line):
+                current_hash = line
+                hash_files[current_hash] = []
+            elif current_hash and "|" in line and not line.startswith("("):
+                hash_files.setdefault(current_hash, []).append(line)
+
+        # Attach file stats to commits
+        for commit in commits:
+            full = next((h for h in hashes if h[:8] == commit["hash"]), "")
+            stat_lines = hash_files.get(full, [])
+            commit["files_changed"] = len(stat_lines)
+            commit["stat"] = stat_lines[:10]  # cap to 10 files per commit
 
     return ToolResult(tool_name="git_log", data=commits)
 

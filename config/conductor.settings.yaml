@@ -41,13 +41,34 @@ ngrok:
   enabled: true
 
 # =============================================================================
-# Database
+# Database (legacy settings)
 # =============================================================================
 database:
   pool_size: 10
   max_overflow: 20
   pool_timeout: 30
   echo_sql: false
+
+# =============================================================================
+# PostgreSQL (OLTP — credentials in conductor.secrets.yaml)
+# Env var DATABASE_URL overrides the built URL entirely.
+# =============================================================================
+postgres:
+  host: "localhost"
+  port: 5432
+  database: "conductor"
+  pool_size: 10
+  max_overflow: 20
+
+# =============================================================================
+# Redis (chat state — credentials in conductor.secrets.yaml)
+# Env var REDIS_URL overrides the built URL entirely.
+# =============================================================================
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  prefix: "conductor:"
 
 # =============================================================================
 # Authentication

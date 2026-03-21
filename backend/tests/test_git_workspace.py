@@ -12,6 +12,7 @@ Total: 60 tests + RepoTokenCache + service integration tests
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch, call
 from pathlib import Path
 from fastapi.testclient import TestClient
@@ -546,110 +547,107 @@ class TestNormalizeUrl:
 
 
 class TestRepoTokenCache:
-    @pytest.fixture
-    def cache(self, tmp_path):
-        c = RepoTokenCache(tmp_path / "token_cache.db", default_ttl_seconds=3600)
-        c.open()
+    @pytest_asyncio.fixture
+    async def cache(self, db_engine):
+        c = RepoTokenCache(engine=db_engine, default_ttl_seconds=3600)
         yield c
-        c.close()
-
-    # --- open / close ---
-
-    def test_open_creates_db_file(self, tmp_path):
-        db = tmp_path / "sub" / "token_cache.db"
-        c = RepoTokenCache(db)
-        c.open()
-        assert db.exists()
-        c.close()
-
-    def test_close_is_idempotent(self, cache):
-        cache.close()
-        cache.close()  # should not raise
 
     # --- put / get ---
 
-    def test_put_and_get_returns_credential(self, cache):
+    @pytest.mark.asyncio
+    async def test_put_and_get_returns_credential(self, cache):
         creds = CredentialPayload(token="ghp_abc", username="alice")
-        cache.put("https://github.com/x/y.git", creds)
-        result = cache.get("https://github.com/x/y.git")
+        await cache.put("https://github.com/x/y.git", creds)
+        result = await cache.get("https://github.com/x/y.git")
         assert result is not None
         assert result.token == "ghp_abc"
         assert result.username == "alice"
 
-    def test_get_normalizes_url(self, cache):
+    @pytest.mark.asyncio
+    async def test_get_normalizes_url(self, cache):
         creds = CredentialPayload(token="tok1")
-        cache.put("https://github.com/x/y.git", creds)
+        await cache.put("https://github.com/x/y.git", creds)
         # Without .git suffix should still resolve
-        result = cache.get("https://github.com/x/y")
+        result = await cache.get("https://github.com/x/y")
         assert result is not None
         assert result.token == "tok1"
 
-    def test_get_nonexistent_returns_none(self, cache):
-        assert cache.get("https://github.com/missing/repo") is None
+    @pytest.mark.asyncio
+    async def test_get_nonexistent_returns_none(self, cache):
+        assert await cache.get("https://github.com/missing/repo") is None
 
-    def test_put_replaces_existing(self, cache):
-        cache.put("https://github.com/x/y", CredentialPayload(token="old"))
-        cache.put("https://github.com/x/y", CredentialPayload(token="new"))
-        result = cache.get("https://github.com/x/y")
+    @pytest.mark.asyncio
+    async def test_put_replaces_existing(self, cache):
+        await cache.put("https://github.com/x/y", CredentialPayload(token="old"))
+        await cache.put("https://github.com/x/y", CredentialPayload(token="new"))
+        result = await cache.get("https://github.com/x/y")
         assert result.token == "new"
 
-    def test_get_returns_none_for_expired(self, cache):
+    @pytest.mark.asyncio
+    async def test_get_returns_none_for_expired(self, cache):
         past = datetime.now(timezone.utc) - timedelta(seconds=1)
         creds = CredentialPayload(token="expired", expires_at=past)
-        cache.put("https://github.com/x/y", creds)
-        assert cache.get("https://github.com/x/y") is None
+        await cache.put("https://github.com/x/y", creds)
+        assert await cache.get("https://github.com/x/y") is None
 
-    def test_explicit_expires_at_honoured(self, cache):
+    @pytest.mark.asyncio
+    async def test_explicit_expires_at_honoured(self, cache):
         far_future = datetime.now(timezone.utc) + timedelta(days=365)
         creds = CredentialPayload(token="long_lived", expires_at=far_future)
-        cache.put("https://github.com/x/y", creds)
-        result = cache.get("https://github.com/x/y")
+        await cache.put("https://github.com/x/y", creds)
+        result = await cache.get("https://github.com/x/y")
         assert result is not None
         assert result.token == "long_lived"
 
-    def test_get_returns_expires_at(self, cache):
+    @pytest.mark.asyncio
+    async def test_get_returns_expires_at(self, cache):
         far_future = datetime.now(timezone.utc) + timedelta(hours=1)
         creds = CredentialPayload(token="tok", expires_at=far_future)
-        cache.put("https://github.com/x/y", creds)
-        result = cache.get("https://github.com/x/y")
+        await cache.put("https://github.com/x/y", creds)
+        result = await cache.get("https://github.com/x/y")
         assert result.expires_at is not None
 
     # --- evict_expired ---
 
-    def test_evict_expired_removes_stale(self, cache):
+    @pytest.mark.asyncio
+    async def test_evict_expired_removes_stale(self, cache):
         past = datetime.now(timezone.utc) - timedelta(seconds=1)
         creds = CredentialPayload(token="stale", expires_at=past)
-        cache.put("https://github.com/x/stale", creds)
+        await cache.put("https://github.com/x/stale", creds)
         # Bypass get() eviction by inserting with raw SQL check
-        count = cache.evict_expired()
+        count = await cache.evict_expired()
         assert count >= 1
-        assert cache.get("https://github.com/x/stale") is None
+        assert await cache.get("https://github.com/x/stale") is None
 
-    def test_evict_expired_keeps_valid(self, cache):
+    @pytest.mark.asyncio
+    async def test_evict_expired_keeps_valid(self, cache):
         creds = CredentialPayload(token="valid")  # uses default TTL
-        cache.put("https://github.com/x/valid", creds)
-        count = cache.evict_expired()
+        await cache.put("https://github.com/x/valid", creds)
+        count = await cache.evict_expired()
         assert count == 0
-        assert cache.get("https://github.com/x/valid") is not None
+        assert await cache.get("https://github.com/x/valid") is not None
 
-    def test_evict_expired_mixed(self, cache):
+    @pytest.mark.asyncio
+    async def test_evict_expired_mixed(self, cache):
         past = datetime.now(timezone.utc) - timedelta(seconds=1)
-        cache.put("https://github.com/x/a", CredentialPayload(token="old", expires_at=past))
-        cache.put("https://github.com/x/b", CredentialPayload(token="new"))
+        await cache.put("https://github.com/x/a", CredentialPayload(token="old", expires_at=past))
+        await cache.put("https://github.com/x/b", CredentialPayload(token="new"))
         # Note: put() already calls evict_expired() before each insert,
         # so the expired entry may be gone before we call it explicitly here.
-        cache.evict_expired()
-        assert cache.get("https://github.com/x/a") is None
-        assert cache.get("https://github.com/x/b") is not None
+        await cache.evict_expired()
+        assert await cache.get("https://github.com/x/a") is None
+        assert await cache.get("https://github.com/x/b") is not None
 
     # --- list_entries ---
 
-    def test_list_entries_empty(self, cache):
-        assert cache.list_entries() == []
+    @pytest.mark.asyncio
+    async def test_list_entries_empty(self, cache):
+        assert await cache.list_entries() == []
 
-    def test_list_entries_returns_metadata(self, cache):
-        cache.put("https://github.com/x/y", CredentialPayload(token="tok"))
-        entries = cache.list_entries()
+    @pytest.mark.asyncio
+    async def test_list_entries_returns_metadata(self, cache):
+        await cache.put("https://github.com/x/y", CredentialPayload(token="tok"))
+        entries = await cache.list_entries()
         assert len(entries) == 1
         assert "repo_url" in entries[0]
         assert "expires_at" in entries[0]
@@ -657,25 +655,11 @@ class TestRepoTokenCache:
         # token must NOT appear in list_entries output
         assert "token" not in entries[0]
 
-    def test_list_entries_multiple(self, cache):
-        cache.put("https://github.com/x/a", CredentialPayload(token="t1"))
-        cache.put("https://github.com/x/b", CredentialPayload(token="t2"))
-        assert len(cache.list_entries()) == 2
-
-    # --- no-op when closed ---
-
-    def test_closed_get_returns_none(self, tmp_path):
-        c = RepoTokenCache(tmp_path / "t.db")
-        # Never opened — _conn is None
-        assert c.get("https://github.com/x/y") is None
-
-    def test_closed_put_is_noop(self, tmp_path):
-        c = RepoTokenCache(tmp_path / "t.db")
-        c.put("https://github.com/x/y", CredentialPayload(token="tok"))  # should not raise
-
-    def test_closed_evict_returns_zero(self, tmp_path):
-        c = RepoTokenCache(tmp_path / "t.db")
-        assert c.evict_expired() == 0
+    @pytest.mark.asyncio
+    async def test_list_entries_multiple(self, cache):
+        await cache.put("https://github.com/x/a", CredentialPayload(token="t1"))
+        await cache.put("https://github.com/x/b", CredentialPayload(token="t2"))
+        assert len(await cache.list_entries()) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -687,12 +671,11 @@ class TestServiceTokenCacheIntegration:
     """Tests for create_workspace using cached tokens."""
 
     @pytest.mark.asyncio
-    async def test_create_workspace_caches_explicit_token(self, tmp_path):
+    async def test_create_workspace_caches_explicit_token(self, db_engine, tmp_path):
         """After a successful clone, the explicit token is written to the cache."""
         mgr = GitWorkspaceManager()
         mgr._workspaces_dir = tmp_path
-        mgr._token_cache = RepoTokenCache(tmp_path / "token_cache.db")
-        mgr._token_cache.open()
+        mgr._token_cache = RepoTokenCache(engine=db_engine)
         await mgr._credential_store.start()
 
         req = WorkspaceCreateRequest(
@@ -707,26 +690,24 @@ class TestServiceTokenCacheIntegration:
             await mgr.create_workspace(req)
 
         # Manually invoke the post-success caching logic (what _setup_worktree does)
-        mgr._token_cache.put(req.repo_url, req.credentials)
+        await mgr._token_cache.put(req.repo_url, req.credentials)
 
-        cached = mgr._token_cache.get("https://github.com/x/y.git")
+        cached = await mgr._token_cache.get("https://github.com/x/y.git")
         assert cached is not None
         assert cached.token == "ghp_explicit"
 
         await mgr._credential_store.stop()
-        mgr._token_cache.close()
 
     @pytest.mark.asyncio
-    async def test_create_workspace_uses_cached_token(self, tmp_path):
+    async def test_create_workspace_uses_cached_token(self, db_engine, tmp_path):
         """When no credentials are provided, the cached token is injected."""
         mgr = GitWorkspaceManager()
         mgr._workspaces_dir = tmp_path
-        mgr._token_cache = RepoTokenCache(tmp_path / "token_cache.db")
-        mgr._token_cache.open()
+        mgr._token_cache = RepoTokenCache(engine=db_engine)
         await mgr._credential_store.start()
 
         # Pre-seed the cache
-        mgr._token_cache.put(
+        await mgr._token_cache.put(
             "https://github.com/x/y",
             CredentialPayload(token="ghp_cached", username="bot"),
         )
@@ -737,7 +718,10 @@ class TestServiceTokenCacheIntegration:
             # No credentials — service should fall back to cache
         )
 
-        with patch("asyncio.create_task", side_effect=_no_task):
+        # Patch _setup_worktree instead of asyncio.create_task so that
+        # aiosqlite's internal create_task calls (needed by token_cache.get)
+        # are not suppressed.
+        with patch.object(mgr, "_setup_worktree", new_callable=AsyncMock):
             await mgr.create_workspace(req)
 
         # The credential store should now have the cached token injected
@@ -746,15 +730,13 @@ class TestServiceTokenCacheIntegration:
         assert creds.token == "ghp_cached"
 
         await mgr._credential_store.stop()
-        mgr._token_cache.close()
 
     @pytest.mark.asyncio
-    async def test_create_workspace_no_cache_no_creds(self, tmp_path):
+    async def test_create_workspace_no_cache_no_creds(self, db_engine, tmp_path):
         """When no credentials and empty cache, proceeds without creds (delegate mode)."""
         mgr = GitWorkspaceManager()
         mgr._workspaces_dir = tmp_path
-        mgr._token_cache = RepoTokenCache(tmp_path / "token_cache.db")
-        mgr._token_cache.open()
+        mgr._token_cache = RepoTokenCache(engine=db_engine)
         await mgr._credential_store.start()
 
         req = WorkspaceCreateRequest(
@@ -770,20 +752,18 @@ class TestServiceTokenCacheIntegration:
         assert creds is None
 
         await mgr._credential_store.stop()
-        mgr._token_cache.close()
 
     @pytest.mark.asyncio
-    async def test_create_workspace_expired_cache_not_used(self, tmp_path):
+    async def test_create_workspace_expired_cache_not_used(self, db_engine, tmp_path):
         """Expired cached tokens are ignored and not injected."""
         mgr = GitWorkspaceManager()
         mgr._workspaces_dir = tmp_path
-        mgr._token_cache = RepoTokenCache(tmp_path / "token_cache.db")
-        mgr._token_cache.open()
+        mgr._token_cache = RepoTokenCache(engine=db_engine)
         await mgr._credential_store.start()
 
         # Put an already-expired token in the cache
         past = datetime.now(timezone.utc) - timedelta(seconds=1)
-        mgr._token_cache.put(
+        await mgr._token_cache.put(
             "https://github.com/x/y",
             CredentialPayload(token="ghp_expired", expires_at=past),
         )
@@ -800,7 +780,6 @@ class TestServiceTokenCacheIntegration:
         assert creds is None  # expired token was not used
 
         await mgr._credential_store.stop()
-        mgr._token_cache.close()
 
     @pytest.mark.asyncio
     async def test_token_cache_disabled_when_none(self):
@@ -845,14 +824,14 @@ class TestTokenCacheEndpoint:
 
     def test_enabled_with_entries(self, mock_manager):
         mock_cache = MagicMock()
-        mock_cache.list_entries.return_value = [
+        mock_cache.list_entries = AsyncMock(return_value=[
             {
                 "repo_url": "https://github.com/x/y",
                 "username": "alice",
                 "cached_at": "2026-01-01T00:00:00+00:00",
                 "expires_at": "2026-01-01T08:00:00+00:00",
             }
-        ]
+        ])
         mock_manager.token_cache = mock_cache
         resp = client.get("/api/git-workspace/token-cache")
         assert resp.status_code == 200
@@ -863,14 +842,14 @@ class TestTokenCacheEndpoint:
 
     def test_tokens_not_in_response(self, mock_manager):
         mock_cache = MagicMock()
-        mock_cache.list_entries.return_value = [
+        mock_cache.list_entries = AsyncMock(return_value=[
             {
                 "repo_url": "https://github.com/x/y",
                 "username": "alice",
                 "cached_at": "2026-01-01T00:00:00+00:00",
                 "expires_at": "2026-01-01T08:00:00+00:00",
             }
-        ]
+        ])
         mock_manager.token_cache = mock_cache
         resp = client.get("/api/git-workspace/token-cache")
         # token field must NOT appear in the response

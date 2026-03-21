@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from .service import AgentEvent, AgentLoopService, AgentResult
 from .budget import BudgetConfig
+from app.code_tools.executor import LocalToolExecutor, RemoteToolExecutor, ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -40,71 +41,6 @@ def _get_code_explorer_workflow():
         except Exception as exc:
             logger.warning("Could not load code-explorer workflow, falling back to direct agent: %s", exc)
     return _workflow_cache
-
-
-async def _classify_and_route(query: str, classifier_provider=None):
-    """Classify a query using the code-explorer workflow.
-
-    Strategy:
-      1. Keyword patterns first (zero cost, instant)
-      2. If keyword match is weak (score <= 1), fall back to LLM classifier
-      3. PR/code-review queries always match on keywords (no LLM needed)
-
-    Returns (route_name, route_config, agent_config) or (None, None, None) for fallback.
-    """
-    wf = _get_code_explorer_workflow()
-    if wf is None:
-        return None, None, None
-
-    from app.workflow.classifier_engine import ClassifierEngine
-    engine = ClassifierEngine(wf)
-    result = engine.classify({"query_text": query})
-
-    route_name = result.best_route
-    best_score = max(result.raw_scores.values()) if result.raw_scores else 0
-
-    # If keyword match is weak and we have an LLM classifier, use it
-    if best_score <= 1 and classifier_provider is not None:
-        try:
-            from .query_classifier import classify_query_with_llm
-            llm_result = await classify_query_with_llm(query, classifier_provider)
-            # Map LLM classification type to workflow route name
-            if llm_result.query_type and llm_result.query_type in wf.routes:
-                route_name = llm_result.query_type
-                logger.info("LLM classifier override: keyword=%s(score=%s) → llm=%s",
-                            result.best_route, best_score, route_name)
-        except Exception as exc:
-            logger.warning("LLM classifier failed, using keyword result: %s", exc)
-
-    if not route_name or route_name not in wf.routes:
-        # Fallback: first non-delegate route
-        for rn, rc in wf.routes.items():
-            if not rc.delegate:
-                route_name = rn
-                break
-        if not route_name:
-            return None, None, None
-
-    route = wf.routes[route_name]
-
-    # For delegate routes (e.g. code_review → pr_review.yaml), signal delegation
-    if route.delegate:
-        logger.info("Workflow routing: query → route=%s (delegate to %s)", route_name, route.delegate)
-        return route_name, route, None
-
-    # Resolve the first agent in the route's pipeline
-    agent_config = None
-    for stage in route.pipeline:
-        for agent_path in stage.agents:
-            agent_config = wf.resolved_agents.get(agent_path)
-            if agent_config:
-                break
-        if agent_config:
-            break
-
-    logger.info("Workflow routing: query → route=%s, agent=%s (keyword_score=%s)",
-                route_name, agent_config.name if agent_config else "none", best_score)
-    return route_name, route, agent_config
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +123,79 @@ def _get_git_workspace_service():
     return app.state.git_workspace_service
 
 
+async def _ensure_repo_graph(room_id: str, workspace_path: str, executor: ToolExecutor) -> None:
+    """Fetch the repo graph from the extension and load it into RepoMapService.
+
+    The extension lazily builds the graph on first request (or returns a cached
+    version).  The backend uses it for dependency analysis and file ranking.
+    """
+    try:
+        from app.repo_graph.service import RepoMapService
+
+        # Check if we already have a cached graph
+        svc = RepoMapService()
+        cached_stats = svc.get_graph_stats(workspace_path)
+        if cached_stats.get("cached"):
+            return  # already loaded
+
+        # Request the graph from the extension via the tool proxy
+        result = await executor.execute("get_repo_graph", {})
+        if result.success and result.data and result.data.get("files"):
+            svc.load_graph_from_json(workspace_path, result.data)
+            logger.info("Repo graph loaded from extension for %s", workspace_path)
+        else:
+            logger.info("No repo graph available from extension (empty workspace?)")
+    except Exception as exc:
+        logger.warning("Failed to load repo graph from extension: %s", exc)
+
+
+def _extract_workflow_result(wf_context: dict):
+    """Extract the final answer from a completed workflow context.
+
+    The workflow engine stores stage results in ``_stage_results``.
+    For ``first_match`` workflows with a synthesize stage (e.g. business_flow_tracing),
+    the synthesizer's answer is the final answer. For single-agent routes,
+    the explore stage answer is used directly.
+    """
+    stage_results = wf_context.get("_stage_results", {})
+    answer = ""
+    chunks = []
+    total_tool_calls = 0
+    total_iters = 0
+    total_ms = int(wf_context.get("_duration_ms", 0))
+
+    # Prefer synthesize stage (judge output)
+    synth = stage_results.get("synthesize", {})
+    for agent_name, result in synth.items():
+        if isinstance(result, dict) and result.get("answer"):
+            answer = result["answer"]
+            break
+
+    # If no synthesize, use explore stage
+    if not answer:
+        explore = stage_results.get("explore", stage_results.get("investigate", {}))
+        for agent_name, result in explore.items():
+            if isinstance(result, dict):
+                if result.get("answer"):
+                    answer = result["answer"]
+                chunks.extend(result.get("context_chunks", []))
+                total_tool_calls += result.get("tool_calls_made", 0)
+                total_iters += result.get("iterations", 0)
+
+    return answer, chunks, total_tool_calls, total_iters, total_ms
+
+
+def _build_executor(git_workspace, room_id: str, worktree_path) -> ToolExecutor:
+    """Build the right ToolExecutor based on workspace mode.
+
+    Local-mode workspaces use RemoteToolExecutor (proxy to extension).
+    Git-worktree workspaces use LocalToolExecutor (direct filesystem).
+    """
+    if git_workspace.is_local_workspace(room_id):
+        return RemoteToolExecutor(room_id=room_id, workspace_path=str(worktree_path))
+    return LocalToolExecutor(workspace_path=str(worktree_path))
+
+
 def _get_agent_provider():
     """Get the AI provider configured for agent loop."""
     from app.main import app
@@ -217,39 +226,6 @@ def _get_explorer_provider():
 # ---------------------------------------------------------------------------
 
 
-def _build_agent_from_route(
-    agent_config,
-    workflow_config,
-    agent_provider,
-    explorer_provider,
-    trace_writer,
-    max_iterations: int,
-) -> AgentLoopService:
-    """Create an AgentLoopService configured from workflow route's agent config."""
-    # Use explorer provider for explorer agents, main provider for judges
-    provider = explorer_provider or agent_provider
-    if agent_config.model_role == "strong":
-        provider = agent_provider
-
-    # Budget from workflow config
-    budget = workflow_config.budget
-    weight = agent_config.budget_weight
-    budget_tokens = int(budget.base_tokens * budget.sub_fraction * weight)
-    budget_iters = max(
-        int(budget.base_iterations * budget.sub_fraction * weight),
-        budget.min_iterations,
-    )
-    budget_iters = min(budget_iters, max_iterations)
-
-    return AgentLoopService(
-        provider=provider,
-        max_iterations=budget_iters,
-        budget_config=BudgetConfig(max_input_tokens=budget_tokens),
-        trace_writer=trace_writer,
-        workflow_config=agent_config,
-    )
-
-
 @router.post("/query", response_model=ContextQueryResponse)
 async def context_query(
     req: ContextQueryRequest,
@@ -273,14 +249,36 @@ async def context_query(
             detail=f"No workspace for room_id={req.room_id!r}.",
         )
 
-    # Workflow-driven classification (keyword first, LLM fallback for /ask)
-    route_name, route, agent_config = await _classify_and_route(req.query, classifier_provider)
+    # Build the right executor (remote proxy for local workspaces, direct for git worktrees)
+    is_local = git_workspace.is_local_workspace(req.room_id)
+    executor = _build_executor(git_workspace, req.room_id, worktree_path)
+    logger.info(
+        "Tool executor: %s (room=%s, local=%s, workspace=%s)",
+        type(executor).__name__, req.room_id, is_local, worktree_path,
+    )
 
-    if agent_config and _get_code_explorer_workflow():
-        agent = _build_agent_from_route(
-            agent_config, _get_code_explorer_workflow(),
-            agent_provider, explorer_provider, trace_writer, req.max_iterations,
+    # For local workspaces, fetch the repo graph from the extension (lazy-built)
+    if is_local:
+        await _ensure_repo_graph(req.room_id, str(worktree_path), executor)
+
+    # Execute the full workflow pipeline (parallel agents, synthesis, etc.)
+    workflow = _get_code_explorer_workflow()
+    if workflow:
+        from app.workflow.engine import WorkflowEngine
+        engine = WorkflowEngine(
+            provider=agent_provider,
+            explorer_provider=explorer_provider,
+            trace_writer=trace_writer,
+            tool_executor=executor,
+            classifier_provider=classifier_provider,
         )
+        wf_context = {
+            "query_text": req.query,
+            "query": req.query,
+            "workspace_path": str(worktree_path),
+        }
+        wf_result = await engine.run(workflow, wf_context)
+        answer, chunks_raw, total_tool_calls, total_iters, total_ms = _extract_workflow_result(wf_result)
     else:
         # Fallback: direct AgentLoopService (no workflow config)
         agent = AgentLoopService(
@@ -289,12 +287,17 @@ async def context_query(
             trace_writer=trace_writer,
             classifier_provider=classifier_provider,
             explorer_provider=explorer_provider,
+            tool_executor=executor,
         )
-
-    result: AgentResult = await agent.run(
-        query=req.query,
-        workspace_path=str(worktree_path),
-    )
+        result: AgentResult = await agent.run(
+            query=req.query,
+            workspace_path=str(worktree_path),
+        )
+        answer = result.answer
+        chunks_raw = result.context_chunks
+        total_tool_calls = result.tool_calls_made
+        total_iters = result.iterations
+        total_ms = result.duration_ms
 
     chunks = [
         ContextChunkResponse(
@@ -302,24 +305,16 @@ async def context_query(
             start_line=c.start_line, end_line=c.end_line,
             source_tool=c.source_tool,
         )
-        for c in result.context_chunks
-    ]
-
-    steps = [
-        ThinkingStepResponse(
-            kind=s.kind, iteration=s.iteration, text=s.text,
-            tool=s.tool, params=s.params, summary=s.summary,
-            success=s.success,
-        )
-        for s in result.thinking_steps
+        for c in (chunks_raw or [])
+        if hasattr(c, 'file_path')
     ]
 
     return ContextQueryResponse(
-        room_id=req.room_id, query=req.query, answer=result.answer,
-        context_chunks=chunks, thinking_steps=steps,
-        tool_calls_made=result.tool_calls_made,
-        iterations=result.iterations, duration_ms=result.duration_ms,
-        error=result.error,
+        room_id=req.room_id, query=req.query, answer=answer or "",
+        context_chunks=chunks, thinking_steps=[],
+        tool_calls_made=total_tool_calls or 0,
+        iterations=total_iters or 0, duration_ms=total_ms or 0,
+        error=None,
     )
 
 
@@ -360,30 +355,56 @@ async def context_query_stream(
             detail=f"No workspace for room_id={req.room_id!r}.",
         )
 
-    # Workflow-driven classification (keyword first, LLM fallback for /ask)
-    route_name, route, agent_config = await _classify_and_route(req.query, classifier_provider)
+    # Build the right executor (remote proxy for local workspaces, direct for git worktrees)
+    is_local = git_workspace.is_local_workspace(req.room_id)
+    executor = _build_executor(git_workspace, req.room_id, worktree_path)
+    logger.info(
+        "Tool executor: %s (room=%s, local=%s, workspace=%s)",
+        type(executor).__name__, req.room_id, is_local, worktree_path,
+    )
 
-    if agent_config and _get_code_explorer_workflow():
-        agent = _build_agent_from_route(
-            agent_config, _get_code_explorer_workflow(),
-            agent_provider, explorer_provider, trace_writer, req.max_iterations,
-        )
-    else:
-        # Fallback: direct AgentLoopService
-        agent = AgentLoopService(
-            provider=agent_provider,
-            max_iterations=req.max_iterations,
-            trace_writer=trace_writer,
-            classifier_provider=classifier_provider,
-            explorer_provider=explorer_provider,
-        )
+    # Execute the full workflow pipeline (parallel agents, synthesis, etc.)
+    workflow = _get_code_explorer_workflow()
 
     async def event_generator():
-        async for event in agent.run_stream(
-            query=req.query,
-            workspace_path=str(worktree_path),
-        ):
-            yield f"event: {event.kind}\ndata: {json.dumps(event.data, default=str)}\n\n"
+        if workflow:
+            from app.workflow.engine import WorkflowEngine
+            engine = WorkflowEngine(
+                provider=agent_provider,
+                explorer_provider=explorer_provider,
+                trace_writer=trace_writer,
+                tool_executor=executor,
+            )
+            wf_context = {
+                "query_text": req.query,
+                "query": req.query,
+                "workspace_path": str(worktree_path),
+            }
+            async for event in engine.run_stream(workflow, wf_context):
+                # Forward all events — agent events (thinking, tool_call, tool_result)
+                # are now streamed in real-time through the engine's event queue.
+                yield f"event: {event.kind}\ndata: {json.dumps(event.data, default=str)}\n\n"
+
+                # When the workflow is done, emit the final synthesized answer
+                if event.kind == "done":
+                    answer, _, _, _, _ = _extract_workflow_result(wf_context)
+                    if answer:
+                        yield f"event: done\ndata: {json.dumps({'answer': answer}, default=str)}\n\n"
+        else:
+            # Fallback: direct AgentLoopService
+            agent = AgentLoopService(
+                provider=agent_provider,
+                max_iterations=req.max_iterations,
+                trace_writer=trace_writer,
+                classifier_provider=classifier_provider,
+                explorer_provider=explorer_provider,
+                tool_executor=executor,
+            )
+            async for event in agent.run_stream(
+                query=req.query,
+                workspace_path=str(worktree_path),
+            ):
+                yield f"event: {event.kind}\ndata: {json.dumps(event.data, default=str)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -443,8 +464,9 @@ async def explain_rich(
             detail=f"No workspace for room_id={req.room_id!r}.",
         )
 
+    executor = _build_executor(git_workspace, req.room_id, worktree_path)
     query = _build_explain_query(req)
-    agent = AgentLoopService(provider=agent_provider, max_iterations=25, trace_writer=trace_writer)
+    agent = AgentLoopService(provider=agent_provider, max_iterations=25, trace_writer=trace_writer, tool_executor=executor)
     result: AgentResult = await agent.run(query=query, workspace_path=str(worktree_path))
 
     return ExplainRichResponse(
@@ -485,8 +507,9 @@ async def explain_rich_stream(
             detail=f"No workspace for room_id={req.room_id!r}.",
         )
 
+    executor = _build_executor(git_workspace, req.room_id, worktree_path)
     query = _build_explain_query(req)
-    agent = AgentLoopService(provider=agent_provider, max_iterations=25, trace_writer=trace_writer)
+    agent = AgentLoopService(provider=agent_provider, max_iterations=25, trace_writer=trace_writer, tool_executor=executor)
     model_name = _resolve_model_name()
 
     async def event_generator():
