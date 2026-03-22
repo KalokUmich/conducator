@@ -2,3 +2,9 @@ databaseChangeLog:
   - include:
       file: changes/001-initial-schema.sql
       relativeToChangelogFile: true
+  - include:
+      file: changes/002-chat-persistence.sql
+      relativeToChangelogFile: true
+  - include:
+      file: changes/003-chat-model-v2.sql
+      relativeToChangelogFile: true

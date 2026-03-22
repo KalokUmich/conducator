@@ -1,8 +1,8 @@
 # Prompt Library — prompts.chat
 
 Source: https://github.com/f/prompts.chat (CC0 license)
-Downloaded: 2026-03-21 19:22 UTC
-Rows: 1537
+Downloaded: 2026-03-22 17:01 UTC
+Rows: 1541
 
 ## Purpose
 

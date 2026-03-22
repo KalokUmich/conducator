@@ -80,10 +80,38 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("PostgreSQL unavailable (%s) — services will use fallback storage", exc)
         app.state.db_engine = None
 
+    # ---- Initialize singleton services with DB engine ----
+    if app.state.db_engine:
+        from .todos.service import TODOService
+        from .audit.service import AuditLogService
+        from .files.service import FileStorageService
+        TODOService.get_instance(engine=app.state.db_engine)
+        AuditLogService.get_instance(engine=app.state.db_engine)
+        FileStorageService.get_instance(engine=app.state.db_engine)
+        logger.info("Singleton services initialized: TODOService, AuditLogService, FileStorageService")
+
     # ---- Redis ----
     from .db.redis import init_redis, close_redis
     redis_client = await init_redis(url=settings.build_redis_url())
     app.state.redis = redis_client
+
+    # ---- Wire Redis into Chat Manager ----
+    from .chat.manager import manager as chat_manager
+    if redis_client:
+        from .chat.redis_store import RedisChatStore
+        chat_manager._redis_store = RedisChatStore(redis_client)
+        logger.info("Chat Redis store: enabled (TTL=6h)")
+
+    # ---- Chat Persistence (write-through micro-batch to Postgres) ----
+    chat_persistence = None
+    if app.state.db_engine:
+        from .chat.persistence import ChatPersistenceService
+        chat_persistence = ChatPersistenceService(app.state.db_engine)
+        chat_manager._persistence = chat_persistence
+        logger.info("Chat persistence: enabled (micro-batch, batch_size=3)")
+    else:
+        logger.info("Chat persistence: disabled (no database)")
+    app.state.chat_persistence = chat_persistence
 
     # ---- Git Workspace ----
     git_service    = GitWorkspaceService()
@@ -251,6 +279,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     stop_ngrok()
     from .workflow.observability import flush as langfuse_flush
     langfuse_flush()
+    # Flush chat persistence buffers before shutdown
+    if chat_persistence:
+        await chat_persistence.flush_all()
+    # Shut down browser service if it was used
+    try:
+        from .browser.service import shutdown_browser_service
+        shutdown_browser_service()
+    except ImportError:
+        pass
     await git_service.shutdown()
     await close_redis()
     await close_db()
@@ -371,6 +408,13 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .workflow.router         import router as workflow_router
     from .integrations.jira.router import router as jira_router
 
+    # Browser tools (optional — only available when playwright is installed)
+    _browser_router = None
+    try:
+        from .browser.router import router as _browser_router
+    except ImportError:
+        pass
+
     app.include_router(git_workspace_router)
     app.include_router(code_tools_router)
     app.include_router(agent_loop_router)
@@ -388,6 +432,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(code_review_router)
     app.include_router(workflow_router)
     app.include_router(jira_router)
+    if _browser_router is not None:
+        app.include_router(_browser_router)
+        logger.info("Browser tools: enabled (Playwright)")
+    else:
+        logger.info("Browser tools: disabled (playwright not installed)")
 
     # --- Health check ---
     @app.get("/health", include_in_schema=True)

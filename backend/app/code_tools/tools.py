@@ -12,6 +12,7 @@ import re
 import json as _json
 import subprocess
 import time as _time
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -820,9 +821,14 @@ def file_outline(workspace: str, path: str) -> ToolResult:
 def get_dependencies(
     workspace: str,
     file_path: str,
+    max_depth: int = 1,
     _graph_service=None,
 ) -> ToolResult:
-    """Find files that this file depends on (out-edges in the dependency graph)."""
+    """Find files that this file depends on (out-edges in the dependency graph).
+
+    When *max_depth* > 1 (max 3), performs BFS traversal to collect transitive
+    dependencies.  Each result carries a ``depth`` field (1 = direct).
+    """
     graph = _ensure_graph(workspace, _graph_service)
     if graph is None:
         return ToolResult(
@@ -830,25 +836,60 @@ def get_dependencies(
             error="Dependency graph not available (missing networkx or tree-sitter).",
         )
 
-    deps: List[Dict] = []
-    for edge in graph.edges:
-        if edge.source == file_path:
-            deps.append(DependencyInfo(
-                file_path=edge.target,
-                symbols=edge.symbols,
-                weight=edge.weight,
-            ).model_dump())
+    max_depth = max(1, min(int(max_depth), 3))
 
-    deps.sort(key=lambda d: d["weight"], reverse=True)
+    if max_depth == 1:
+        # Fast path — original behaviour
+        deps: List[Dict] = []
+        for edge in graph.edges:
+            if edge.source == file_path:
+                d = DependencyInfo(
+                    file_path=edge.target,
+                    symbols=edge.symbols,
+                    weight=edge.weight,
+                ).model_dump()
+                d["depth"] = 1
+                deps.append(d)
+        deps.sort(key=lambda d: d["weight"], reverse=True)
+        return ToolResult(tool_name="get_dependencies", data=deps)
+
+    # BFS for transitive dependencies
+    visited: set = {file_path}
+    queue: deque = deque()
+    queue.append((file_path, 0))
+    deps = []
+
+    while queue:
+        current, current_depth = queue.popleft()
+        if current_depth >= max_depth:
+            continue
+        for edge in graph.edges:
+            if edge.source == current and edge.target not in visited:
+                visited.add(edge.target)
+                d = DependencyInfo(
+                    file_path=edge.target,
+                    symbols=edge.symbols,
+                    weight=edge.weight,
+                ).model_dump()
+                d["depth"] = current_depth + 1
+                deps.append(d)
+                queue.append((edge.target, current_depth + 1))
+
+    deps.sort(key=lambda d: (d["depth"], -d["weight"]))
     return ToolResult(tool_name="get_dependencies", data=deps)
 
 
 def get_dependents(
     workspace: str,
     file_path: str,
+    max_depth: int = 1,
     _graph_service=None,
 ) -> ToolResult:
-    """Find files that depend on this file (in-edges in the dependency graph)."""
+    """Find files that depend on this file (in-edges in the dependency graph).
+
+    When *max_depth* > 1 (max 3), performs BFS traversal to collect transitive
+    dependents.  Each result carries a ``depth`` field (1 = direct).
+    """
     graph = _ensure_graph(workspace, _graph_service)
     if graph is None:
         return ToolResult(
@@ -856,16 +897,46 @@ def get_dependents(
             error="Dependency graph not available (missing networkx or tree-sitter).",
         )
 
-    deps: List[Dict] = []
-    for edge in graph.edges:
-        if edge.target == file_path:
-            deps.append(DependencyInfo(
-                file_path=edge.source,
-                symbols=edge.symbols,
-                weight=edge.weight,
-            ).model_dump())
+    max_depth = max(1, min(int(max_depth), 3))
 
-    deps.sort(key=lambda d: d["weight"], reverse=True)
+    if max_depth == 1:
+        # Fast path — original behaviour
+        deps: List[Dict] = []
+        for edge in graph.edges:
+            if edge.target == file_path:
+                d = DependencyInfo(
+                    file_path=edge.source,
+                    symbols=edge.symbols,
+                    weight=edge.weight,
+                ).model_dump()
+                d["depth"] = 1
+                deps.append(d)
+        deps.sort(key=lambda d: d["weight"], reverse=True)
+        return ToolResult(tool_name="get_dependents", data=deps)
+
+    # BFS for transitive dependents
+    visited: set = {file_path}
+    queue: deque = deque()
+    queue.append((file_path, 0))
+    deps = []
+
+    while queue:
+        current, current_depth = queue.popleft()
+        if current_depth >= max_depth:
+            continue
+        for edge in graph.edges:
+            if edge.target == current and edge.source not in visited:
+                visited.add(edge.source)
+                d = DependencyInfo(
+                    file_path=edge.source,
+                    symbols=edge.symbols,
+                    weight=edge.weight,
+                ).model_dump()
+                d["depth"] = current_depth + 1
+                deps.append(d)
+                queue.append((edge.source, current_depth + 1))
+
+    deps.sort(key=lambda d: (d["depth"], -d["weight"]))
     return ToolResult(tool_name="get_dependents", data=deps)
 
 
@@ -3496,6 +3567,717 @@ def run_test(
 
 
 # ---------------------------------------------------------------------------
+# Git hotspots
+# ---------------------------------------------------------------------------
+
+
+def git_hotspots(
+    workspace: str,
+    days: int = 90,
+    top_n: int = 15,
+) -> ToolResult:
+    """Analyze git history to find frequently changed files (hotspots).
+
+    Returns both all-time hotspots over the given *days* window and a
+    "recently active" subset (last 7 days) so the caller can distinguish
+    chronic churn from current activity.
+    """
+    days = max(1, int(days))
+    top_n = max(1, min(int(top_n), 100))
+
+    # --- hotspots over the full window ---
+    raw = _run_git(
+        workspace,
+        ["log", f"--since={days} days ago", "--name-only", "--pretty=format:"],
+        max_output=200_000,
+    )
+    counts: Counter = Counter()
+    for line in raw.strip().split("\n"):
+        line = line.strip()
+        if line:
+            counts[line] += 1
+
+    hotspots = [
+        {"file": f, "change_count": c}
+        for f, c in counts.most_common(top_n)
+    ]
+
+    # --- recently active (last 7 days) ---
+    raw_recent = _run_git(
+        workspace,
+        ["log", "--since=7 days ago", "--name-only", "--pretty=format:"],
+        max_output=100_000,
+    )
+    recent_counts: Counter = Counter()
+    for line in raw_recent.strip().split("\n"):
+        line = line.strip()
+        if line:
+            recent_counts[line] += 1
+
+    recently_active = [
+        {"file": f, "change_count": c}
+        for f, c in recent_counts.most_common(top_n)
+    ]
+
+    return ToolResult(
+        tool_name="git_hotspots",
+        data={
+            "hotspots": hotspots,
+            "recently_active": recently_active,
+            "period_days": days,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endpoint extraction
+# ---------------------------------------------------------------------------
+
+# Pre-compiled patterns for route detection across frameworks.
+_ENDPOINT_PATTERNS: List[tuple] = [
+    # Python Flask/FastAPI — @app.get("/path") or @router.post("/path")
+    (re.compile(
+        r'@(?:app|router)\.(get|post|put|delete|patch|options|head)\s*\(\s*["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ), "fastapi/flask"),
+    # Python @app.route("/path", methods=[...])
+    (re.compile(
+        r'@(?:app|blueprint|bp)\s*\.\s*route\s*\(\s*["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ), "flask-route"),
+    # Django path() / url()
+    (re.compile(
+        r"""(?:path|url)\s*\(\s*[r]?['"]([^'"]+)['"]""",
+    ), "django"),
+    # Django REST @api_view
+    (re.compile(
+        r'@api_view\s*\(\s*\[([^\]]*)\]',
+    ), "django-rest"),
+    # Java Spring — @GetMapping("/path")
+    (re.compile(
+        r'@(Get|Post|Put|Delete|Patch|Request)Mapping\s*\(\s*(?:value\s*=\s*)?["\']?([^"\')\s,]+)',
+    ), "spring"),
+    # JS/TS Express — router.get("/path") or app.post("/path")
+    (re.compile(
+        r'(?:router|app)\.(get|post|put|delete|patch|all|use)\s*\(\s*["\']([^"\']+)["\']',
+    ), "express"),
+    # Go — r.GET("/path", ...) or http.HandleFunc("/path", ...)
+    (re.compile(
+        r'(?:r|router|mux)\.(GET|POST|PUT|DELETE|PATCH|Handle|HandleFunc)\s*\(\s*["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ), "go"),
+]
+
+
+def list_endpoints(
+    workspace: str,
+    path: Optional[str] = None,
+    max_results: int = 100,
+) -> ToolResult:
+    """Extract API endpoints/routes from the codebase.
+
+    Scans source files for route decorator patterns across Python, Java,
+    JS/TS, and Go frameworks.
+    """
+    ws = Path(workspace).resolve()
+    scan_root = _resolve(workspace, path) if path else ws
+    if not scan_root.exists():
+        return ToolResult(
+            tool_name="list_endpoints", success=False,
+            error=f"Path not found: {path or '.'}",
+        )
+
+    max_results = max(1, min(int(max_results), 500))
+
+    source_exts = {
+        ".py", ".java", ".kt", ".scala", ".go",
+        ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs",
+    }
+
+    files_to_scan: List[Path] = []
+    if scan_root.is_file():
+        files_to_scan.append(scan_root)
+    else:
+        for dirpath, dirnames, filenames in os.walk(scan_root):
+            rel = Path(dirpath).relative_to(ws)
+            if _is_excluded(rel.parts):
+                dirnames.clear()
+                continue
+            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+            for fname in filenames:
+                fpath = Path(dirpath) / fname
+                if fpath.suffix.lower() in source_exts:
+                    try:
+                        if fpath.stat().st_size > _MAX_FILE_SIZE:
+                            continue
+                    except OSError:
+                        continue
+                    files_to_scan.append(fpath)
+
+    endpoints: List[Dict] = []
+    for fpath in files_to_scan:
+        if len(endpoints) >= max_results:
+            break
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        rel_path = str(fpath.relative_to(ws))
+        lines = content.split("\n")
+
+        for line_num, line in enumerate(lines, 1):
+            if len(endpoints) >= max_results:
+                break
+            for pat, framework in _ENDPOINT_PATTERNS:
+                m = pat.search(line)
+                if not m:
+                    continue
+                groups = m.groups()
+                if framework == "flask-route":
+                    # @app.route — method not in regex, default GET
+                    route_path = groups[0]
+                    method = "GET"
+                elif framework == "django":
+                    route_path = groups[0]
+                    method = "ANY"
+                elif framework == "django-rest":
+                    methods_str = groups[0].replace("'", "").replace('"', "")
+                    method = methods_str.strip()
+                    route_path = ""
+                elif framework == "spring":
+                    verb = groups[0].upper()
+                    route_path = groups[1] if len(groups) > 1 else ""
+                    method = {"REQUEST": "ANY"}.get(verb, verb.replace("MAPPING", ""))
+                else:
+                    # fastapi/flask, express, go — group 0 is method, group 1 is path
+                    method = groups[0].upper()
+                    route_path = groups[1] if len(groups) > 1 else ""
+
+                endpoints.append({
+                    "method": method,
+                    "path": route_path,
+                    "file": rel_path,
+                    "line": line_num,
+                    "framework": framework,
+                })
+                break  # one match per line
+
+    return ToolResult(
+        tool_name="list_endpoints",
+        data={"endpoints": endpoints},
+        truncated=len(endpoints) >= max_results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Docstring extraction
+# ---------------------------------------------------------------------------
+
+# Patterns per language family
+_PY_DEF_RE = re.compile(r'^\s*((?:async\s+)?def|class)\s+(\w+)')
+_PY_DOCSTRING_START_RE = re.compile(r'''^\s*("""|\'\'\'|r"""|r\'\'\')(.*)''')
+_JSDOC_BLOCK_START_RE = re.compile(r'^\s*/\*\*')
+_JSDOC_BLOCK_END_RE = re.compile(r'\*/')
+_JS_DECL_RE = re.compile(
+    r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?'
+    r'(?:function\s+(\w+)|class\s+(\w+)|(?:const|let|var)\s+(\w+))',
+)
+_GO_COMMENT_RE = re.compile(r'^\s*//\s?(.*)')
+_GO_FUNC_RE = re.compile(r'^func\s+(?:\([^)]+\)\s+)?(\w+)')
+
+
+def extract_docstrings(
+    workspace: str,
+    path: str,
+    symbol_name: Optional[str] = None,
+) -> ToolResult:
+    """Extract function/class-level documentation from a file.
+
+    Supports Python docstrings, JS/TS/Java JSDoc blocks, and Go doc comments.
+    """
+    fp = _resolve(workspace, path)
+    if not fp.is_file():
+        return ToolResult(
+            tool_name="extract_docstrings", success=False,
+            error=f"File not found: {path}",
+        )
+
+    try:
+        content = fp.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return ToolResult(
+            tool_name="extract_docstrings", success=False,
+            error=str(exc),
+        )
+
+    ws = Path(workspace).resolve()
+    rel_path = str(fp.relative_to(ws))
+    ext = fp.suffix.lower()
+    lines = content.split("\n")
+
+    docstrings: List[Dict] = []
+
+    if ext == ".py":
+        docstrings = _extract_py_docstrings(lines, rel_path)
+    elif ext in {".go"}:
+        docstrings = _extract_go_docstrings(lines, rel_path)
+    elif ext in {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".java", ".kt"}:
+        docstrings = _extract_jsdoc_docstrings(lines, rel_path)
+
+    if symbol_name:
+        docstrings = [d for d in docstrings if d["symbol"] == symbol_name]
+
+    return ToolResult(
+        tool_name="extract_docstrings",
+        data={"docstrings": docstrings},
+    )
+
+
+def _extract_py_docstrings(lines: List[str], rel_path: str) -> List[Dict]:
+    """Extract Python triple-quote docstrings following def/class."""
+    results: List[Dict] = []
+    i = 0
+    while i < len(lines):
+        m = _PY_DEF_RE.match(lines[i])
+        if m:
+            kind = "function" if "def" in m.group(1) else "class"
+            name = m.group(2)
+            def_line = i + 1
+
+            # Advance past the full signature to find the colon ending it.
+            # For single-line defs the colon is on the same line; for
+            # multi-line signatures we must scan forward.
+            j = i
+            while j < len(lines):
+                if re.search(r':\s*(?:#.*)?$', lines[j]):
+                    j += 1  # move past the colon line
+                    break
+                j += 1
+
+            # Skip blank lines between signature and body
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+
+            if j < len(lines):
+                dm = _PY_DOCSTRING_START_RE.match(lines[j])
+                if dm:
+                    quote = dm.group(1).replace("r", "")
+                    doc_lines = [dm.group(2)]
+                    if quote in lines[j][lines[j].index(quote) + len(quote):]:
+                        # Single-line docstring
+                        rest = lines[j][lines[j].index(quote) + len(quote):]
+                        end_idx = rest.index(quote)
+                        doc_text = rest[:end_idx].strip()
+                    else:
+                        k = j + 1
+                        while k < len(lines) and quote not in lines[k]:
+                            doc_lines.append(lines[k])
+                            k += 1
+                        if k < len(lines):
+                            doc_lines.append(lines[k].split(quote)[0])
+                        doc_text = "\n".join(doc_lines).strip()
+
+                    results.append({
+                        "symbol": name,
+                        "kind": kind,
+                        "file": rel_path,
+                        "line": def_line,
+                        "docstring": doc_text[:2000],
+                    })
+        i += 1
+    return results
+
+
+def _extract_jsdoc_docstrings(lines: List[str], rel_path: str) -> List[Dict]:
+    """Extract JSDoc/Javadoc /** ... */ blocks before function/class declarations."""
+    results: List[Dict] = []
+    i = 0
+    while i < len(lines):
+        if _JSDOC_BLOCK_START_RE.match(lines[i]):
+            doc_lines = []
+            j = i
+            # Collect the entire block
+            while j < len(lines):
+                doc_lines.append(lines[j])
+                if _JSDOC_BLOCK_END_RE.search(lines[j]) and j > i:
+                    break
+                if j == i and _JSDOC_BLOCK_END_RE.search(lines[j]):
+                    break
+                j += 1
+
+            doc_text = "\n".join(doc_lines).strip()
+            doc_start = i + 1
+
+            # Look ahead for a declaration
+            k = j + 1
+            while k < len(lines) and lines[k].strip() == "":
+                k += 1
+
+            if k < len(lines):
+                dm = _JS_DECL_RE.match(lines[k])
+                if dm:
+                    name = dm.group(1) or dm.group(2) or dm.group(3)
+                    kind = "class" if dm.group(2) else "function"
+                    results.append({
+                        "symbol": name,
+                        "kind": kind,
+                        "file": rel_path,
+                        "line": k + 1,
+                        "docstring": doc_text[:2000],
+                    })
+                elif "@" in lines[k]:
+                    # Java annotation — look one more line
+                    k2 = k + 1
+                    while k2 < len(lines) and lines[k2].strip().startswith("@"):
+                        k2 += 1
+                    if k2 < len(lines):
+                        dm2 = re.match(
+                            r'\s*(?:public|private|protected|static|final|abstract|\s)*'
+                            r'(?:class|interface|enum)\s+(\w+)',
+                            lines[k2],
+                        )
+                        if dm2:
+                            results.append({
+                                "symbol": dm2.group(1),
+                                "kind": "class",
+                                "file": rel_path,
+                                "line": k2 + 1,
+                                "docstring": doc_text[:2000],
+                            })
+                        else:
+                            # Possibly a method
+                            dm3 = re.match(
+                                r'\s*(?:public|private|protected|static|final|abstract|\s)*'
+                                r'\w+\s+(\w+)\s*\(',
+                                lines[k2],
+                            )
+                            if dm3:
+                                results.append({
+                                    "symbol": dm3.group(1),
+                                    "kind": "function",
+                                    "file": rel_path,
+                                    "line": k2 + 1,
+                                    "docstring": doc_text[:2000],
+                                })
+
+            i = j + 1
+        else:
+            i += 1
+    return results
+
+
+def _extract_go_docstrings(lines: List[str], rel_path: str) -> List[Dict]:
+    """Extract Go doc comments (// blocks before func declarations)."""
+    results: List[Dict] = []
+    i = 0
+    while i < len(lines):
+        gm = _GO_FUNC_RE.match(lines[i])
+        if gm:
+            func_name = gm.group(1)
+            # Look backward for consecutive // comment lines
+            doc_lines = []
+            j = i - 1
+            while j >= 0:
+                cm = _GO_COMMENT_RE.match(lines[j])
+                if cm:
+                    doc_lines.insert(0, cm.group(1))
+                    j -= 1
+                elif lines[j].strip() == "":
+                    j -= 1
+                else:
+                    break
+
+            if doc_lines:
+                results.append({
+                    "symbol": func_name,
+                    "kind": "function",
+                    "file": rel_path,
+                    "line": i + 1,
+                    "docstring": "\n".join(doc_lines).strip()[:2000],
+                })
+        i += 1
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Database schema extraction
+# ---------------------------------------------------------------------------
+
+# Patterns for ORM model detection
+_ORM_CLASS_PATTERNS = [
+    # Python SQLAlchemy / Flask-SQLAlchemy
+    re.compile(r'class\s+(\w+)\s*\(.*(?:Base|db\.Model|DeclarativeBase|Model)\s*.*\)'),
+    # Python Django
+    re.compile(r'class\s+(\w+)\s*\(.*models\.Model.*\)'),
+]
+_TABLE_NAME_PATTERNS = [
+    # SQLAlchemy __tablename__
+    re.compile(r'__tablename__\s*=\s*["\'](\w+)["\']'),
+    # Java @Table(name = "...")
+    re.compile(r'@Table\s*\(\s*(?:name\s*=\s*)?["\'](\w+)["\']'),
+]
+_FIELD_PATTERNS = [
+    # SQLAlchemy Column(Type, ...)  or mapped_column(Type, ...)
+    (re.compile(r'(\w+)\s*[=:]\s*(?:Column|mapped_column)\s*\(\s*(\w+)'), "sqlalchemy"),
+    # Django models.Field
+    (re.compile(r'(\w+)\s*=\s*models\.(\w+)\s*\('), "django"),
+    # Java JPA @Column on a field
+    (re.compile(r'(?:private|protected|public)\s+(\w+(?:<[^>]+>)?)\s+(\w+)\s*;'), "jpa"),
+    # TypeORM @Column()
+    (re.compile(r'(\w+)\s*[?!]?\s*:\s*(\w+)'), "typeorm"),
+]
+_JAVA_ENTITY_RE = re.compile(r'@Entity')
+_JAVA_CLASS_RE = re.compile(r'(?:public\s+)?class\s+(\w+)')
+_TS_ENTITY_RE = re.compile(r'@Entity\s*\(')
+_TS_CLASS_RE = re.compile(r'(?:export\s+)?class\s+(\w+)')
+
+
+def db_schema(
+    workspace: str,
+    path: Optional[str] = None,
+    max_results: int = 50,
+) -> ToolResult:
+    """Extract database schema information from ORM model files.
+
+    Scans for SQLAlchemy, Django, JPA, and TypeORM patterns and returns
+    model names, table names, and field definitions.
+    """
+    ws = Path(workspace).resolve()
+    scan_root = _resolve(workspace, path) if path else ws
+    if not scan_root.exists():
+        return ToolResult(
+            tool_name="db_schema", success=False,
+            error=f"Path not found: {path or '.'}",
+        )
+
+    max_results = max(1, min(int(max_results), 200))
+
+    source_exts = {
+        ".py", ".java", ".kt", ".scala",
+        ".js", ".ts", ".jsx", ".tsx",
+    }
+
+    files_to_scan: List[Path] = []
+    if scan_root.is_file():
+        files_to_scan.append(scan_root)
+    else:
+        for dirpath, dirnames, filenames in os.walk(scan_root):
+            rel = Path(dirpath).relative_to(ws)
+            if _is_excluded(rel.parts):
+                dirnames.clear()
+                continue
+            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+            for fname in filenames:
+                fpath = Path(dirpath) / fname
+                if fpath.suffix.lower() in source_exts:
+                    try:
+                        if fpath.stat().st_size > _MAX_FILE_SIZE:
+                            continue
+                    except OSError:
+                        continue
+                    files_to_scan.append(fpath)
+
+    models: List[Dict] = []
+
+    for fpath in files_to_scan:
+        if len(models) >= max_results:
+            break
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        rel_path = str(fpath.relative_to(ws))
+        lines = content.split("\n")
+        ext = fpath.suffix.lower()
+
+        if ext == ".py":
+            models.extend(_extract_py_orm_models(lines, rel_path, max_results - len(models)))
+        elif ext in {".java", ".kt"}:
+            models.extend(_extract_jpa_models(lines, rel_path, max_results - len(models)))
+        elif ext in {".ts", ".js", ".tsx", ".jsx"}:
+            models.extend(_extract_typeorm_models(lines, rel_path, max_results - len(models)))
+
+    return ToolResult(
+        tool_name="db_schema",
+        data={"models": models},
+        truncated=len(models) >= max_results,
+    )
+
+
+def _extract_py_orm_models(
+    lines: List[str], rel_path: str, limit: int,
+) -> List[Dict]:
+    """Extract Python ORM model definitions (SQLAlchemy / Django)."""
+    results: List[Dict] = []
+    i = 0
+    while i < len(lines) and len(results) < limit:
+        model_name = None
+        for pat in _ORM_CLASS_PATTERNS:
+            m = pat.match(lines[i])
+            if m:
+                model_name = m.group(1)
+                break
+
+        if model_name:
+            class_line = i + 1
+            table_name = None
+            fields: List[Dict] = []
+
+            # Scan the class body (indented lines after the class declaration)
+            j = i + 1
+            while j < len(lines):
+                stripped = lines[j].strip()
+                if stripped == "" or lines[j][0:1] in (" ", "\t"):
+                    # Check for __tablename__
+                    for tp in _TABLE_NAME_PATTERNS:
+                        tm = tp.search(lines[j])
+                        if tm:
+                            table_name = tm.group(1)
+
+                    # Check for field definitions
+                    for fp, framework in _FIELD_PATTERNS[:2]:  # sqlalchemy, django only
+                        fm = fp.search(lines[j])
+                        if fm:
+                            fname = fm.group(1)
+                            ftype = fm.group(2)
+                            if not fname.startswith("_"):
+                                fields.append({
+                                    "name": fname,
+                                    "type": ftype,
+                                    "line": j + 1,
+                                })
+                    j += 1
+                elif stripped and not stripped.startswith("#") and not stripped.startswith("@"):
+                    break
+                else:
+                    j += 1
+
+            results.append({
+                "name": model_name,
+                "table_name": table_name or model_name.lower(),
+                "file": rel_path,
+                "line": class_line,
+                "fields": fields,
+            })
+            i = j
+        else:
+            i += 1
+
+    return results
+
+
+def _extract_jpa_models(
+    lines: List[str], rel_path: str, limit: int,
+) -> List[Dict]:
+    """Extract Java/Kotlin JPA entity definitions."""
+    results: List[Dict] = []
+    i = 0
+    while i < len(lines) and len(results) < limit:
+        if _JAVA_ENTITY_RE.search(lines[i]):
+            # Scan forward for @Table and class declaration
+            table_name = None
+            class_name = None
+            class_line = i + 1
+            j = i + 1
+            while j < len(lines) and j < i + 10:
+                for tp in _TABLE_NAME_PATTERNS:
+                    tm = tp.search(lines[j])
+                    if tm:
+                        table_name = tm.group(1)
+                cm = _JAVA_CLASS_RE.match(lines[j])
+                if cm:
+                    class_name = cm.group(1)
+                    class_line = j + 1
+                    break
+                j += 1
+
+            if class_name:
+                fields: List[Dict] = []
+                # Scan class body for fields
+                k = j + 1
+                brace_depth = 0
+                for k_line in range(j, len(lines)):
+                    brace_depth += lines[k_line].count("{") - lines[k_line].count("}")
+                    if brace_depth <= 0 and k_line > j:
+                        break
+                    fm = _FIELD_PATTERNS[2][0].search(lines[k_line])
+                    if fm:
+                        fields.append({
+                            "name": fm.group(2),
+                            "type": fm.group(1),
+                            "line": k_line + 1,
+                        })
+
+                results.append({
+                    "name": class_name,
+                    "table_name": table_name or class_name.lower(),
+                    "file": rel_path,
+                    "line": class_line,
+                    "fields": fields,
+                })
+            i = j + 1
+        else:
+            i += 1
+
+    return results
+
+
+def _extract_typeorm_models(
+    lines: List[str], rel_path: str, limit: int,
+) -> List[Dict]:
+    """Extract TypeORM entity definitions."""
+    results: List[Dict] = []
+    i = 0
+    while i < len(lines) and len(results) < limit:
+        if _TS_ENTITY_RE.search(lines[i]):
+            # Look for class declaration nearby
+            j = i + 1
+            while j < len(lines) and j < i + 5:
+                cm = _TS_CLASS_RE.match(lines[j])
+                if cm:
+                    class_name = cm.group(1)
+                    class_line = j + 1
+                    fields: List[Dict] = []
+
+                    # Scan body — look for @Column() annotations followed by field
+                    k = j + 1
+                    brace_depth = 0
+                    for k_line in range(j, len(lines)):
+                        brace_depth += lines[k_line].count("{") - lines[k_line].count("}")
+                        if brace_depth <= 0 and k_line > j:
+                            break
+                        if re.search(r'@Column\s*\(', lines[k_line]):
+                            # Next line should have the field
+                            if k_line + 1 < len(lines):
+                                fm = _FIELD_PATTERNS[3][0].search(lines[k_line + 1])
+                                if fm:
+                                    fields.append({
+                                        "name": fm.group(1),
+                                        "type": fm.group(2),
+                                        "line": k_line + 2,
+                                    })
+
+                    results.append({
+                        "name": class_name,
+                        "table_name": class_name.lower(),
+                        "file": rel_path,
+                        "line": class_line,
+                        "fields": fields,
+                    })
+                    i = k_line + 1
+                    break
+                j += 1
+            else:
+                i = j
+        else:
+            i += 1
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatcher
 # ---------------------------------------------------------------------------
 
@@ -3524,7 +4306,18 @@ TOOL_REGISTRY = {
     "expand_symbol": expand_symbol,
     "detect_patterns": detect_patterns,
     "run_test": run_test,
+    "git_hotspots": git_hotspots,
+    "list_endpoints": list_endpoints,
+    "extract_docstrings": extract_docstrings,
+    "db_schema": db_schema,
 }
+
+# --- Browser tools (Playwright) ---
+try:
+    from app.browser.tools import BROWSER_TOOL_REGISTRY
+    TOOL_REGISTRY.update(BROWSER_TOOL_REGISTRY)
+except ImportError:
+    logger.debug("Browser tools unavailable (playwright not installed)")
 
 
 def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:

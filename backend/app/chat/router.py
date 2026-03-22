@@ -132,8 +132,15 @@ async def get_message_history(
         older_messages = manager.get_paginated_history(room_id, oldest_ts, 1)
         has_more = len(older_messages) > 0
 
+    history_msgs = []
+    for msg in messages:
+        d = msg.model_dump()
+        if d.get("type") == "code_snippet" and d.get("metadata") and not d.get("codeSnippet"):
+            d["codeSnippet"] = d["metadata"]
+        history_msgs.append(d)
+
     return JSONResponse({
-        "messages": [msg.model_dump() for msg in messages],
+        "messages": history_msgs,
         "hasMore": has_more
     })
 
@@ -144,7 +151,8 @@ async def post_ai_message(
     message_type: str = Query(..., description="Message type: ai_summary or ai_code_prompt"),
     model_name: str = Query(..., description="AI model name (e.g., claude_bedrock)"),
     content: str = Query(..., description="Message content (summary text or code prompt)"),
-    ai_data: Optional[str] = Query(None, description="JSON string of AI-specific data")
+    ai_data: Optional[str] = Query(None, description="JSON string of AI-specific data"),
+    parent_message_id: Optional[str] = Query(None, description="ID of the parent message this replies to"),
 ) -> JSONResponse:
     """Post an AI-generated message to a chat room.
 
@@ -201,7 +209,9 @@ async def post_ai_message(
         displayName=ai_display_name,
         role=UserRole.AI,
         content=content,
-        aiData=parsed_ai_data
+        identitySource="ai",
+        parentMessageId=parent_message_id,
+        aiData=parsed_ai_data,
     )
 
     # Store in history
@@ -216,6 +226,164 @@ async def post_ai_message(
     logger.info(f"[AI] Posted {message_type} to room {room_id} from {ai_user_id}")
 
     return JSONResponse(message.model_dump())
+
+
+# ---------------------------------------------------------------------------
+# Room discovery & incremental sync endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/chat/rooms")
+async def list_user_rooms(
+    email: str = Query(..., description="SSO email to find rooms for"),
+) -> JSONResponse:
+    """List active/ended rooms owned by an SSO-authenticated user."""
+    from app.main import app
+
+    persistence = getattr(app.state, "chat_persistence", None)
+    if not persistence:
+        return JSONResponse({"rooms": [], "error": "persistence disabled"})
+    rooms = await persistence.get_rooms_for_user(email)
+    return JSONResponse({"rooms": rooms})
+
+
+@router.delete("/chat/{room_id}")
+async def delete_room(room_id: str) -> JSONResponse:
+    """Delete a room and all its data (messages, files, audit logs)."""
+    from app.main import app
+
+    # Clear in-memory history
+    await manager.clear_message_history(room_id)
+
+    # Delete from Postgres
+    persistence = getattr(app.state, "chat_persistence", None)
+    if persistence:
+        await persistence.delete_room(room_id)
+
+    # Delete files
+    try:
+        file_service = FileStorageService.get_instance()
+        await file_service.delete_room_files(room_id)
+    except Exception:
+        pass
+
+    # Delete audit logs
+    try:
+        from app.audit.service import AuditLogService
+        await AuditLogService.get_instance().delete_room_logs(room_id)
+    except Exception:
+        pass
+
+    return JSONResponse({"ok": True})
+
+
+@router.get("/chat/{room_id}/status")
+async def room_status(room_id: str) -> JSONResponse:
+    """Check if a room exists, its status, and whether it has in-memory state."""
+    has_connections = manager.get_room_size(room_id) > 0
+    has_history = len(manager.message_history.get(room_id, [])) > 0
+
+    # Check Postgres if no in-memory state
+    pg_status = None
+    from app.main import app
+    persistence = getattr(app.state, "chat_persistence", None)
+    if persistence and not has_history:
+        from app.db.models import ChatRoom
+        try:
+            from sqlalchemy import select as sa_select
+            async with persistence._session_factory() as session:
+                row = (await session.execute(
+                    sa_select(ChatRoom).where(ChatRoom.id == room_id)
+                )).scalar_one_or_none()
+                if row:
+                    pg_status = row.status
+        except Exception:
+            pass
+
+    return JSONResponse({
+        "room_id": room_id,
+        "active_connections": manager.get_room_size(room_id),
+        "has_history": has_history,
+        "pg_status": pg_status,
+    })
+
+
+@router.get("/chat/{room_id}/messages/after")
+async def get_messages_after(
+    room_id: str,
+    last_id: str = Query(..., description="UUID of the last known message — return everything after it"),
+    limit: int = Query(500, ge=1, le=1000),
+) -> JSONResponse:
+    """Incremental sync by message UUID.
+
+    Looks up the timestamp of *last_id*, then returns all messages with ts > that value.
+    More robust than timestamp-based sync (avoids clock skew issues).
+    """
+    # Try in-memory first
+    history = manager.message_history.get(room_id, [])
+    pivot_ts = None
+    for msg in history:
+        if msg.id == last_id:
+            pivot_ts = msg.ts
+            break
+
+    if pivot_ts is not None:
+        newer = [m.model_dump() for m in history if m.ts > pivot_ts]
+        return JSONResponse({"messages": newer[:limit], "source": "memory"})
+
+    # Fall back to Postgres
+    from app.main import app
+    persistence = getattr(app.state, "chat_persistence", None)
+    if persistence:
+        # Look up the ts of last_id in Postgres
+        try:
+            from app.db.models import ChatMessageRecord
+            from sqlalchemy import select as sa_select
+            async with persistence._session_factory() as session:
+                row = (await session.execute(
+                    sa_select(ChatMessageRecord.ts).where(ChatMessageRecord.id == last_id)
+                )).scalar_one_or_none()
+                if row is not None:
+                    pivot_ts = row
+        except Exception:
+            pass
+
+        if pivot_ts is not None:
+            msgs = await persistence.get_messages_since(room_id, pivot_ts, limit=limit)
+            return JSONResponse({"messages": msgs, "source": "postgres"})
+
+    # last_id not found anywhere — return full history
+    if persistence:
+        msgs = await persistence.load_messages_from_postgres(room_id, limit=limit)
+        return JSONResponse({"messages": msgs, "source": "postgres_full"})
+
+    return JSONResponse({"messages": [], "source": "none"})
+
+
+@router.get("/chat/{room_id}/messages/since")
+async def get_messages_since(
+    room_id: str,
+    since: float = Query(..., description="Unix timestamp — return messages newer than this"),
+    limit: int = Query(500, ge=1, le=1000),
+) -> JSONResponse:
+    """Incremental sync: get messages newer than *since* timestamp.
+
+    Checks in-memory first, then Postgres.
+    """
+    # Try in-memory
+    history = manager.message_history.get(room_id, [])
+    newer = [m.model_dump() for m in history if m.ts > since]
+    if newer:
+        return JSONResponse({"messages": newer[:limit], "source": "memory"})
+
+    # Fall back to Postgres
+    from app.main import app
+    persistence = getattr(app.state, "chat_persistence", None)
+    if persistence:
+        msgs = await persistence.get_messages_since(room_id, since, limit=limit)
+        return JSONResponse({"messages": msgs, "source": "postgres"})
+
+    return JSONResponse({"messages": [], "source": "none"})
 
 
 @router.websocket("/ws/chat/{room_id}")
@@ -287,13 +455,52 @@ async def websocket_chat_endpoint(
         })
         logger.info(f"[WS] Sent 'connected' with userId={assigned_user_id}, role={assigned_role}, leadId={manager.get_lead_id(room_id)}")
 
+        # Hydrate from Postgres if no in-memory history (room was idle / restarted)
+        if not history:
+            _persistence = getattr(manager, "_persistence", None)
+            if _persistence:
+                try:
+                    pg_msgs = await _persistence.hydrate_room(
+                        room_id, redis_store=manager._redis_store,
+                    )
+                    if pg_msgs:
+                        for m in pg_msgs:
+                            cm = ChatMessage(**m)
+                            if room_id not in manager.message_history:
+                                manager.message_history[room_id] = []
+                            manager.message_history[room_id].append(cm)
+                        history = manager.message_history.get(room_id, [])
+                        logger.info(f"[WS] Hydrated {len(pg_msgs)} messages from Postgres for room {room_id}")
+                except Exception as exc:
+                    logger.warning(f"[WS] Room hydration failed for {room_id}: {exc}")
+
         # If reconnecting with `since`, only send messages newer than that timestamp
         if since is not None:
             history = manager.get_messages_since(room_id, since)
             logger.info(f"[WS] Reconnect recovery: sending {len(history)} messages since {since}")
 
+        # Ensure room exists in Postgres (upsert)
+        _persistence = getattr(manager, "_persistence", None)
+        if _persistence:
+            sso_info = manager.room_sso_hosts.get(room_id, {})
+            try:
+                await _persistence.ensure_room(
+                    room_id,
+                    owner_email=sso_info.get("email"),
+                    owner_provider=sso_info.get("provider"),
+                )
+            except Exception as exc:
+                logger.warning(f"[WS] ensure_room failed for {room_id}: {exc}")
+
         # Send message history and user list to the newly connected client
-        history_data = [msg.model_dump() for msg in history]
+        # For code_snippet messages, copy metadata → codeSnippet so the
+        # frontend renderer finds data in the same field as live broadcasts.
+        history_data = []
+        for msg in history:
+            d = msg.model_dump()
+            if d.get("type") == "code_snippet" and d.get("metadata") and not d.get("codeSnippet"):
+                d["codeSnippet"] = d["metadata"]
+            history_data.append(d)
         users_data = [u.model_dump() for u in manager.get_room_users(room_id)]
 
         await websocket.send_json({
@@ -353,6 +560,22 @@ async def websocket_chat_endpoint(
                     "user": user.model_dump(),
                     "users": users_data
                 }, room_id)
+
+                # Track participant in Postgres
+                _persistence = getattr(manager, "_persistence", None)
+                if _persistence:
+                    try:
+                        await _persistence.upsert_participant(
+                            room_id=room_id,
+                            user_id=assigned_user_id,
+                            display_name=display_name,
+                            role=assigned_role,
+                            identity_source=identity_source,
+                            email=sso_email,
+                            provider=sso_provider,
+                        )
+                    except Exception as exc:
+                        logger.warning(f"[WS] upsert_participant failed: {exc}")
                 continue
 
             # --- Handle END_SESSION message (host only) ---
@@ -369,9 +592,29 @@ async def websocket_chat_endpoint(
                     })
                     continue
 
+                # Check blockers before proceeding
+                from .manager import check_end_chat_blockers
+                blockers = check_end_chat_blockers(room_id)
+                if blockers:
+                    logger.info(f"[WS] end_session blocked for room {room_id}: {blockers}")
+                    await websocket.send_json({
+                        "type": "end_session_blocked",
+                        "blockers": blockers,
+                        "message": f"Cannot end session: {', '.join(blockers)}",
+                    })
+                    continue
+
                 logger.info(f"[WS] Host {assigned_user_id} ending session for room {room_id}")
+
+                # Mark room as ended in Postgres (flush micro-batch buffer)
+                _persistence = getattr(manager, "_persistence", None)
+                if _persistence:
+                    try:
+                        await _persistence.end_room(room_id)
+                    except Exception as exc:
+                        logger.error(f"[WS] end_room persistence failed for {room_id}: {exc}")
+
                 # Delete all files for this room
-                # TODO: CLOUD_BACKUP - Consider backing up files before deletion
                 try:
                     file_service = FileStorageService.get_instance()
                     deleted_count = await file_service.delete_room_files(room_id)
@@ -384,9 +627,46 @@ async def websocket_chat_endpoint(
                     "message": "Host has ended the chat session"
                 }, room_id)
 
-                # Clear all room data
+                # Clear all room data (in-memory + Redis)
                 await manager.clear_room(room_id)
                 continue
+
+            # --- Handle QUIT_CHAT message (any user) ---
+            # Leave the room but preserve all data for later rejoin.
+            if message_type == "quit_chat":
+                logger.info(f"[WS] User {assigned_user_id} quitting room {room_id} (data preserved)")
+
+                # Drain micro-batch buffer to Postgres
+                _persistence = getattr(manager, "_persistence", None)
+                if _persistence:
+                    try:
+                        await _persistence._flush_buffer(room_id)
+                    except Exception as exc:
+                        logger.warning(f"[WS] quit_chat flush failed for {room_id}: {exc}")
+
+                # Send confirmation before disconnecting
+                await websocket.send_json({
+                    "type": "quit_confirmed",
+                    "room_id": room_id,
+                    "message": "Left room. Data preserved.",
+                })
+
+                # Disconnect user (reuse existing logic)
+                disconnected_user, lead_reverted = manager.disconnect(websocket, room_id)
+                if disconnected_user:
+                    users_data = [u.model_dump() for u in manager.get_room_users(room_id)]
+                    await manager.broadcast({
+                        "type": "user_left",
+                        "user": disconnected_user.model_dump(),
+                        "users": users_data,
+                    }, room_id)
+                    if lead_reverted:
+                        new_lead_id = manager.get_lead_id(room_id)
+                        await manager.broadcast({
+                            "type": "lead_changed",
+                            "leadId": new_lead_id,
+                        }, room_id)
+                break  # Exit the WebSocket message loop
 
             # --- Handle TRANSFER_LEAD message (host or current lead only) ---
             # SECURITY: Only host or current lead can transfer lead
@@ -451,7 +731,7 @@ async def websocket_chat_endpoint(
             # --- Handle FILE message (broadcast file upload notification) ---
             # SECURITY: Use backend-assigned userId and role
             if message_type == "file":
-                message_id = data.get("id", "")
+                message_id = data.get("id", "") or str(uuid.uuid4())
 
                 # Deduplication check
                 if manager.is_duplicate_message(room_id, message_id):
@@ -460,15 +740,9 @@ async def websocket_chat_endpoint(
 
                 user_info = manager.get_user(room_id, assigned_user_id)
                 display_name = user_info.displayName if user_info else data.get("displayName", "")
+                identity_src = user_info.identitySource if user_info else "anonymous"
 
-                # Broadcast file message to all clients
-                file_message = {
-                    "type": "file",
-                    "id": message_id,
-                    "roomId": room_id,
-                    "userId": assigned_user_id,  # SECURITY: Use backend-assigned ID
-                    "displayName": display_name,
-                    "role": assigned_role,  # SECURITY: Use backend-assigned role
+                file_meta = {
                     "fileId": data.get("fileId", ""),
                     "originalFilename": data.get("originalFilename", ""),
                     "fileType": data.get("fileType", "other"),
@@ -476,103 +750,122 @@ async def websocket_chat_endpoint(
                     "sizeBytes": data.get("sizeBytes", 0),
                     "downloadUrl": data.get("downloadUrl", ""),
                     "caption": data.get("caption"),
-                    "ts": data.get("ts", 0)
                 }
 
-                logger.info(f"[WS] Broadcasting file message: {file_message.get('originalFilename')}")
-                await manager.broadcast(file_message, room_id)
+                file_msg = ChatMessage(
+                    id=message_id,
+                    type=MessageType.FILE,
+                    roomId=room_id,
+                    userId=assigned_user_id,
+                    displayName=display_name,
+                    role=assigned_role,
+                    content=data.get("caption") or data.get("originalFilename", ""),
+                    identitySource=identity_src,
+                    metadata=file_meta,
+                )
+                await manager.add_message(room_id, file_msg)
+
+                broadcast_data = file_msg.model_dump()
+                broadcast_data.update(file_meta)
+                logger.info(f"[WS] Broadcasting file message: {file_meta.get('originalFilename')}")
+                await manager.broadcast(broadcast_data, room_id)
                 continue
 
             # --- Handle CODE SNIPPET message ---
             # SECURITY: Use backend-assigned userId and role
             if message_type == "code_snippet":
-                message_id = str(uuid.uuid4())
                 user_info = manager.get_user(room_id, assigned_user_id)
                 display_name = user_info.displayName if user_info else data.get("displayName", "")
-                code_snippet = data.get("codeSnippet", {})
+                identity_src = user_info.identitySource if user_info else "anonymous"
+                cs = data.get("codeSnippet", {})
 
-                # Build code snippet message
-                snippet_message = {
-                    "type": "code_snippet",
-                    "id": message_id,
-                    "roomId": room_id,
-                    "userId": assigned_user_id,  # SECURITY: Use backend-assigned ID
-                    "displayName": display_name,
-                    "role": assigned_role,  # SECURITY: Use backend-assigned role
-                    "content": data.get("content", ""),  # Optional comment
-                    "codeSnippet": {
-                        "filename": code_snippet.get("filename", ""),
-                        "relativePath": code_snippet.get("relativePath", ""),
-                        "language": code_snippet.get("language", ""),
-                        "startLine": code_snippet.get("startLine", 1),
-                        "endLine": code_snippet.get("endLine", 1),
-                        "code": code_snippet.get("code", "")
-                    },
-                    "ts": time.time()
+                snippet_meta = {
+                    "filename": cs.get("filename", ""),
+                    "relativePath": cs.get("relativePath", ""),
+                    "language": cs.get("language", ""),
+                    "startLine": cs.get("startLine", 1),
+                    "endLine": cs.get("endLine", 1),
+                    "code": cs.get("code", ""),
                 }
 
-                logger.info(f"[WS] Broadcasting code snippet: {code_snippet.get('relativePath', 'unknown')} lines {code_snippet.get('startLine')}-{code_snippet.get('endLine')}")
-                await manager.broadcast(snippet_message, room_id)
+                snippet_msg = ChatMessage(
+                    type=MessageType.CODE_SNIPPET,
+                    roomId=room_id,
+                    userId=assigned_user_id,
+                    displayName=display_name,
+                    role=assigned_role,
+                    content=data.get("content", ""),
+                    identitySource=identity_src,
+                    metadata=snippet_meta,
+                )
+                await manager.add_message(room_id, snippet_msg)
+
+                broadcast_data = snippet_msg.model_dump()
+                broadcast_data["codeSnippet"] = snippet_meta
+                logger.info(f"[WS] Broadcasting code snippet: {snippet_meta.get('relativePath', 'unknown')} lines {snippet_meta.get('startLine')}-{snippet_meta.get('endLine')}")
+                await manager.broadcast(broadcast_data, room_id)
                 continue
 
             # --- Handle STACK TRACE message ---
             # SECURITY: Use backend-assigned userId and role
             if message_type == "stack_trace":
-                message_id = str(uuid.uuid4())
                 user_info = manager.get_user(room_id, assigned_user_id)
                 display_name = user_info.displayName if user_info else data.get("displayName", "")
+                identity_src = user_info.identitySource if user_info else "anonymous"
 
                 raw_text = data.get("rawText", "")
-                # Parse on backend so server-stored messages are structured
                 parsed = data.get("parsed") or parse_stack_trace(raw_text).to_dict()
 
-                stack_trace_message = {
-                    "type": "stack_trace",
-                    "id": message_id,
-                    "roomId": room_id,
-                    "userId": assigned_user_id,
-                    "displayName": display_name,
-                    "role": assigned_role,
-                    "content": data.get("content", ""),
-                    "rawText": raw_text,
-                    "stackTrace": parsed,
-                    "ts": time.time(),
-                }
+                trace_msg = ChatMessage(
+                    type="stack_trace",
+                    roomId=room_id,
+                    userId=assigned_user_id,
+                    displayName=display_name,
+                    role=assigned_role,
+                    content=raw_text or data.get("content", ""),
+                    identitySource=identity_src,
+                    metadata={"stackTrace": parsed},
+                )
+                await manager.add_message(room_id, trace_msg)
 
+                broadcast_data = trace_msg.model_dump()
+                broadcast_data["stackTrace"] = parsed
                 logger.info(
                     f"[WS] Broadcasting stack_trace from {assigned_user_id}: "
                     f"{parsed.get('errorType', 'unknown')} – {len(parsed.get('frames', []))} frames"
                 )
-                await manager.broadcast(stack_trace_message, room_id)
+                await manager.broadcast(broadcast_data, room_id)
                 continue
 
             # --- Handle TEST FAILURE message ---
             # SECURITY: Use backend-assigned userId and role
             if message_type == "test_failure":
-                message_id = str(uuid.uuid4())
                 user_info = manager.get_user(room_id, assigned_user_id)
                 display_name = user_info.displayName if user_info else data.get("displayName", "")
+                identity_src = user_info.identitySource if user_info else "anonymous"
 
                 test_failure = data.get("testFailure", {})
                 total_failed = test_failure.get("totalFailed", 0)
 
-                test_failure_message = {
-                    "type": "test_failure",
-                    "id": message_id,
-                    "roomId": room_id,
-                    "userId": assigned_user_id,
-                    "displayName": display_name,
-                    "role": assigned_role,
-                    "content": data.get("content", f"{total_failed} test(s) failed"),
-                    "testFailure": test_failure,
-                    "ts": time.time(),
-                }
+                fail_msg = ChatMessage(
+                    type="test_failure",
+                    roomId=room_id,
+                    userId=assigned_user_id,
+                    displayName=display_name,
+                    role=assigned_role,
+                    content=data.get("content", f"{total_failed} test(s) failed"),
+                    identitySource=identity_src,
+                    metadata={"testFailure": test_failure},
+                )
+                await manager.add_message(room_id, fail_msg)
 
+                broadcast_data = fail_msg.model_dump()
+                broadcast_data["testFailure"] = test_failure
                 logger.info(
                     f"[WS] Broadcasting test_failure from {assigned_user_id}: "
                     f"{total_failed} failures ({test_failure.get('framework', 'unknown')} framework)"
                 )
-                await manager.broadcast(test_failure_message, room_id)
+                await manager.broadcast(broadcast_data, room_id)
                 continue
 
             # --- Handle tool_response (from extension's local tool execution) ---
@@ -601,12 +894,14 @@ async def websocket_chat_endpoint(
 
             # Create and store the full message
             # SECURITY: Use backend-assigned userId and role, ignore client-provided values
+            identity_src = user_info.identitySource if user_info else "anonymous"
             full_message = ChatMessage(
                 roomId=room_id,
                 userId=assigned_user_id,
                 displayName=display_name,
                 role=assigned_role,
-                content=content
+                content=content,
+                identitySource=identity_src,
             )
             await manager.add_message(room_id, full_message)
 
@@ -630,6 +925,14 @@ async def websocket_chat_endpoint(
         disconnected_user, lead_reverted = manager.disconnect(websocket, room_id)
 
         if disconnected_user:
+            # Track participant leaving in Postgres
+            _persistence = getattr(manager, "_persistence", None)
+            if _persistence and pre_user_id:
+                try:
+                    await _persistence.mark_participant_left(room_id, pre_user_id)
+                except Exception as exc:
+                    logger.warning(f"[WS] mark_participant_left failed: {exc}")
+
             users_data = [u.model_dump() for u in manager.get_room_users(room_id)]
             await manager.broadcast({
                 "type": "user_left",

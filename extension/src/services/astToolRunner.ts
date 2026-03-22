@@ -9,7 +9,7 @@
  *   - get_callers    — functions that call a given function
  *   - expand_symbol  — expand a symbol to its full source code
  *
- * Uses symbolExtractor.ts (no tree-sitter dependency) for AST extraction,
+ * Uses treeSitterService.ts (with regex fallback) for AST extraction,
  * and synchronous file I/O since tool execution runs in a worker context.
  *
  * @module services/astToolRunner
@@ -18,7 +18,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { extractSymbols, type FileSymbol } from './symbolExtractor';
 import * as treeSitter from './treeSitterService';
 
 // Re-export types from repoGraphBuilder for consumers that need them.
@@ -143,53 +142,116 @@ function getGitHead(workspace: string): string | null {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Regex-based definition extraction (inline replacement for deleted symbolExtractor)
+// ---------------------------------------------------------------------------
+
+interface RegexPatternEntry { kind: string; pattern: RegExp; }
+
+const DEF_PATTERNS: Record<string, RegexPatternEntry[]> = {
+    python: [
+        { kind: 'function', pattern: /^(?:async\s+)?def\s+(\w+)\s*\(/gm },
+        { kind: 'class',    pattern: /^class\s+(\w+)\s*[:(]/gm },
+    ],
+    javascript: [
+        { kind: 'function', pattern: /(?:async\s+)?function\s+(\w+)\s*\(/gm },
+        { kind: 'class',    pattern: /class\s+(\w+)\s*[{]/gm },
+        { kind: 'function', pattern: /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(/gm },
+    ],
+    typescript: [
+        { kind: 'function',  pattern: /(?:async\s+)?function\s+(\w+)\s*[(<]/gm },
+        { kind: 'class',     pattern: /class\s+(\w+)\s*[{<]/gm },
+        { kind: 'interface', pattern: /interface\s+(\w+)\s*[{<]/gm },
+    ],
+    java: [
+        { kind: 'class',     pattern: /(?:public|private|protected|abstract|final|static)?\s*class\s+(\w+)\s*[{<(]/gm },
+        { kind: 'interface', pattern: /(?:public|private|protected)?\s*interface\s+(\w+)\s*[{<]/gm },
+        { kind: 'class',     pattern: /(?:public|private|protected)?\s*enum\s+(\w+)\s*[{]/gm },
+        { kind: 'class',     pattern: /(?:public|private|protected)?\s*record\s+(\w+)\s*[(<]/gm },
+        { kind: 'method',    pattern: /^\s+(?:public|private|protected)\s+(?:static\s+)?(?:synchronized\s+)?(?:final\s+)?(?:[\w<>\[\],\s]+?)\s+(\w+)\s*\(/gm },
+    ],
+    go: [
+        { kind: 'function',  pattern: /^func\s+(\w+)\s*\(/gm },
+        { kind: 'method',    pattern: /^func\s+\([^)]+\)\s+(\w+)\s*\(/gm },
+        { kind: 'class',     pattern: /^type\s+(\w+)\s+struct\s*\{/gm },
+        { kind: 'interface', pattern: /^type\s+(\w+)\s+interface\s*\{/gm },
+    ],
+    rust: [
+        { kind: 'function',  pattern: /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)/gm },
+        { kind: 'class',     pattern: /(?:pub\s+)?struct\s+(\w+)/gm },
+        { kind: 'class',     pattern: /(?:pub\s+)?enum\s+(\w+)/gm },
+        { kind: 'interface', pattern: /(?:pub\s+)?trait\s+(\w+)/gm },
+        { kind: 'class',     pattern: /impl(?:<[^>]+>)?\s+(\w+)/gm },
+    ],
+    c: [
+        { kind: 'function', pattern: /^(?:static\s+)?(?:inline\s+)?(?:const\s+)?(?:unsigned\s+)?(?:struct\s+)?\w[\w*\s]+?\s+(\w+)\s*\([^;]*$/gm },
+        { kind: 'class',    pattern: /(?:typedef\s+)?struct\s+(\w+)\s*\{/gm },
+        { kind: 'class',    pattern: /(?:typedef\s+)?enum\s+(\w+)\s*\{/gm },
+    ],
+    cpp: [
+        { kind: 'function',  pattern: /^(?:static\s+)?(?:virtual\s+)?(?:inline\s+)?(?:const\s+)?[\w:*&<>\s]+?\s+(\w+)\s*\([^;]*$/gm },
+        { kind: 'class',     pattern: /(?:class|struct)\s+(\w+)\s*[{:]/gm },
+        { kind: 'interface', pattern: /namespace\s+(\w+)\s*\{/gm },
+    ],
+};
+
 /**
- * Convert FileSymbol (0-based lines from symbolExtractor) to SymbolDef (1-based lines).
+ * Synchronous regex-based definition extraction (1-based line numbers).
+ * Replaces the deleted symbolExtractor.ts — used as fallback when tree-sitter
+ * is unavailable and in synchronous call sites (workspace-wide scans).
  */
-function toSymbolDef(sym: FileSymbol, relPath: string): SymbolDef {
-    return {
-        name: sym.name,
-        kind: sym.kind,
-        file_path: relPath,
-        start_line: sym.range.start.line + 1,
-        end_line: sym.range.end.line + 1,
-        signature: sym.signature,
-    };
+function extractDefsRegex(absPath: string, relPath: string): SymbolDef[] {
+    let source: string;
+    try {
+        source = readFileNormalized(absPath);
+    } catch {
+        return [];
+    }
+
+    const lang = detectLanguage(absPath);
+    if (!lang) return [];
+
+    const patterns = DEF_PATTERNS[lang] ?? DEF_PATTERNS['python'] ?? [];
+    const lines = source.split('\n');
+    const defs: SymbolDef[] = [];
+
+    for (const { kind, pattern } of patterns) {
+        pattern.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = pattern.exec(source)) !== null) {
+            const name = m[1];
+            const lineNo = source.slice(0, m.index).split('\n').length;
+            let sig = lineNo <= lines.length ? lines[lineNo - 1].trim() : '';
+            if (sig.length > 120) sig = sig.slice(0, 117) + '...';
+            defs.push({ name, kind, file_path: relPath, start_line: lineNo, end_line: lineNo, signature: sig });
+        }
+    }
+
+    return defs;
 }
 
 /**
  * Extract definitions from a file, returning 1-based SymbolDefs.
  *
  * Prefers web-tree-sitter (same quality as Python backend) when initialized.
- * Falls back to regex-based symbolExtractor when tree-sitter is unavailable.
+ * Falls back to regex when tree-sitter is unavailable.
  */
 async function extractDefinitionsAsync(absPath: string, relPath: string): Promise<SymbolDef[]> {
-    // Try tree-sitter first (matches Python backend quality)
     if (treeSitter.isInitialized()) {
         try {
             const source = fs.readFileSync(absPath);
-            // Pass relPath so file_path in SymbolDef is relative (matching Python)
             const result = await treeSitter.extractDefinitions(relPath, source);
             return result.definitions;
         } catch {
             // Fall through to regex
         }
     }
-    // Regex fallback
-    return extractDefinitionsSync(absPath, relPath);
+    return extractDefsRegex(absPath, relPath);
 }
 
-/**
- * Synchronous regex-based extraction (used as fallback and for workspace-wide scans).
- */
-function extractDefinitionsSync(absPath: string, relPath: string): SymbolDef[] {
-    const extracted = extractSymbols(absPath);
-    return extracted.symbols.map(s => toSymbolDef(s, relPath));
-}
-
-/** Backwards-compatible sync alias used by find_symbol index building. */
+/** Synchronous extraction — regex fallback used by find_symbol index building and workspace scans. */
 function extractDefinitions(absPath: string, relPath: string): SymbolDef[] {
-    return extractDefinitionsSync(absPath, relPath);
+    return extractDefsRegex(absPath, relPath);
 }
 
 /**
@@ -541,37 +603,9 @@ export function find_references(
         const absPath = path.join(ws, relPath);
         const lang = detectLanguage(absPath);
 
-        if (lang !== null) {
-            try {
-                const extracted = extractSymbols(absPath);
-                // Build a set of lines where imports reference this symbol
-                const refLines = new Set<number>();
-
-                // Check import references
-                for (const imp of extracted.imports) {
-                    if (imp.includes(symbolName)) {
-                        // We don't have exact line info for imports from symbolExtractor,
-                        // so we accept all grep matches from this file that hit imports
-                    }
-                }
-
-                // The symbolExtractor doesn't provide per-reference line data like
-                // the Python parser does, so we accept all grep matches as valid.
-                // This matches the Python fallback behavior.
-                for (const m of fileMatches) {
-                    validated.push(m);
-                }
-            } catch {
-                // Fallback: keep grep matches as-is
-                for (const m of fileMatches) {
-                    validated.push(m);
-                }
-            }
-        } else {
-            // Non-parseable files: keep grep matches as-is
-            for (const m of fileMatches) {
-                validated.push(m);
-            }
+        // Accept all grep matches — regex-level validation is sufficient.
+        for (const m of fileMatches) {
+            validated.push(m);
         }
     }
 
@@ -761,8 +795,7 @@ export function get_callers(
                 if (!callRe.test(source)) continue;
 
                 const relPath = path.relative(ws, absPath);
-                const extracted = extractSymbols(absPath);
-                const allDefs = extracted.symbols.map(s => toSymbolDef(s, relPath));
+                const allDefs = extractDefinitions(absPath, relPath);
                 const lines = source.split('\n');
 
                 for (const defn of allDefs) {
@@ -833,9 +866,7 @@ export async function expand_symbol(
         }
 
         const relPath = path.relative(ws, absPath);
-        const defs = await extractDefinitionsAsync(absPath, relPath);
-        const extracted = { symbols: defs.map(d => ({ name: d.name, kind: d.kind as any, signature: d.signature, range: { start: { line: d.start_line - 1, character: 0 }, end: { line: d.end_line - 1, character: 0 } } })) };
-        const allDefs = extracted.symbols.map(s => toSymbolDef(s, relPath));
+        const allDefs = await extractDefinitionsAsync(absPath, relPath);
 
         // Try exact match first
         let matches = allDefs.filter(s => s.name === params.symbol_name);
@@ -886,8 +917,7 @@ export async function expand_symbol(
         if (candidates.length >= 5) return true; // stop walking
 
         try {
-            const extracted = extractSymbols(absPath);
-            const allDefs = extracted.symbols.map(s => toSymbolDef(s, relPath));
+            const allDefs = extractDefinitions(absPath, relPath);
 
             for (const s of allDefs) {
                 if (s.name === params.symbol_name) {

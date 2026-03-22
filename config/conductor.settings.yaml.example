@@ -179,11 +179,11 @@ change_limits:
 # Logging Configuration
 # =============================================================================
 logging:
-  # Enable DuckDB audit logging
+  # Enable audit logging
   audit_enabled: true
 
   # Path to audit log database file
-  audit_path: "audit_logs.duckdb"
+  audit_path: "audit_logs.db"
 
 # =============================================================================
 # Prompt Configuration

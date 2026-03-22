@@ -46,10 +46,12 @@ class FileOutlineParams(BaseModel):
 
 class GetDependenciesParams(BaseModel):
     file_path: str = Field(..., description="Relative file path to find dependencies of.")
+    max_depth: int = Field(default=1, ge=1, le=3, description="Traversal depth: 1=direct only, 2-3=transitive.")
 
 
 class GetDependentsParams(BaseModel):
     file_path: str = Field(..., description="Relative file path to find dependents of.")
+    max_depth: int = Field(default=1, ge=1, le=3, description="Traversal depth: 1=direct only, 2-3=transitive.")
 
 
 class GitLogParams(BaseModel):
@@ -189,6 +191,95 @@ class RunTestParams(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# New analysis tool parameter schemas
+# ---------------------------------------------------------------------------
+
+
+class GitHotspotsParams(BaseModel):
+    days: int = Field(default=90, ge=7, le=365, description="Look-back window in days.")
+    top_n: int = Field(default=15, ge=1, le=50, description="Max hotspot files to return.")
+
+
+class ListEndpointsParams(BaseModel):
+    path: Optional[str] = Field(None, description="Relative path to scope the scan (file or directory).")
+    max_results: int = Field(default=100, ge=1, le=500)
+
+
+class ExtractDocstringsParams(BaseModel):
+    path: str = Field(..., description="Relative file path to extract docstrings from.")
+    symbol_name: Optional[str] = Field(None, description="Only extract docstring for this symbol.")
+
+
+class DbSchemaParams(BaseModel):
+    path: Optional[str] = Field(None, description="Relative path to scope the scan. Omit for whole workspace.")
+    max_results: int = Field(default=50, ge=1, le=200)
+
+
+# ---------------------------------------------------------------------------
+# Browser tool parameter schemas
+# ---------------------------------------------------------------------------
+
+
+class WebSearchParams(BaseModel):
+    query: str = Field(..., description="Search query (e.g. 'playwright timeout error', 'fastapi lifespan example').")
+    max_results: int = Field(default=10, ge=1, le=20, description="Max number of results to return.")
+
+
+class WebNavigateParams(BaseModel):
+    url: str = Field(..., description="URL to navigate to (must start with http:// or https://).")
+    wait_until: str = Field(
+        default="domcontentloaded",
+        description="When to consider navigation succeeded: 'load', 'domcontentloaded', or 'networkidle'.",
+    )
+
+
+class WebClickParams(BaseModel):
+    selector: Optional[str] = Field(
+        None,
+        description="CSS selector of the element to click (e.g. 'button.submit', '#login').",
+    )
+    text: Optional[str] = Field(
+        None,
+        description="Click the element containing this exact text (uses getByText).",
+    )
+
+
+class WebFillParams(BaseModel):
+    selector: str = Field(
+        ...,
+        description="CSS selector of the input field to fill (e.g. 'input[name=email]', '#search').",
+    )
+    value: str = Field(..., description="Text value to type into the field.")
+    press_enter: bool = Field(
+        default=False,
+        description="Press Enter after filling the field (useful for search boxes).",
+    )
+
+
+class WebScreenshotParams(BaseModel):
+    selector: Optional[str] = Field(
+        None,
+        description="CSS selector to screenshot. Omit for full page.",
+    )
+    full_page: bool = Field(
+        default=True,
+        description="Capture the full scrollable page (ignored if selector is set).",
+    )
+
+
+class WebExtractParams(BaseModel):
+    selector: str = Field(
+        ...,
+        description="CSS selector to extract content from (e.g. 'table', '.article-body', 'h1').",
+    )
+    attribute: Optional[str] = Field(
+        None,
+        description="Extract this HTML attribute instead of text content (e.g. 'href', 'src').",
+    )
+    max_results: int = Field(default=20, ge=1, le=100, description="Max elements to return.")
+
+
+# ---------------------------------------------------------------------------
 # Tool name → Pydantic param model mapping
 #
 # Used by execute_tool() to validate and coerce raw LLM params before
@@ -221,6 +312,18 @@ TOOL_PARAM_MODELS: Dict[str, type] = {
     "expand_symbol": ExpandSymbolParams,
     "detect_patterns": DetectPatternsParams,
     "run_test": RunTestParams,
+    # New analysis tools
+    "git_hotspots": GitHotspotsParams,
+    "list_endpoints": ListEndpointsParams,
+    "extract_docstrings": ExtractDocstringsParams,
+    "db_schema": DbSchemaParams,
+    # Browser tools
+    "web_search": WebSearchParams,
+    "web_navigate": WebNavigateParams,
+    "web_click": WebClickParams,
+    "web_fill": WebFillParams,
+    "web_screenshot": WebScreenshotParams,
+    "web_extract": WebExtractParams,
 }
 
 
@@ -401,7 +504,8 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "get_dependencies",
         "description": (
             "Find what files a given file depends on (imports/references). "
-            "Uses the dependency graph to show structural relationships."
+            "Uses the dependency graph. Set max_depth=2 or 3 to find transitive "
+            "dependencies (A imports B imports C). Each result includes its depth."
         ),
         "input_schema": GetDependenciesParams.model_json_schema(),
     },
@@ -409,7 +513,8 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "get_dependents",
         "description": (
             "Find what files depend on a given file (reverse dependencies). "
-            "Useful for understanding impact of changes."
+            "Set max_depth=2 or 3 to find transitive dependents (who depends on "
+            "files that depend on this file). Useful for blast radius analysis."
         ),
         "input_schema": GetDependentsParams.model_json_schema(),
     },
@@ -578,5 +683,104 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "confirm it with evidence from actual test execution."
         ),
         "input_schema": RunTestParams.model_json_schema(),
+    },
+    # --- New analysis tools ---
+    {
+        "name": "git_hotspots",
+        "description": (
+            "Analyze git history to find frequently changed files (hotspots) "
+            "and recently active areas. Hotspots indicate code that changes often — "
+            "likely complex, risky, or under active development. Use to prioritize "
+            "investigation in large codebases."
+        ),
+        "input_schema": GitHotspotsParams.model_json_schema(),
+    },
+    {
+        "name": "list_endpoints",
+        "description": (
+            "Extract all API endpoints/routes from the codebase. Detects patterns "
+            "for FastAPI, Flask, Django, Spring, Express, and Go. Returns method, "
+            "path, file, and line for each endpoint. Use as a starting point when "
+            "investigating API flows or understanding the service surface."
+        ),
+        "input_schema": ListEndpointsParams.model_json_schema(),
+    },
+    {
+        "name": "extract_docstrings",
+        "description": (
+            "Extract function/class-level documentation (docstrings, JSDoc, Javadoc, "
+            "Go doc comments) from a file. Use when compressed_view isn't enough and "
+            "you need to understand what a function is supposed to do without reading "
+            "its full implementation."
+        ),
+        "input_schema": ExtractDocstringsParams.model_json_schema(),
+    },
+    {
+        "name": "db_schema",
+        "description": (
+            "Extract database schema from ORM models (SQLAlchemy, Django, JPA, TypeORM). "
+            "Returns model names, table names, and field definitions. Use to understand "
+            "the data layer — what tables exist, what columns they have, and how models "
+            "relate to each other."
+        ),
+        "input_schema": DbSchemaParams.model_json_schema(),
+    },
+    # --- Browser tools ---
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web using Google and return structured results. "
+            "Each result includes title, URL, and snippet. Use this to look up "
+            "external library documentation, error messages, API references, "
+            "or best practices. Follow up with web_navigate on interesting URLs."
+        ),
+        "input_schema": WebSearchParams.model_json_schema(),
+    },
+    {
+        "name": "web_navigate",
+        "description": (
+            "Navigate a headless browser to a URL and return the page content. "
+            "Returns the page title, final URL (after redirects), visible text, "
+            "and a list of links. The browser session persists across calls so "
+            "you can navigate, click, fill forms, and extract data in sequence."
+        ),
+        "input_schema": WebNavigateParams.model_json_schema(),
+    },
+    {
+        "name": "web_click",
+        "description": (
+            "Click an element on the current browser page by CSS selector or "
+            "visible text. Returns the page state after the click (URL, title, "
+            "and nearby text). Use after web_navigate to interact with buttons, "
+            "links, tabs, and other clickable elements."
+        ),
+        "input_schema": WebClickParams.model_json_schema(),
+    },
+    {
+        "name": "web_fill",
+        "description": (
+            "Fill a form input on the current browser page. Clears the field "
+            "first, then types the value. Optionally press Enter after filling "
+            "(useful for search boxes). Use after web_navigate to submit forms."
+        ),
+        "input_schema": WebFillParams.model_json_schema(),
+    },
+    {
+        "name": "web_screenshot",
+        "description": (
+            "Take a screenshot of the current browser page (or a specific element). "
+            "Returns the path to the saved PNG file. Use to capture visual state "
+            "when text extraction is insufficient."
+        ),
+        "input_schema": WebScreenshotParams.model_json_schema(),
+    },
+    {
+        "name": "web_extract",
+        "description": (
+            "Extract text or attributes from elements matching a CSS selector "
+            "on the current browser page. Use to scrape structured data like "
+            "tables, lists, or specific sections. Returns an array of matches."
+        ),
+        "input_schema": WebExtractParams.model_json_schema(),
     },
 ]

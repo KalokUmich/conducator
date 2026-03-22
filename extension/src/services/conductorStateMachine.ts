@@ -40,6 +40,7 @@ export enum ConductorEvent {
     WORKSPACE_READY = 'WORKSPACE_READY',
     WORKSPACE_FAILED = 'WORKSPACE_FAILED',
     DESTROY_WORKSPACE = 'DESTROY_WORKSPACE',
+    QUIT_SESSION = 'QUIT_SESSION',
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +103,7 @@ const TRANSITION_TABLE: Record<string, ConductorState> = {
 
     // From Hosting
     [`${ConductorState.Hosting}:${ConductorEvent.STOP_HOSTING}`]: ConductorState.ReadyToHost,
+    [`${ConductorState.Hosting}:${ConductorEvent.QUIT_SESSION}`]: ConductorState.ReadyToHost,
     [`${ConductorState.Hosting}:${ConductorEvent.BACKEND_LOST}`]: ConductorState.BackendDisconnected,
 
     // From Joining
@@ -111,6 +113,7 @@ const TRANSITION_TABLE: Record<string, ConductorState> = {
 
     // From Joined
     [`${ConductorState.Joined}:${ConductorEvent.LEAVE_SESSION}`]: ConductorState.ReadyToHost,
+    [`${ConductorState.Joined}:${ConductorEvent.QUIT_SESSION}`]: ConductorState.ReadyToHost,
     [`${ConductorState.Joined}:${ConductorEvent.BACKEND_LOST}`]: ConductorState.BackendDisconnected,
 };
 

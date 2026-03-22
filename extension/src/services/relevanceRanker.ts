@@ -37,7 +37,13 @@
 import * as path from 'path';
 
 import type { LspResolveResult } from './lspResolver';
-import type { SearchResult }     from './vectorIndex';
+
+/** A single semantic search result (inlined from deleted vectorIndex). */
+export interface SearchResult {
+    symbol_id: string;
+    /** Cosine similarity in the range [-1, 1]. */
+    score: number;
+}
 
 // ---------------------------------------------------------------------------
 // Public constants

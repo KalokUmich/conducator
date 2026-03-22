@@ -351,6 +351,49 @@ export class SessionService {
 
         console.log(`[SessionService] Reset session: new roomId=${this._roomId}`);
     }
+
+    // ------------------------------------------------------------------
+    // Quit room history (for rejoin)
+    // ------------------------------------------------------------------
+
+    private static readonly QUIT_ROOMS_KEY = 'conductor.quitRooms';
+    private static readonly MAX_QUIT_ROOMS = 10;
+
+    /** Save the current room as a "quit room" for later rejoin. */
+    public saveQuitRoom(roomId: string, backendUrl: string): void {
+        if (!this._context) { return; }
+        const rooms: QuitRoom[] =
+            this._context.globalState.get(SessionService.QUIT_ROOMS_KEY, []) as QuitRoom[];
+        // Deduplicate
+        const filtered = rooms.filter(r => r.roomId !== roomId);
+        filtered.push({ roomId, backendUrl, quitAt: Date.now() });
+        // Keep only the most recent N
+        const trimmed = filtered.slice(-SessionService.MAX_QUIT_ROOMS);
+        this._context.globalState.update(SessionService.QUIT_ROOMS_KEY, trimmed);
+        console.log(`[SessionService] Saved quit room: ${roomId}`);
+    }
+
+    /** Get the list of rooms the user previously quit (for rejoin). */
+    public getQuitRooms(): QuitRoom[] {
+        if (!this._context) { return []; }
+        return this._context.globalState.get(SessionService.QUIT_ROOMS_KEY, []) as QuitRoom[];
+    }
+
+    /** Remove a quit room from the list (e.g., after rejoin or delete). */
+    public removeQuitRoom(roomId: string): void {
+        if (!this._context) { return; }
+        const rooms: QuitRoom[] =
+            this._context.globalState.get(SessionService.QUIT_ROOMS_KEY, []) as QuitRoom[];
+        const filtered = rooms.filter(r => r.roomId !== roomId);
+        this._context.globalState.update(SessionService.QUIT_ROOMS_KEY, filtered);
+    }
+}
+
+/** Persisted quit room entry for later rejoin. */
+export interface QuitRoom {
+    roomId: string;
+    backendUrl: string;
+    quitAt: number;
 }
 
 /**

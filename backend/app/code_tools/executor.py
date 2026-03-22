@@ -57,7 +57,18 @@ class RemoteToolExecutor(ToolExecutor):
     Used when the workspace is in "local mode" — the developer's code
     lives on their machine, not on the server.  Each tool call is sent
     to the extension, executed locally, and the result is returned.
+
+    **Exception**: Backend-only tools (e.g. browser/Playwright tools) run
+    directly on the backend because they don't need filesystem access and
+    the extension doesn't implement them.
     """
+
+    # Tools that execute on the backend even in remote/local mode.
+    # These don't require workspace filesystem access.
+    _BACKEND_ONLY_TOOLS = frozenset([
+        "web_search", "web_navigate", "web_click", "web_fill",
+        "web_screenshot", "web_extract",
+    ])
 
     def __init__(self, room_id: str, workspace_path: str) -> None:
         self._room_id = room_id
@@ -68,6 +79,11 @@ class RemoteToolExecutor(ToolExecutor):
         return self._workspace_path
 
     async def execute(self, tool_name: str, params: Dict[str, Any]) -> ToolResult:
+        # Browser tools run on the backend — no need to proxy to extension
+        if tool_name in self._BACKEND_ONLY_TOOLS:
+            return await asyncio.to_thread(
+                execute_tool, tool_name, self._workspace_path, params,
+            )
         from .proxy import tool_proxy
         return await tool_proxy.execute(
             room_id=self._room_id,

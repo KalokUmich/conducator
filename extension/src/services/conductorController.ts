@@ -241,4 +241,21 @@ export class ConductorController {
         }
         this._fsm.transition(ConductorEvent.LEAVE_SESSION);
     }
+
+    /**
+     * Quit the session (leave but preserve data for later rejoin).
+     *
+     * Valid from Hosting or Joined states.  Unlike leaveSession / stopHosting,
+     * the caller should NOT reset the roomId — it must be preserved so the
+     * user can rejoin the same room later.
+     *
+     * @throws {Error} When the FSM is not in Hosting or Joined.
+     */
+    quitSession(): void {
+        const current = this._fsm.getState();
+        if (current !== ConductorState.Hosting && current !== ConductorState.Joined) {
+            throw new Error(`Cannot quit session from state: ${current}`);
+        }
+        this._fsm.transition(ConductorEvent.QUIT_SESSION);
+    }
 }

@@ -41,6 +41,43 @@ try {
     process.exit(1);
 }
 
+// Subprocess tools — validated via Python CLI (`python -m app.code_tools`)
+const { execFileSync } = require('child_process');
+
+const PYTHON = path.join(__dirname, '..', '..', '.venv', 'bin', 'python');
+const BACKEND_DIR = path.join(__dirname, '..', '..', 'backend');
+
+/**
+ * Run a tool via the Python CLI and return the parsed result.
+ * Returns { success, data, error } or throws on parse failure.
+ */
+function runPythonTool(toolName, workspace, params) {
+    const raw = execFileSync(PYTHON, [
+        '-m', 'app.code_tools', toolName, workspace, JSON.stringify(params),
+    ], { cwd: BACKEND_DIR, encoding: 'utf-8', timeout: 15000 });
+    return JSON.parse(raw);
+}
+
+const SUBPROCESS_TOOLS = new Set([
+    'grep', 'read_file', 'list_files', 'git_log', 'git_diff',
+    'git_diff_files', 'git_blame', 'git_show', 'find_tests',
+    'run_test', 'ast_search',
+]);
+
+const SUBPROCESS_SMOKE_PARAMS = {
+    grep: { pattern: 'OrderService' },
+    read_file: { path: 'app/service.py' },
+    list_files: { directory: '.', max_depth: 2 },
+    git_log: { max_count: 3 },
+    git_diff: { ref: 'HEAD~1' },
+    git_blame: { file: 'app/service.py' },
+    git_show: { commit: 'HEAD', file: 'app/service.py' },
+    git_diff_files: { ref: 'HEAD~1' },
+    find_tests: { name: 'test_', path: 'tests' },
+    run_test: { test_file: 'tests/test_service.py', timeout: 10 },
+    ast_search: { pattern: 'class $NAME { $$$ }', language: 'python' },
+};
+
 // TS-implemented tools (complex + AST)
 const TS_TOOLS = {
     // Complex (sync except module_summary)
@@ -119,24 +156,58 @@ async function main() {
     const allErrors = [];
     let passed = 0;
     let skipped = 0;
+    let subprocessPassed = 0;
+
+    // Check if Python CLI is available for subprocess tools
+    let hasPython = false;
+    try {
+        execFileSync(PYTHON, ['--version'], { encoding: 'utf-8', timeout: 5000 });
+        hasPython = true;
+    } catch { /* Python not available — skip subprocess tests */ }
 
     for (const [toolName, toolDef] of Object.entries(contract.tools)) {
-        const runner = TS_TOOLS[toolName];
-        if (!runner) {
-            skipped++;
-            continue; // subprocess tool, no TS implementation to validate
-        }
+        // --- Subprocess tools: validate via Python CLI ---
+        if (SUBPROCESS_TOOLS.has(toolName)) {
+            if (!hasPython) { skipped++; continue; }
+            const params = SUBPROCESS_SMOKE_PARAMS[toolName];
+            if (!params) { skipped++; continue; }
 
-        const params = SMOKE_PARAMS[toolName];
-        if (!params) {
-            skipped++;
+            try {
+                const result = runPythonTool(toolName, fixtureRepo, params);
+                if (typeof result.success !== 'boolean') {
+                    allErrors.push(`${toolName} (subprocess): missing {success: boolean} shape`);
+                    continue;
+                }
+                if (result.success) {
+                    const fields = toolDef.output_item_fields || [];
+                    if (fields.length > 0 && result.data != null) {
+                        const fieldErrors = checkFields(result.data, fields, toolName);
+                        fieldErrors.forEach(e => console.log(`  [warn] ${e}`));
+                    }
+                }
+                subprocessPassed++;
+            } catch (e) {
+                // ast_search / run_test may fail due to missing CLI tools — warn, don't fail
+                if (toolName === 'ast_search' || toolName === 'run_test') {
+                    console.log(`  [warn] ${toolName}: ${e.message.split('\n')[0]} (ast-grep-cli may not be installed)`);
+                    skipped++;
+                } else {
+                    allErrors.push(`${toolName} (subprocess): ${e.message.split('\n')[0]}`);
+                }
+            }
             continue;
         }
+
+        // --- TS-implemented tools: validate via direct runner ---
+        const runner = TS_TOOLS[toolName];
+        if (!runner) { skipped++; continue; }
+
+        const params = SMOKE_PARAMS[toolName];
+        if (!params) { skipped++; continue; }
 
         try {
             const result = await runner(fixtureRepo, params);
             if (!result || !result.success) {
-                // Tool returned error — still check that it has ToolResult shape
                 if (!result || typeof result.success !== 'boolean') {
                     allErrors.push(`${toolName}: did not return {success: boolean} shape`);
                 }
@@ -149,8 +220,6 @@ async function main() {
             if (fields.length > 0 && result.data != null) {
                 const fieldErrors = checkFields(result.data, fields, toolName);
                 if (fieldErrors.length > 0) {
-                    // Warn but don't fail — contract shape may describe inner items
-                    // while the actual output wraps them differently
                     fieldErrors.forEach(e => console.log(`  [warn] ${e}`));
                 }
             }
@@ -160,7 +229,7 @@ async function main() {
         }
     }
 
-    console.log(`Contract validation: ${passed} passed, ${skipped} skipped (subprocess), ${allErrors.length} errors`);
+    console.log(`Contract validation: ${passed} TS passed, ${subprocessPassed} subprocess passed, ${skipped} skipped, ${allErrors.length} errors`);
     if (allErrors.length > 0) {
         console.log('\nErrors:');
         allErrors.forEach(e => console.log(`  ${e}`));

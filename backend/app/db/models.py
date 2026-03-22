@@ -7,6 +7,8 @@ Tables:
   * file_metadata — uploaded file metadata
   * todos — room-scoped task tracking
   * integration_tokens — OAuth tokens for external integrations (Jira, etc.)
+  * chat_rooms — chat room lifecycle metadata
+  * chat_messages — durable message archive
 """
 from __future__ import annotations
 
@@ -16,6 +18,8 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -143,4 +147,81 @@ class IntegrationToken(Base):
 
     __table_args__ = (
         UniqueConstraint("user_email", "provider", name="uq_integration_user_provider"),
+    )
+
+
+class ChatRoom(Base):
+    """Chat room lifecycle and identity."""
+    __tablename__ = "chat_rooms"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    owner_email: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    owner_provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    mode: Mapped[str] = mapped_column(String, nullable=False, default="local")
+    workspace_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    repo_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    branch: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChatRoomParticipant(Base):
+    """Tracks who participated in a room."""
+    __tablename__ = "chat_room_participants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    room_id: Mapped[str] = mapped_column(
+        String, ForeignKey("chat_rooms.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    role: Mapped[str] = mapped_column(String, nullable=False, default="guest")
+    identity_source: Mapped[str] = mapped_column(String, nullable=False, default="anonymous")
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("room_id", "user_id", name="uq_participant_room_user"),
+        Index("ix_chat_participants_room", "room_id"),
+        Index("ix_chat_participants_email", "email"),
+    )
+
+
+class ChatMessageRecord(Base):
+    """Durable chat message archive."""
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    room_id: Mapped[str] = mapped_column(
+        String, ForeignKey("chat_rooms.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    type: Mapped[str] = mapped_column(String, nullable=False, default="message")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    identity_source: Mapped[str] = mapped_column(String, nullable=False, default="anonymous")
+    parent_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    ai_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra_data: Mapped[str | None] = mapped_column("metadata", Text, nullable=True)
+    ts: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_chat_msg_room_ts", "room_id", "ts"),
     )

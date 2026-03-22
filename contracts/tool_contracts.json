@@ -413,6 +413,14 @@
             "description": "Relative file path to find dependencies of.",
             "title": "File Path",
             "type": "string"
+          },
+          "max_depth": {
+            "default": 1,
+            "description": "Traversal depth: 1=direct only, 2-3=transitive.",
+            "maximum": 3,
+            "minimum": 1,
+            "title": "Max Depth",
+            "type": "integer"
           }
         },
         "required": [
@@ -460,6 +468,14 @@
             "description": "Relative file path to find dependents of.",
             "title": "File Path",
             "type": "string"
+          },
+          "max_depth": {
+            "default": 1,
+            "description": "Traversal depth: 1=direct only, 2-3=transitive.",
+            "maximum": 3,
+            "minimum": 1,
+            "title": "Max Depth",
+            "type": "integer"
           }
         },
         "required": [

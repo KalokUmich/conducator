@@ -25,6 +25,18 @@ _stub("tree_sitter_languages")
 _stub("networkx", DiGraph=MagicMock, pagerank=MagicMock, PowerIterationFailedConvergence=Exception)
 _stub("litellm", completion=MagicMock(), drop_params=False)
 
+# Playwright stubs — browser tools tests mock the service layer, so we only
+# need the module structure to exist for import resolution.
+_pw_sync = _stub(
+    "playwright.sync_api",
+    sync_playwright=MagicMock,
+    Browser=MagicMock,
+    BrowserContext=MagicMock,
+    Page=MagicMock,
+)
+_stub("playwright", sync_api=_pw_sync)
+_stub("playwright.sync_api", **{k: getattr(_pw_sync, k) for k in dir(_pw_sync) if not k.startswith("_")})
+
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 

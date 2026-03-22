@@ -1,8 +1,6 @@
 # Conductor Project Makefile
 # ===========================
 
-.PHONY: all setup setup-backend setup-extension venv ensure-backend-deps install run-backend run-backend-prod run-backend-port test test-backend test-extension integration-test compile compile-ts compile-css package clean help langfuse-up langfuse-down langfuse-logs data-up data-down data-logs app-up app-down app-restart app-logs docker-up docker-down docker-clean db-update db-status db-rollback-one update-prompt-library test-parity update-contracts
-
 # Python virtual environment
 VENV_DIR := .venv
 
@@ -13,14 +11,22 @@ UVICORN := $(PYTHON) -m uvicorn
 LIQUIBASE_IMAGE := liquibase/liquibase:4.29
 LIQUIBASE := docker run --rm --network conductor-net \
 	-v $(CURDIR)/database:/liquibase/changelog \
-	-e POSTGRES_HOST=conductor-postgres \
 	$(LIQUIBASE_IMAGE) \
-	--defaults-file=/liquibase/changelog/liquibase.properties
+	--defaults-file=/liquibase/changelog/liquibase.properties \
+	--search-path=/liquibase/changelog/changelog \
+	--url=jdbc:postgresql://$${POSTGRES_HOST:-conductor-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB:-conductor} \
+	--username=$${POSTGRES_USER:-conductor} \
+	--password=$${POSTGRES_PASSWORD:-conductor}
 
 # Docker compose files
 DATA_COMPOSE := docker/docker-compose.data.yaml
 APP_COMPOSE := docker/docker-compose.app.yaml
 LANGFUSE_COMPOSE := docker/docker-compose.langfuse.yaml
+
+# WebSocket Configuration
+WS_PING_INTERVAL := 20.0
+WS_PING_TIMEOUT := 20.0
+WS_OPTIONS := --ws-ping-interval $(WS_PING_INTERVAL) --ws-ping-timeout $(WS_PING_TIMEOUT)
 
 # Default target
 all: setup
@@ -28,6 +34,7 @@ all: setup
 # ===========================
 # Setup
 # ===========================
+.PHONY: setup setup-backend setup-extension venv ensure-backend-deps install browser-install
 
 ## Create venv and install all dependencies
 setup: venv setup-backend setup-extension
@@ -45,9 +52,11 @@ setup-extension:
 	cd extension && npm install
 	@echo "Extension setup complete!"
 
-# ===========================
-# Virtual Environment
-# ===========================
+## Install Playwright browsers (Chromium) for web browsing tools
+browser-install: venv
+	@echo "Installing Playwright Chromium browser..."
+	$(PYTHON) -m playwright install chromium
+	@echo "Playwright Chromium installed!"
 
 ## Create Python virtual environment if it doesn't exist
 venv:
@@ -85,23 +94,13 @@ ensure-backend-deps: venv
 		echo "Backend dependencies ready"; \
 	fi
 
-# ===========================
-# Install (alias for setup)
-# ===========================
-
 ## Install all dependencies (alias for setup)
 install: setup
 
 # ===========================
 # Run Servers
 # ===========================
-
-# WebSocket Configuration
-# - ws-ping-interval: Ping every 20 seconds to check connection health
-# - ws-ping-timeout: Wait 20 seconds for pong response before closing
-WS_PING_INTERVAL := 20.0
-WS_PING_TIMEOUT := 20.0
-WS_OPTIONS := --ws-ping-interval $(WS_PING_INTERVAL) --ws-ping-timeout $(WS_PING_TIMEOUT)
+.PHONY: run-backend run-backend-prod run-backend-port
 
 ## Start backend server (development mode with auto-reload)
 run-backend: ensure-backend-deps
@@ -109,7 +108,6 @@ run-backend: ensure-backend-deps
 	@echo "   Swagger UI: http://localhost:8000/docs"
 	@echo "   ReDoc: http://localhost:8000/redoc"
 	@echo "   WebSocket: ws://localhost:8000/ws/chat/{room_id}"
-	@echo "   WebSocket Ping: $(WS_PING_INTERVAL)s interval, $(WS_PING_TIMEOUT)s timeout"
 	cd backend && $(UVICORN) app.main:app --reload --reload-dir app --host 0.0.0.0 --port 8000 $(WS_OPTIONS)
 
 ## Start backend server (production mode)
@@ -125,6 +123,7 @@ run-backend-port: ensure-backend-deps
 # ===========================
 # Testing
 # ===========================
+.PHONY: test test-backend test-extension test-parity integration-test
 
 ## Run all tests
 test: test-backend test-extension
@@ -135,12 +134,7 @@ test-backend: ensure-backend-deps
 	@echo "Running backend tests..."
 	cd backend && $(PYTHON) -m pytest tests/ -v
 
-## Run backend integration tests (requires real API credentials)
-integration-test: ensure-backend-deps
-	@echo "Running backend integration tests (requires API credentials)..."
-	cd backend && $(PYTHON) -m pytest tests/ -v -s -m integration
-
-## Run extension tests (if any)
+## Run extension tests
 test-extension:
 	@echo "Running extension tests..."
 	@if [ -f "extension/package.json" ] && grep -q '"test"' extension/package.json; then \
@@ -149,33 +143,26 @@ test-extension:
 		echo "No extension tests configured"; \
 	fi
 
-# ===========================
-# Tool Parity
-# ===========================
+## Run backend integration tests (requires real API credentials)
+integration-test: ensure-backend-deps
+	@echo "Running backend integration tests (requires API credentials)..."
+	cd backend && $(PYTHON) -m pytest tests/ -v -s -m integration
 
 ## Validate Python↔TS tool parity (shared contract + cross-language tests)
-test-parity:
+test-parity: ensure-backend-deps
 	@echo "Step 1: Check contract matches Python schemas..."
 	cd backend && $(PYTHON) ../scripts/generate_tool_contracts.py --check
-	@echo "Step 2: Compile extension & validate TS against contract..."
+	@echo "Step 2: Compile extension & validate TS + subprocess tools against contract..."
 	cd extension && npm run compile
 	cd extension && node tests/validate_contract.js
 	@echo "Step 3: Run cross-language parity tests..."
 	cd backend && $(PYTHON) -m pytest tests/test_tool_parity_deep.py tests/test_tool_parity_ast.py -v
 	@echo "All parity checks passed."
 
-## Regenerate tool contracts after changing Python schemas
-update-contracts:
-	cd backend && $(PYTHON) ../scripts/generate_tool_contracts.py
-	@echo "Contracts updated. Commit contracts/tool_contracts.json and extension/src/services/toolContracts.d.ts"
-
 # ===========================
 # Build / Compile
 # ===========================
-
-## Download latest prompt library from prompts.chat (reference for agent design)
-update-prompt-library:
-	@bash scripts/update-prompt-library.sh
+.PHONY: compile compile-ts compile-css package update-contracts update-prompt-library
 
 ## Compile extension (TypeScript + Tailwind CSS)
 compile: compile-ts compile-css
@@ -191,33 +178,25 @@ compile-css:
 	@echo "Building Tailwind CSS..."
 	cd extension && npm run build:css
 
-# ===========================
-# Package
-# ===========================
-
 ## Package extension as .vsix (compiles first)
 package: compile
 	@echo "Packaging VS Code extension..."
 	cd extension && npx @vscode/vsce package
 	@echo "Extension packaged! (.vsix file in extension/)"
 
-# ===========================
-# Clean
-# ===========================
+## Regenerate tool contracts after changing Python schemas
+update-contracts: ensure-backend-deps
+	cd backend && $(PYTHON) ../scripts/generate_tool_contracts.py
+	@echo "Contracts updated. Commit contracts/tool_contracts.json and extension/src/services/toolContracts.d.ts"
 
-## Clean all generated files
-clean:
-	@echo "Cleaning..."
-	rm -rf $(VENV_DIR)
-	rm -rf backend/__pycache__ backend/**/__pycache__
-	rm -rf backend/.pytest_cache
-	rm -rf extension/out
-	rm -rf extension/node_modules
-	@echo "Clean complete!"
+## Download latest prompt library from prompts.chat (reference for agent design)
+update-prompt-library:
+	@bash scripts/update-prompt-library.sh
 
 # ===========================
 # Data Tier (Postgres + Redis)
 # ===========================
+.PHONY: data-up data-down data-logs
 
 ## Start Postgres + Redis containers
 data-up:
@@ -238,6 +217,7 @@ data-logs:
 # ===========================
 # App Tier (Backend + Langfuse)
 # ===========================
+.PHONY: app-up app-rebuild app-restart app-down app-logs
 
 ## Start backend + Langfuse containers (builds backend image if missing)
 app-up:
@@ -270,9 +250,10 @@ app-logs:
 # ===========================
 # Full Stack Docker
 # ===========================
+.PHONY: docker-up docker-down docker-clean
 
-## Start full stack (update prompt library, data tier, schema, then app tier)
-docker-up: update-prompt-library data-up
+## Start full stack (data tier, schema, then app tier)
+docker-up: data-up
 	@echo "Waiting for data tier to be healthy..."
 	@sleep 3
 	@$(MAKE) db-update
@@ -293,6 +274,7 @@ docker-clean: docker-down
 # ===========================
 # Database Schema (Liquibase)
 # ===========================
+.PHONY: db-update db-status db-rollback-one
 
 ## Apply pending Liquibase changesets
 db-update:
@@ -314,6 +296,7 @@ db-rollback-one:
 # ===========================
 # Langfuse (Observability)
 # ===========================
+.PHONY: langfuse-up langfuse-down langfuse-logs
 
 ## Start Langfuse (requires data tier for shared Postgres)
 langfuse-up: data-up
@@ -332,8 +315,25 @@ langfuse-logs:
 	docker compose -f $(LANGFUSE_COMPOSE) logs -f langfuse
 
 # ===========================
+# Clean
+# ===========================
+.PHONY: clean
+
+## Clean all generated files
+clean:
+	@echo "Cleaning..."
+	rm -rf $(VENV_DIR)
+	rm -rf backend/__pycache__ backend/**/__pycache__
+	rm -rf backend/.pytest_cache
+	rm -f backend/*.duckdb backend/*.duckdb.wal
+	rm -rf extension/out
+	rm -rf extension/node_modules
+	@echo "Clean complete!"
+
+# ===========================
 # Help
 # ===========================
+.PHONY: help
 
 ## Show this help message
 help:
@@ -341,56 +341,56 @@ help:
 	@echo "======================================="
 	@echo ""
 	@echo "Setup:"
-	@echo "  make setup            - Create venv and install all dependencies"
-	@echo "  make setup-backend    - Setup backend only (venv + pip install)"
-	@echo "  make setup-extension  - Setup extension only (npm install)"
-	@echo "  make venv             - Create Python virtual environment"
+	@echo "  make setup              Create venv and install all dependencies"
+	@echo "  make setup-backend      Setup backend only (venv + pip install)"
+	@echo "  make setup-extension    Setup extension only (npm install)"
+	@echo "  make browser-install    Install Playwright Chromium for web browsing tools"
 	@echo ""
 	@echo "Run Servers:"
-	@echo "  make run-backend      - Start backend server (dev mode, auto-reload)"
-	@echo "  make run-backend-prod - Start backend server (production, 4 workers)"
-	@echo "  make run-backend-port PORT=8001 - Start on custom port"
-	@echo ""
-	@echo "Docker (Data Tier - replaceable with AWS RDS/ElastiCache):"
-	@echo "  make data-up          - Start Postgres + Redis containers"
-	@echo "  make data-down        - Stop data tier"
-	@echo "  make data-logs        - View data tier logs"
-	@echo ""
-	@echo "Docker (App Tier):"
-	@echo "  make app-up           - Start Backend + Langfuse containers"
-	@echo "  make app-restart      - Restart backend after secrets/config change"
-	@echo "  make app-down         - Stop app tier"
-	@echo "  make app-logs         - View app tier logs"
-	@echo ""
-	@echo "Docker (Full Stack):"
-	@echo "  make docker-up        - Start everything (data + app)"
-	@echo "  make docker-down      - Stop everything"
-	@echo "  make docker-clean     - Stop everything + remove conductor images"
-	@echo ""
-	@echo "Database Schema (Liquibase):"
-	@echo "  make db-update        - Apply pending Liquibase changesets"
-	@echo "  make db-status        - Show pending changesets (dry run)"
-	@echo "  make db-rollback-one  - Rollback last changeset"
+	@echo "  make run-backend        Start backend (dev mode, auto-reload)"
+	@echo "  make run-backend-prod   Start backend (production, 4 workers)"
+	@echo "  make run-backend-port PORT=8001  Start on custom port"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test             - Run all tests (unit only)"
-	@echo "  make test-backend     - Run backend unit tests only"
-	@echo "  make test-extension   - Run extension tests only"
-	@echo "  make test-parity      - Validate Python↔TS tool parity (contract + tests)"
-	@echo "  make integration-test - Run backend integration tests (needs API keys)"
+	@echo "  make test               Run all tests (backend + extension)"
+	@echo "  make test-backend       Run backend unit tests"
+	@echo "  make test-extension     Run extension tests"
+	@echo "  make test-parity        Validate Python<>TS tool parity"
+	@echo "  make integration-test   Run integration tests (needs API keys)"
 	@echo ""
 	@echo "Build:"
-	@echo "  make compile          - Compile extension (TypeScript + CSS)"
-	@echo "  make compile-ts       - Compile TypeScript only"
-	@echo "  make compile-css      - Build Tailwind CSS only"
-	@echo "  make update-prompt-library - Download latest prompts.chat CSV"
-	@echo "  make package          - Package extension as .vsix (compiles first)"
+	@echo "  make compile            Compile extension (TypeScript + CSS)"
+	@echo "  make package            Package extension as .vsix"
+	@echo "  make update-contracts   Regenerate tool contracts from Python schemas"
+	@echo "  make update-prompt-library  Download latest prompts.chat CSV"
 	@echo ""
-	@echo "Langfuse (Observability):"
-	@echo "  make langfuse-up      - Start Langfuse self-hosted (Docker)"
-	@echo "  make langfuse-down    - Stop Langfuse"
-	@echo "  make langfuse-logs    - View Langfuse logs"
+	@echo "Docker (Data Tier):"
+	@echo "  make data-up            Start Postgres + Redis"
+	@echo "  make data-down          Stop data tier"
+	@echo "  make data-logs          View data tier logs"
+	@echo ""
+	@echo "Docker (App Tier):"
+	@echo "  make app-up             Start Backend + Langfuse"
+	@echo "  make app-rebuild SVC=x  Rebuild and restart a single service"
+	@echo "  make app-restart        Restart backend (config/secrets reload)"
+	@echo "  make app-down           Stop app tier"
+	@echo "  make app-logs           View app tier logs"
+	@echo ""
+	@echo "Docker (Full Stack):"
+	@echo "  make docker-up          Start everything (data + schema + app)"
+	@echo "  make docker-down        Stop everything"
+	@echo "  make docker-clean       Stop + remove conductor images"
+	@echo ""
+	@echo "Database:"
+	@echo "  make db-update          Apply pending Liquibase changesets"
+	@echo "  make db-status          Show pending changesets (dry run)"
+	@echo "  make db-rollback-one    Rollback last changeset"
+	@echo ""
+	@echo "Langfuse:"
+	@echo "  make langfuse-up        Start Langfuse (Docker)"
+	@echo "  make langfuse-down      Stop Langfuse"
+	@echo "  make langfuse-logs      View Langfuse logs"
 	@echo ""
 	@echo "Other:"
-	@echo "  make clean            - Remove all generated files"
-	@echo "  make help             - Show this help message"
+	@echo "  make clean              Remove all generated files"
+	@echo "  make help               Show this help message"

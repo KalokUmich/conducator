@@ -15,12 +15,12 @@ def test_audit_path_relative_to_project_root_when_settings_in_config_dir(tmp_pat
     settings_file.write_text(
         "logging:\n"
         "  audit_enabled: true\n"
-        "  audit_path: backend/audit_logs.duckdb\n",
+        "  audit_path: backend/audit_logs.db\n",
         encoding="utf-8",
     )
 
     cfg = load_config(settings_path=settings_file)
-    assert Path(cfg.logging.audit_path) == project_root / "backend" / "audit_logs.duckdb"
+    assert Path(cfg.logging.audit_path) == project_root / "backend" / "audit_logs.db"
 
 
 def test_audit_path_relative_to_settings_dir_for_nonstandard_layout(tmp_path):
@@ -29,17 +29,17 @@ def test_audit_path_relative_to_settings_dir_for_nonstandard_layout(tmp_path):
     settings_file.write_text(
         "logging:\n"
         "  audit_enabled: true\n"
-        "  audit_path: local/audit_logs.duckdb\n",
+        "  audit_path: local/audit_logs.db\n",
         encoding="utf-8",
     )
 
     cfg = load_config(settings_path=settings_file)
-    assert Path(cfg.logging.audit_path) == tmp_path / "local" / "audit_logs.duckdb"
+    assert Path(cfg.logging.audit_path) == tmp_path / "local" / "audit_logs.db"
 
 
 def test_audit_path_absolute_remains_unchanged(tmp_path):
     """Absolute audit_path is preserved exactly as configured."""
-    absolute_path = tmp_path / "absolute" / "audit_logs.duckdb"
+    absolute_path = tmp_path / "absolute" / "audit_logs.db"
     settings_file = tmp_path / "conductor.settings.yaml"
     settings_file.write_text(
         "logging:\n"

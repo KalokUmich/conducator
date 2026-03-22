@@ -2,13 +2,12 @@
  * Local repo graph builder for Conductor.
  *
  * Builds a file dependency graph (same structure as the Python backend's
- * `repo_graph` module) using:
- *   - VS Code LSP Document Symbols when available (highest accuracy)
- *   - `symbolExtractor.ts` as fallback (regex/TS compiler, no VS Code dependency)
+ * `repo_graph` module) using **web-tree-sitter WASM** for AST-based symbol
+ * extraction.  Falls back to regex when tree-sitter is not initialized.
  *
  * The graph is serialised to `.conductor/repo_graph.json` and sent to the
  * backend on demand.  The backend uses it to generate repo maps and rank
- * files by importance (PageRank) — without needing tree-sitter.
+ * files by importance (PageRank).
  *
  * Freshness: the index stores a `built_at` timestamp.  The caller compares
  * this against the workspace's latest file mtime to decide if a rebuild
@@ -17,12 +16,15 @@
  * @module services/repoGraphBuilder
  */
 
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { extractSymbols } from './symbolExtractor';
-
-// Type-only import so this module can be tested without VS Code.
-import type * as vscodeT from 'vscode';
+import {
+    extractDefinitions as tsExtractDefinitions,
+    detectLanguage,
+    isInitialized as isTreeSitterReady,
+} from './treeSitterService';
+import type { FileSymbols } from './treeSitterService';
 
 // ---------------------------------------------------------------------------
 // Public types — must match Python backend's parser.py / graph.py
@@ -51,6 +53,8 @@ export interface FileSymbolsData {
 }
 
 export interface RepoGraphData {
+    /** Git HEAD commit hash at build time — cache invalidation key. */
+    git_head: string | null;
     /** Timestamp when this index was built (ms since epoch). */
     built_at: number;
     /** Workspace root path. */
@@ -84,6 +88,19 @@ const SUPPORTED_EXTS = new Set([
 
 /** Max staleness before the index is considered expired (ms). */
 const MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Read the current git HEAD commit hash. Returns null if not a git repo. */
+function getGitHead(workspaceRoot: string): string | null {
+    try {
+        return execFileSync('git', ['rev-parse', 'HEAD'], {
+            cwd: workspaceRoot,
+            encoding: 'utf-8',
+            timeout: 5000,
+        }).trim();
+    } catch {
+        return null;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -130,7 +147,7 @@ export function clearRepoGraph(workspaceRoot: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Graph building
+// Graph building — uses tree-sitter WASM for all symbol extraction
 // ---------------------------------------------------------------------------
 
 async function buildRepoGraph(workspaceRoot: string): Promise<RepoGraphData | null> {
@@ -141,45 +158,43 @@ async function buildRepoGraph(workspaceRoot: string): Promise<RepoGraphData | nu
         return null;
     }
 
-    // Try VS Code LSP first (if available)
-    let usedLsp = false;
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const vscode = require('vscode') as typeof vscodeT;
+    const useTreeSitter = isTreeSitterReady();
 
-        for (const relPath of sourceFiles) {
-            const absPath = path.join(workspaceRoot, relPath);
-            const uri = vscode.Uri.file(absPath);
+    for (const relPath of sourceFiles) {
+        const absPath = path.join(workspaceRoot, relPath);
 
-            try {
-                const symbols = await vscode.commands.executeCommand<vscodeT.DocumentSymbol[]>(
-                    'vscode.executeDocumentSymbolProvider', uri,
-                );
-
-                if (symbols && symbols.length > 0) {
-                    usedLsp = true;
-                    const defs = flattenToDefinitions(symbols, relPath);
-                    const refs = extractReferencesFromFile(absPath, relPath);
-                    files[relPath] = {
+        try {
+            if (useTreeSitter) {
+                // Primary: tree-sitter WASM (8 languages, AST-accurate)
+                const source = fs.readFileSync(absPath);
+                const result: FileSymbols = await tsExtractDefinitions(relPath, source);
+                files[relPath] = {
+                    file_path: relPath,
+                    definitions: result.definitions.map(d => ({
+                        ...d,
                         file_path: relPath,
-                        definitions: defs,
-                        references: refs,
-                        language: detectLanguage(relPath),
-                    };
-                    continue;
-                }
-            } catch { /* LSP not available for this file */ }
-
-            // Fallback to symbolExtractor
-            const extracted = extractSymbols(absPath);
-            files[relPath] = symbolExtractorToFileSymbols(extracted, relPath);
-        }
-    } catch {
-        // VS Code not available (running in test), use symbolExtractor for all
-        for (const relPath of sourceFiles) {
-            const absPath = path.join(workspaceRoot, relPath);
-            const extracted = extractSymbols(absPath);
-            files[relPath] = symbolExtractorToFileSymbols(extracted, relPath);
+                    })),
+                    references: result.references.map(r => ({
+                        ...r,
+                        file_path: relPath,
+                    })),
+                    language: result.language,
+                };
+            } else {
+                // Fallback: regex-based import/reference extraction only
+                // (treeSitterService.extractDefinitions also falls back to regex
+                //  internally, but we handle the case where init hasn't been called)
+                const source = fs.readFileSync(absPath);
+                const result = await tsExtractDefinitions(relPath, source);
+                files[relPath] = {
+                    file_path: relPath,
+                    definitions: result.definitions.map(d => ({ ...d, file_path: relPath })),
+                    references: result.references.map(r => ({ ...r, file_path: relPath })),
+                    language: result.language,
+                };
+            }
+        } catch {
+            // Skip files that can't be parsed
         }
     }
 
@@ -192,10 +207,11 @@ async function buildRepoGraph(workspaceRoot: string): Promise<RepoGraphData | nu
 
     console.log(
         `[RepoGraph] Built index: ${sourceFiles.length} files, ` +
-        `${totalDefs} definitions, ${totalRefs} references (LSP=${usedLsp})`,
+        `${totalDefs} definitions, ${totalRefs} references (tree-sitter=${useTreeSitter})`,
     );
 
     return {
+        git_head: getGitHead(workspaceRoot),
         built_at: Date.now(),
         workspace: workspaceRoot,
         files,
@@ -204,149 +220,6 @@ async function buildRepoGraph(workspaceRoot: string): Promise<RepoGraphData | nu
             total_definitions: totalDefs,
             total_references: totalRefs,
         },
-    };
-}
-
-// ---------------------------------------------------------------------------
-// LSP helpers
-// ---------------------------------------------------------------------------
-
-const LSP_STRUCTURAL_KINDS: Set<number> | null = (() => {
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const vscode = require('vscode') as typeof vscodeT;
-        return new Set([
-            vscode.SymbolKind.Class, vscode.SymbolKind.Function,
-            vscode.SymbolKind.Method, vscode.SymbolKind.Constructor,
-            vscode.SymbolKind.Interface, vscode.SymbolKind.Enum,
-            vscode.SymbolKind.Struct, vscode.SymbolKind.Module,
-            vscode.SymbolKind.Namespace,
-        ]);
-    } catch { return null; }
-})();
-
-function flattenToDefinitions(
-    symbols: vscodeT.DocumentSymbol[],
-    relPath: string,
-    parent?: string,
-    depth: number = 0,
-): SymbolDef[] {
-    const result: SymbolDef[] = [];
-    for (const s of symbols) {
-        if (LSP_STRUCTURAL_KINDS && LSP_STRUCTURAL_KINDS.has(s.kind) && depth <= 1) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const vscode = require('vscode') as typeof vscodeT;
-            const kindName = vscode.SymbolKind[s.kind]?.toLowerCase() || 'unknown';
-            result.push({
-                name: s.name,
-                kind: kindName,
-                file_path: relPath,
-                start_line: s.range.start.line + 1,
-                end_line: s.range.end.line + 1,
-                signature: s.detail || s.name,
-            });
-        }
-        // Recurse into class/module children only
-        if (s.children && s.children.length > 0 && LSP_STRUCTURAL_KINDS) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const vscode = require('vscode') as typeof vscodeT;
-            if (s.kind === vscode.SymbolKind.Class ||
-                s.kind === vscode.SymbolKind.Module ||
-                s.kind === vscode.SymbolKind.Namespace ||
-                s.kind === vscode.SymbolKind.Enum ||
-                s.kind === vscode.SymbolKind.Interface) {
-                result.push(...flattenToDefinitions(s.children, relPath, s.name, depth + 1));
-            }
-        }
-    }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// Reference extraction (import/require parsing)
-// ---------------------------------------------------------------------------
-
-function extractReferencesFromFile(absPath: string, relPath: string): SymbolRef[] {
-    const refs: SymbolRef[] = [];
-    try {
-        const content = fs.readFileSync(absPath, 'utf-8');
-        const lines = content.split('\n');
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            // Python: from X import Y  /  import X
-            let m = line.match(/^from\s+([\w.]+)\s+import\s+(.+)/);
-            if (m) {
-                for (const name of m[2].split(',')) {
-                    const n = name.trim().split(/\s+as\s+/)[0].trim();
-                    if (n && !n.startsWith('(')) {
-                        refs.push({ name: n, file_path: relPath, line: i + 1 });
-                    }
-                }
-                continue;
-            }
-            m = line.match(/^import\s+([\w.]+)/);
-            if (m) {
-                refs.push({ name: m[1], file_path: relPath, line: i + 1 });
-                continue;
-            }
-            // JS/TS: import { X, Y } from 'module'
-            m = line.match(/import\s+\{([^}]+)\}\s+from/);
-            if (m) {
-                for (const name of m[1].split(',')) {
-                    const n = name.trim().split(/\s+as\s+/)[0].trim();
-                    if (n) { refs.push({ name: n, file_path: relPath, line: i + 1 }); }
-                }
-                continue;
-            }
-            // import DefaultExport from 'module'
-            m = line.match(/import\s+(\w+)\s+from/);
-            if (m) {
-                refs.push({ name: m[1], file_path: relPath, line: i + 1 });
-                continue;
-            }
-            // require('module')
-            m = line.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/);
-            if (m) {
-                const mod = m[1].split('/').pop() || m[1];
-                refs.push({ name: mod, file_path: relPath, line: i + 1 });
-            }
-        }
-    } catch { /* ignore read errors */ }
-    return refs;
-}
-
-// ---------------------------------------------------------------------------
-// symbolExtractor fallback
-// ---------------------------------------------------------------------------
-
-function symbolExtractorToFileSymbols(
-    extracted: { imports: string[]; symbols: Array<{ name: string; kind: string; signature: string; range: { start: { line: number }; end: { line: number } } }> },
-    relPath: string,
-): FileSymbolsData {
-    const definitions: SymbolDef[] = extracted.symbols.map(s => ({
-        name: s.name,
-        kind: s.kind,
-        file_path: relPath,
-        start_line: s.range.start.line + 1,
-        end_line: s.range.end.line + 1,
-        signature: s.signature,
-    }));
-
-    // Parse import strings into references
-    const references: SymbolRef[] = [];
-    for (const imp of extracted.imports) {
-        const m = imp.match(/(?:from\s+[\w.]+\s+import\s+|import\s+\{?\s*)(\w+)/);
-        if (m) {
-            references.push({ name: m[1], file_path: relPath, line: 0 });
-        }
-    }
-
-    return {
-        file_path: relPath,
-        definitions,
-        references,
-        language: detectLanguage(relPath),
     };
 }
 
@@ -378,17 +251,6 @@ function collectSourceFiles(workspaceRoot: string): string[] {
     return result;
 }
 
-function detectLanguage(relPath: string): string | null {
-    const ext = path.extname(relPath).toLowerCase();
-    const map: Record<string, string> = {
-        '.py': 'python', '.js': 'javascript', '.jsx': 'javascript',
-        '.ts': 'typescript', '.tsx': 'typescript', '.mjs': 'javascript',
-        '.java': 'java', '.go': 'go', '.rs': 'rust', '.rb': 'ruby',
-        '.cs': 'csharp', '.cpp': 'cpp', '.cc': 'cpp', '.c': 'c',
-    };
-    return map[ext] || null;
-}
-
 function loadCachedGraph(indexPath: string): RepoGraphData | null {
     try {
         if (!fs.existsSync(indexPath)) { return null; }
@@ -398,10 +260,17 @@ function loadCachedGraph(indexPath: string): RepoGraphData | null {
 }
 
 function isExpired(graph: RepoGraphData, workspaceRoot: string): boolean {
+    // Primary: git HEAD changed → branch switch or new commit
+    const currentHead = getGitHead(workspaceRoot);
+    if (currentHead && graph.git_head && currentHead !== graph.git_head) {
+        return true;
+    }
+
+    // Secondary: time-based expiry
     const age = Date.now() - graph.built_at;
     if (age > MAX_AGE_MS) { return true; }
 
-    // Quick check: sample a few source files and compare mtime
+    // Tertiary: sample file mtime check (catches uncommitted changes)
     const sampleFiles = Object.keys(graph.files).slice(0, 20);
     for (const rel of sampleFiles) {
         try {
