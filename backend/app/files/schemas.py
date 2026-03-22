@@ -1,13 +1,13 @@
 """Pydantic schemas for file upload functionality.
 
 This module defines the data models for file sharing in Conductor:
-- FileMetadata: Complete file information stored in DuckDB
+- FileMetadata: Complete file information stored in PostgreSQL
 - FileUploadResponse: API response after successful upload
 - FileMessage: Chat message with file attachment
 - FileType: Enum for categorizing files (image, pdf, audio, other)
 
 Files are stored in room-scoped directories (uploads/{room_id}/) with UUID-based
-filenames to prevent collisions. Metadata is tracked in DuckDB for querying.
+filenames to prevent collisions. Metadata is tracked in PostgreSQL for querying.
 """
 import uuid
 import time
@@ -34,7 +34,7 @@ class FileType(str, Enum):
 class FileMetadata(BaseModel):
     """Metadata for an uploaded file.
 
-    This model represents the complete file information stored in DuckDB.
+    This model represents the complete file information stored in PostgreSQL.
     It includes both the original filename (for display) and the stored filename
     (UUID-based, for disk storage).
 

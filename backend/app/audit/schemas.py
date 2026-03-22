@@ -7,7 +7,7 @@ audit log entry is created for accountability and debugging.
 These schemas are used by:
     - POST /audit/log-apply: Create new audit entries
     - GET /audit/logs: Retrieve audit history
-    - AuditLogService: DuckDB storage layer
+    - AuditLogService: PostgreSQL storage layer
 """
 from datetime import datetime
 from enum import Enum

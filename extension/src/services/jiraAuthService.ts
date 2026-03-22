@@ -103,7 +103,7 @@ export class JiraUriHandler implements vscodeT.UriHandler {
             // Backend already exchanged the code; just refresh status
             try {
                 const resp = await fetch(`${this._backendUrl}/api/integrations/jira/status`);
-                const status = await resp.json();
+                const status = await resp.json() as { connected: boolean; cloud_id: string; site_url: string };
                 if (status.connected) {
                     this._onConnected({ cloudId: status.cloud_id, siteUrl: status.site_url });
                 }
@@ -121,7 +121,7 @@ export class JiraUriHandler implements vscodeT.UriHandler {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code, state: params.get('state') || '' }),
                 });
-                const result = await resp.json();
+                const result = await resp.json() as { status: string; cloud_id: string; site_url: string };
                 if (result.status === 'connected') {
                     this._onConnected({ cloudId: result.cloud_id, siteUrl: result.site_url });
                 }

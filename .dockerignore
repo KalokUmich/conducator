@@ -4,8 +4,6 @@ eval/
 *.pyc
 __pycache__/
 .pytest_cache/
-*.duckdb
-*.duckdb.wal
 node_modules/
 extension/out/
 *.vsix

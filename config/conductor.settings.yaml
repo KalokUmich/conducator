@@ -322,7 +322,7 @@ change_limits:
 # =============================================================================
 logging:
   audit_enabled: true
-  audit_path: "backend/audit_logs.duckdb"
+  audit_path: "backend/audit_logs.db"
 
 # =============================================================================
 # Git Workspace Settings

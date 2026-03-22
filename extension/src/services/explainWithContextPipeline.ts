@@ -39,8 +39,6 @@ import { rank, RankInput, RankOptions }                       from './relevanceR
 import { buildContextPlan, ReadFileOp }                       from './contextPlanGenerator';
 import { assembleXmlPrompt, FileSnippet, ProjectMetadataInput } from './xmlPromptAssembler';
 import { collectProjectMetadata, ProjectMetadata }             from './projectMetadataCollector';
-import { extractSymbols }                                     from './symbolExtractor';
-import { ConductorDb }                                        from './conductorDb';
 import {
     WorkspaceConfig, DEFAULT_WORKSPACE_CONFIG,
 } from './workspaceStorage';
@@ -83,7 +81,6 @@ export interface PipelineInput {
     backendUrl:        string;
     /** Workspace / room ID passed to the backend for RAG search augmentation. */
     workspaceId?:      string;
-    conductorDb:       ConductorDb | null;
     workspaceFolders:  vscodeT.WorkspaceFolder[];
 
     // ---- Tuning (sourced from config at runtime) ----------------------------
@@ -136,7 +133,6 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
 
     console.log(`${LOG} === Pipeline start ===`);
     console.log(`${LOG} file=${input.relativePath} lines=${input.startLine}-${input.endLine} lang=${input.language}`);
-    console.log(`${LOG} conductorDb=${input.conductorDb ? 'SET' : 'NULL'}`);
     console.log(`${LOG} workspaceConfig=${input.workspaceConfig ? JSON.stringify(input.workspaceConfig) : 'NONE (using defaults)'}`);
     console.log(`${LOG} workspaceFolders=${input.workspaceFolders.length} backendUrl=${input.backendUrl}`);
 
@@ -204,13 +200,12 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
     {
         const t0 = performance.now();
         try {
-            const extracted = extractSymbols(
-                input.workspaceFolders.length > 0
-                    ? path.join(input.workspaceFolders[0].uri.fsPath, input.relativePath)
-                    : input.relativePath,
-            );
+            const absFilePath = input.workspaceFolders.length > 0
+                ? path.join(input.workspaceFolders[0].uri.fsPath, input.relativePath)
+                : input.relativePath;
+            const imports = _extractImportLines(absFilePath);
             importNeighbors = _resolveImportPaths(
-                extracted.imports,
+                imports,
                 input.relativePath,
                 input.language,   // enables Python absolute import resolution
             );
@@ -242,7 +237,7 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
             // Step 1: Build dependency plan from the selected code.
             const depNodes = _buildDependencyPlan(
                 input.code, input.language, fullFileContent,
-                importNeighbors, input.conductorDb,
+                importNeighbors,
             );
             console.log(
                 `${LOG} [2.7] Dependencies identified: ${depNodes.map(d => d.name).join(', ')}`,
@@ -250,7 +245,7 @@ export async function runExplainPipeline(input: PipelineInput): Promise<Pipeline
 
             // Step 2: Resolve all dependencies in parallel (3 rounds).
             const resolved = await _resolveAllDependencies(
-                depNodes, input.conductorDb, input.workspaceFolders, vscode,
+                depNodes, input.workspaceFolders, vscode,
             );
 
             // Step 3: Collect results into the format downstream stages expect.
@@ -474,7 +469,6 @@ function _buildDependencyPlan(
     language:        string | undefined,
     fullFileContent: string | undefined,
     importPaths:     string[],
-    db:              ConductorDb | null,
 ): DependencyNode[] {
     const nodes: DependencyNode[] = [];
     const seen = new Set<string>();
@@ -493,20 +487,11 @@ function _buildDependencyPlan(
 
         const query = opts?.query ?? _defaultQuery(name, kind, language);
 
-        // Strategy assignment: known path → read_file, DB hit → symbol_lookup, else skip.
+        // Strategy assignment: known path → read_file, else symbol_lookup.
         let strategy: DependencyNode['strategy'] = 'symbol_lookup';
-        let knownPath = opts?.knownPath;
+        const knownPath = opts?.knownPath;
 
-        // Check DB for a direct symbol match.
-        if (!knownPath && db) {
-            const dbSyms = db.getSymbolsByName(name);
-            if (dbSyms.length > 0) {
-                strategy = 'symbol_lookup';
-                knownPath = dbSyms[0].path;
-            }
-        }
-
-        // If we have a known path (from imports or DB), prefer file read.
+        // If we have a known path (from imports), prefer file read.
         if (knownPath) {
             strategy = importPathSet.has(knownPath) ? 'read_file' : 'symbol_lookup';
         }
@@ -613,7 +598,6 @@ function _defaultQuery(name: string, kind: string, language?: string): string {
  */
 async function _resolveAllDependencies(
     nodes:            DependencyNode[],
-    db:               ConductorDb | null,
     workspaceFolders: vscodeT.WorkspaceFolder[],
     vscode:           typeof vscodeT,
 ): Promise<Map<string, ResolvedDependency>> {
@@ -623,7 +607,7 @@ async function _resolveAllDependencies(
     // --- Round 1: strategy-based parallel resolution --------------------------
     const round1Tasks = nodes.map(async (node): Promise<void> => {
         try {
-            if (node.strategy === 'read_file' && node.knownPath) {
+            if (node.knownPath) {
                 // Read the known file via VS Code API.
                 const content = await _readWorkspaceFile(node.knownPath, workspaceFolders, vscode);
                 if (!content) return;
@@ -642,41 +626,11 @@ async function _resolveAllDependencies(
                 // For other deps (or if method extraction failed), include the full file.
                 // Cap at 8 KB to avoid blowing up the context.
                 const capped = content.length > 8_000
-                    ? content.slice(0, content.lastIndexOf('\n', 8_000)) + '\n… [truncated]'
+                    ? content.slice(0, content.lastIndexOf('\n', 8_000)) + '\n... [truncated]'
                     : content;
                 resolved.set(node.name, {
                     dep: node, path: node.knownPath, content: capped, resolvedVia: 'file_read',
                 });
-
-            } else if (node.strategy === 'symbol_lookup' && db) {
-                // DB symbol lookup — read the file range from the symbol table.
-                const sym = node.knownPath
-                    ? db.getSymbolByPathAndName(node.knownPath, node.name)
-                    : (db.getSymbolsByName(node.name)[0] ?? null);
-                if (!sym) return;
-
-                const content = await _readWorkspaceFile(sym.path, workspaceFolders, vscode);
-                if (!content) return;
-
-                const lines = content.split('\n');
-                const startLine = Math.max(0, sym.start_line);
-                const endLine   = Math.min(lines.length, sym.end_line + 1);
-                let slice = lines.slice(startLine, endLine).join('\n');
-
-                // For method_call deps on a class, extract the specific method.
-                if (node.kind === 'method_call' && node.receiver) {
-                    const methodBody = _extractMethodBody(content, node.name, sym.path);
-                    if (methodBody) {
-                        slice = methodBody.content;
-                    }
-                }
-
-                if (slice.trim()) {
-                    resolved.set(node.name, {
-                        dep: node, path: sym.path, content: slice, resolvedVia: 'symbol_db',
-                    });
-                }
-
             }
         } catch { /* non-fatal — individual dep failure */ }
     });
@@ -832,6 +786,44 @@ async function _readWorkspaceFile(
         } catch { /* try next folder */ }
     }
     return null;
+}
+
+/**
+ * Extract raw import/require lines from a source file.
+ * Lightweight replacement for the deleted symbolExtractor — only extracts
+ * import statements (not symbols), which is all this pipeline needs.
+ */
+function _extractImportLines(filePath: string): string[] {
+    let content: string;
+    try {
+        const fs = require('fs') as typeof import('fs');
+        const stats = fs.statSync(filePath);
+        if (stats.size > 512 * 1024) return [];  // skip oversized files
+        content = fs.readFileSync(filePath, 'utf-8');
+    } catch {
+        return [];
+    }
+
+    const imports: string[] = [];
+    const lines = content.split('\n');
+    for (const line of lines) {
+        const trimmed = line.trim();
+        // TypeScript / JavaScript
+        if (/^import\s/.test(trimmed) || /^export\s.*\bfrom\s/.test(trimmed)) {
+            imports.push(trimmed);
+        } else if (/\brequire\s*\(/.test(trimmed)) {
+            imports.push(trimmed);
+        }
+        // Python
+        else if (/^from\s+\S+\s+import\b/.test(trimmed) || /^import\s+\S/.test(trimmed)) {
+            imports.push(trimmed);
+        }
+        // Java
+        else if (/^import\s+(?:static\s+)?\S+;/.test(trimmed)) {
+            imports.push(trimmed);
+        }
+    }
+    return imports;
 }
 
 function _resolveImportPaths(

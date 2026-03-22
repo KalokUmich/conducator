@@ -36,6 +36,7 @@ const SUBPROCESS_TOOLS = new Set([
     'find_tests',
     'run_test',
     'ast_search',
+    'get_repo_graph',
 ]);
 
 /** Tier 2: Symbol-aware tools that benefit from VS Code LSP / AST analysis. */
@@ -57,6 +58,20 @@ const COMPLEX_TOOLS = new Set([
     'get_dependents',
     'test_outline',
     'module_summary',
+]);
+
+/**
+ * Backend-only tools — require server-side resources (e.g. Playwright browser).
+ * These are never executed in the extension; the backend's RemoteToolExecutor
+ * intercepts them before proxying.
+ */
+const BACKEND_ONLY_TOOLS = new Set([
+    'web_search',
+    'web_navigate',
+    'web_click',
+    'web_fill',
+    'web_screenshot',
+    'web_extract',
 ]);
 
 /**
@@ -235,6 +250,16 @@ export async function executeLocalTool(
         return subprocessFn(tool, params, workspace);
     }
 
+    // ---- Backend-only tools (e.g. Playwright browser tools) ----
+    if (BACKEND_ONLY_TOOLS.has(tool)) {
+        log(`${tool} → backend-only tool, skipping local dispatch`);
+        return {
+            success: false,
+            data: null,
+            error: `Tool '${tool}' is a backend-only tool and cannot run in the extension`,
+        };
+    }
+
     // ---- Unknown tool ----
     log(`${tool} → unknown tool, returning error`);
     return {
@@ -251,10 +276,11 @@ export async function executeLocalTool(
 /** Returns which tier a tool belongs to, or 'unknown'. */
 export function classifyTool(
     tool: string,
-): 'subprocess' | 'ast' | 'complex' | 'unknown' {
+): 'subprocess' | 'ast' | 'complex' | 'backend_only' | 'unknown' {
     if (SUBPROCESS_TOOLS.has(tool)) { return 'subprocess'; }
     if (AST_TOOLS.has(tool)) { return 'ast'; }
     if (COMPLEX_TOOLS.has(tool)) { return 'complex'; }
+    if (BACKEND_ONLY_TOOLS.has(tool)) { return 'backend_only'; }
     return 'unknown';
 }
 

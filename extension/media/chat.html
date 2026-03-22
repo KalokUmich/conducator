@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Chat</title>
     <link rel="stylesheet" href="tailwind.css">
+    <link rel="stylesheet" href="github-dark.min.css">
+    <script src="highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
@@ -73,10 +75,55 @@
         .unread-badge { animation: pulse 2s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 
-        /* === Code snippets — no syntax colors === */
-        .code-snippet-plain, .code-snippet-plain code, .code-snippet-plain * {
-            color: #d1d5db !important; background: transparent !important;
+        /* === Code snippets — hljs overrides for dark bg === */
+        pre code.hljs { background: transparent !important; padding: 0 !important; }
+
+        /* === Unified error banner === */
+        .error-banner {
+            background: rgba(127,29,29,0.3);
+            border: 1px solid rgba(185,28,28,0.5);
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            color: #fca5a5;
         }
+        .error-banner .error-dismiss {
+            color: rgba(252,165,165,0.5);
+            cursor: pointer;
+            flex-shrink: 0;
+            font-size: 1rem;
+            line-height: 1;
+            background: none;
+            border: none;
+            padding: 0;
+        }
+        .error-banner .error-dismiss:hover { color: #fca5a5; }
+
+        /* === CSS tooltips for icon-only buttons === */
+        .tooltip-btn { position: relative; }
+        .tooltip-btn::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 0.2rem 0.45rem;
+            background: #1f2937;
+            color: #e5e7eb;
+            font-size: 0.65rem;
+            border-radius: 0.375rem;
+            white-space: nowrap;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.15s;
+            border: 1px solid rgba(75,85,99,0.5);
+            margin-bottom: 4px;
+            z-index: 10;
+        }
+        .tooltip-btn:hover::after { opacity: 1; }
 
         /* === Conductor header action buttons === */
         .conductor-action-btn {
@@ -628,7 +675,7 @@
             overflow: hidden;
         }
         .slash-ghost.hidden { display: none; }
-        .slash-ghost-hint-part { color: rgba(156,163,175,0.45); font-style: italic; }
+        .slash-ghost-hint-part { color: rgba(156,163,175,0.65); font-style: italic; }
         /* When ghost is active, hide textarea text but keep cursor visible */
         .input-premium.hint-active {
             color: transparent !important;
@@ -758,7 +805,7 @@
                     <input
                         id="invite-url-input"
                         type="text"
-                        placeholder="Paste invite link…"
+                        placeholder="Room ID or invite link…"
                         class="input-premium flex-1 text-xs px-3 py-2"
                     />
                     <button
@@ -844,7 +891,7 @@
                     <input
                         id="disconnected-invite-url-input"
                         type="text"
-                        placeholder="Paste invite link…"
+                        placeholder="Room ID or invite link…"
                         class="input-premium flex-1 text-xs px-3 py-2"
                     />
                     <button
@@ -910,58 +957,158 @@
 
                 <div class="relative z-10 flex flex-col items-center gap-1">
                     <h2 class="brand-wordmark" style="font-size:1.5rem;">Conductor</h2>
-                    <p class="landing-subtitle">Ready to start. Create a session or join an existing one.</p>
+                    <p id="ready-subtitle" class="landing-subtitle">Sign in to start, or join a room directly.</p>
                 </div>
 
                 <hr class="divider-gradient relative z-10" />
 
-                <button
-                    id="btn-start-session"
-                    class="btn-primary text-sm px-8 py-2.5 flex items-center gap-2.5 relative z-10"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
-                    </svg>
-                    Start Session
-                </button>
-                <div class="flex items-center gap-2 w-full max-w-xs relative z-10">
-                    <input
-                        id="ready-invite-url-input"
-                        type="text"
-                        placeholder="Paste invite link…"
-                        class="input-premium flex-1 text-xs px-3 py-2"
-                    />
-                    <button
-                        id="btn-ready-join"
-                        class="btn-success text-xs px-4 py-2 flex items-center gap-1"
-                    >
-                        Join
-                    </button>
-                </div>
-                <!-- SSO Identity Section -->
-                <div id="sso-ready" class="w-full max-w-xs mt-1 relative z-10">
-                    <div id="sso-ready-signin" class="sso-signin flex gap-2">
-                        <button class="sso-login-btn sso-login-aws btn-secondary flex-1 text-xs py-2 px-3 flex items-center justify-center gap-1" data-provider="aws">
-                            &#9729; AWS SSO
-                        </button>
-                        <button class="sso-login-btn sso-login-google btn-secondary flex-1 text-xs py-2 px-3 flex items-center justify-center gap-1" data-provider="google">
-                            G Google
-                        </button>
-                    </div>
-                    <div id="sso-ready-pending" class="sso-pending hidden">
-                        <div class="flex items-center justify-center gap-2 py-2 px-3 border border-gray-700/50 rounded-xl bg-gray-800/30">
-                            <div class="h-3 w-3 border-2 border-violet-400 border-t-transparent rounded-full animate-spin"></div>
-                            <span class="text-xs text-gray-400">Waiting for SSO...</span>
-                            <code class="sso-user-code text-xs text-violet-400 font-mono"></code>
-                            <button class="sso-cancel-btn text-gray-500 hover:text-gray-300 text-xs ml-1">Cancel</button>
+                <!-- ============================================ -->
+                <!-- PRE-SSO: Login + direct room join             -->
+                <!-- ============================================ -->
+                <div id="ready-pre-sso" class="flex flex-col items-center gap-4 w-full max-w-xs relative z-10">
+                    <!-- SSO Login buttons -->
+                    <div id="sso-ready" class="w-full">
+                        <div id="sso-ready-signin" class="sso-signin flex gap-2">
+                            <button class="sso-login-btn sso-login-aws btn-secondary flex-1 text-xs py-2 px-3 flex items-center justify-center gap-1" data-provider="aws">
+                                &#9729; AWS SSO
+                            </button>
+                            <button class="sso-login-btn sso-login-google btn-secondary flex-1 text-xs py-2 px-3 flex items-center justify-center gap-1" data-provider="google">
+                                G Google
+                            </button>
+                        </div>
+                        <div id="sso-ready-pending" class="sso-pending hidden">
+                            <div class="flex items-center justify-center gap-2 py-2 px-3 border border-gray-700/50 rounded-xl bg-gray-800/30">
+                                <div class="h-3 w-3 border-2 border-violet-400 border-t-transparent rounded-full animate-spin"></div>
+                                <span class="text-xs text-gray-400">Waiting for SSO...</span>
+                                <code class="sso-user-code text-xs text-violet-400 font-mono"></code>
+                                <button class="sso-cancel-btn text-gray-500 hover:text-gray-300 text-xs ml-1">Cancel</button>
+                            </div>
+                        </div>
+                        <div id="sso-ready-done" class="sso-done hidden">
+                            <div class="flex items-center gap-2 py-2 px-3 bg-gray-800/40 border border-gray-700/50 rounded-xl">
+                                <span class="sso-provider-badge text-xs"></span>
+                                <span class="sso-email text-xs text-gray-300 truncate"></span>
+                                <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear identity">&#10005;</button>
+                            </div>
                         </div>
                     </div>
-                    <div id="sso-ready-done" class="sso-done hidden">
+
+                    <!-- Login placeholder (future) -->
+                    <button disabled class="w-full text-xs py-2 px-3 rounded-xl opacity-40 cursor-not-allowed bg-gray-700 text-gray-400 border border-gray-600/30">
+                        Login (coming soon)
+                    </button>
+
+                    <!-- Divider -->
+                    <div class="flex items-center gap-2 w-full">
+                        <div class="flex-1 h-px bg-gray-700/50"></div>
+                        <span class="text-[0.6rem] text-gray-500 uppercase tracking-wider">or join directly</span>
+                        <div class="flex-1 h-px bg-gray-700/50"></div>
+                    </div>
+
+                    <!-- Direct Room ID join -->
+                    <div class="flex items-center gap-2 w-full">
+                        <input
+                            id="ready-room-id-input"
+                            type="text"
+                            placeholder="Room ID or invite link…"
+                            class="input-premium flex-1 text-xs px-3 py-2"
+                        />
+                        <button id="btn-ready-join" class="btn-success text-xs px-4 py-2">Join</button>
+                    </div>
+                </div>
+
+                <!-- ============================================ -->
+                <!-- POST-SSO: Mode selector + room list           -->
+                <!-- ============================================ -->
+                <div id="ready-post-sso" class="hidden flex flex-col items-center gap-4 w-full max-w-xs relative z-10">
+                    <!-- Logged-in identity badge -->
+                    <div id="sso-ready-identity" class="w-full">
                         <div class="flex items-center gap-2 py-2 px-3 bg-gray-800/40 border border-gray-700/50 rounded-xl">
                             <span class="sso-provider-badge text-xs"></span>
-                            <span class="sso-email text-xs text-gray-300 truncate"></span>
-                            <button class="sso-clear-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Clear identity">&#10005;</button>
+                            <span class="sso-email-display text-xs text-gray-300 truncate"></span>
+                            <button class="sso-logout-btn ml-auto text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Sign out">&#10005;</button>
                         </div>
+                    </div>
+
+                    <!-- Mode selector tabs -->
+                    <div class="flex w-full rounded-xl overflow-hidden border border-gray-700/50">
+                        <button id="btn-mode-local" class="flex-1 text-xs py-2 px-3 font-medium transition-colors bg-violet-500/15 text-violet-300 border-r border-gray-700/50">
+                            Local Mode
+                        </button>
+                        <button id="btn-mode-online" class="flex-1 text-xs py-2 px-3 font-medium transition-colors text-gray-400 hover:text-gray-300">
+                            Online Mode
+                        </button>
+                    </div>
+
+                    <!-- LOCAL MODE panel -->
+                    <div id="local-mode-panel" class="flex flex-col gap-3 w-full">
+                        <!-- Room list header with refresh -->
+                        <div class="flex items-center justify-between">
+                            <span class="text-[0.6rem] text-gray-500 uppercase tracking-wider">Recent Sessions</span>
+                            <button id="btn-refresh-local-rooms" class="text-gray-500 hover:text-gray-300 transition-colors p-0.5" title="Refresh">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                        </div>
+                        <!-- Room list (populated by JS) -->
+                        <div id="room-list-container" class="flex flex-col gap-1.5 max-h-32 overflow-y-auto">
+                            <p class="text-[0.65rem] text-gray-500 text-center py-2">No previous sessions</p>
+                        </div>
+
+                        <!-- New session button -->
+                        <button id="btn-start-session" class="btn-primary text-sm w-full py-2.5 flex items-center justify-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
+                            </svg>
+                            New Session
+                        </button>
+
+                        <!-- Workspace reminder -->
+                        <div id="workspace-reminder" class="hidden text-[0.65rem] text-amber-400/80 text-center px-2">
+                            Open a workspace folder to use local mode
+                        </div>
+                    </div>
+
+                    <!-- ONLINE MODE panel -->
+                    <div id="online-mode-panel" class="hidden flex flex-col gap-3 w-full">
+                        <!-- Online room list header with refresh -->
+                        <div class="flex items-center justify-between">
+                            <span class="text-[0.6rem] text-gray-500 uppercase tracking-wider">Your Sessions</span>
+                            <button id="btn-refresh-online-rooms" class="text-gray-500 hover:text-gray-300 transition-colors p-0.5" title="Refresh">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                        </div>
+                        <!-- Online room list (populated by JS from backend) -->
+                        <div id="online-room-list-container" class="flex flex-col gap-1.5 max-h-32 overflow-y-auto">
+                            <p class="text-[0.65rem] text-gray-500 text-center py-2">Loading sessions…</p>
+                        </div>
+
+                        <!-- New online session button -->
+                        <button id="btn-start-online" class="btn-primary text-sm w-full py-2.5 flex items-center justify-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
+                            </svg>
+                            New Session
+                        </button>
+                    </div>
+
+                    <!-- Direct Room ID join (also available post-SSO) -->
+                    <div class="flex items-center gap-2 w-full">
+                        <div class="flex-1 h-px bg-gray-700/50"></div>
+                        <span class="text-[0.6rem] text-gray-500 uppercase tracking-wider">or join room</span>
+                        <div class="flex-1 h-px bg-gray-700/50"></div>
+                    </div>
+                    <div class="flex items-center gap-2 w-full">
+                        <input
+                            id="ready-invite-url-input"
+                            type="text"
+                            placeholder="Room ID or invite link…"
+                            class="input-premium flex-1 text-xs px-3 py-2"
+                        />
+                        <button id="btn-ready-join-post" class="btn-success text-xs px-4 py-2">Join</button>
                     </div>
                 </div>
             </div>
@@ -1064,7 +1211,7 @@
                             </svg>
                             Invite
                         </button>
-                        <button id="btn-stop-session" class="conductor-quit-btn" title="Leave session — chat data is preserved">Leave</button>
+                        <button id="btn-quit-hosting" class="conductor-quit-btn" title="Leave session — rejoin later">Leave</button>
                     </div>
 
                     <!-- Joined controls -->
@@ -1073,7 +1220,7 @@
                             <span class="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" style="box-shadow:0 0 5px rgba(96,165,250,0.6)"></span>
                             Joined
                         </span>
-                        <button id="btn-leave-session" class="conductor-quit-btn" title="Leave session — chat data is preserved">Leave</button>
+                        <button id="btn-quit-joined" class="conductor-quit-btn" title="Leave session — rejoin later">Leave</button>
                     </div>
 
                     <!-- Lead-only actions -->
@@ -1164,17 +1311,10 @@
                 </div>
             </div>
 
-            <!-- Setup workspace + index button (shown when session is active, before workspace exists) -->
+            <!-- Setup workspace button (online mode only — clone repo + create branch) -->
             <div id="setup-index-row" class="hidden px-3 pt-1 flex items-center justify-between">
                 <span class="text-[0.6rem] text-gray-500">Workspace</span>
                 <div class="flex items-center gap-2">
-                    <button id="btn-setup-local" class="flex items-center gap-1 text-[0.6rem] text-emerald-400/80 hover:text-emerald-300 transition-colors" title="Use current VS Code workspace (local mode, read-only for guests)">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
-                            <path fill-rule="evenodd" d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clip-rule="evenodd"/>
-                        </svg>
-                        Use Local
-                    </button>
-                    <span class="text-gray-700">|</span>
                     <button id="btn-setup-index" class="flex items-center gap-1 text-[0.6rem] text-violet-400/80 hover:text-violet-300 transition-colors" title="Clone repo, create branch, and index code">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
                             <path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/>
@@ -1544,8 +1684,8 @@
                 <!-- Attachment Button -->
                 <button
                     id="btn-attach"
-                    class="text-gray-500 hover:text-violet-400 p-2.5 rounded-lg hover:bg-violet-500/10 transition-all duration-200 focus:outline-none"
-                    title="Attach file (images, PDF, audio, max 20MB)"
+                    class="tooltip-btn text-gray-500 hover:text-violet-400 p-2.5 rounded-lg hover:bg-violet-500/10 transition-all duration-200 focus:outline-none"
+                    title="Attach file" data-tooltip="Attach file"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd" />
@@ -1555,8 +1695,8 @@
                 <!-- Code Snippet Button -->
                 <button
                     id="btn-code-snippet"
-                    class="text-gray-500 hover:text-violet-400 p-2.5 rounded-lg hover:bg-violet-500/10 transition-all duration-200 focus:outline-none"
-                    title="Share code from editor (select code first)"
+                    class="tooltip-btn text-gray-500 hover:text-violet-400 p-2.5 rounded-lg hover:bg-violet-500/10 transition-all duration-200 focus:outline-none"
+                    title="Share code" data-tooltip="Share code"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -1566,8 +1706,8 @@
                 <!-- Stack Trace Button -->
                 <button
                     id="btn-stack-trace"
-                    class="text-gray-500 hover:text-red-400 p-2.5 rounded-lg hover:bg-red-500/10 transition-all duration-200 focus:outline-none"
-                    title="Share a stack trace"
+                    class="tooltip-btn text-gray-500 hover:text-red-400 p-2.5 rounded-lg hover:bg-red-500/10 transition-all duration-200 focus:outline-none"
+                    title="Stack trace" data-tooltip="Stack trace"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
@@ -1610,8 +1750,8 @@
             </div>
 
             <!-- Helper Text -->
-            <div class="mt-1.5 text-[0.65rem] text-gray-600">
-                Enter to send &middot; Shift+Enter for new line &middot; <span class="text-violet-400/60">@AI /</span> for commands &middot; <span class="text-violet-400/60">&lt;/&gt;</span> share code
+            <div class="mt-1.5 text-xs text-gray-500">
+                Enter to send &middot; Shift+Enter for new line &middot; <span class="text-violet-400/80">@AI /</span> for commands &middot; <span class="text-violet-400/80">&lt;/&gt;</span> share code
             </div>
         </div>
         </div> <!-- close chat content column -->
@@ -1663,8 +1803,9 @@
                     <span class="ml-3 text-gray-400 text-sm">Loading AI status...</span>
                 </div>
                 <!-- Error State -->
-                <div id="ai-config-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-3">
-                    <p class="text-red-400 text-sm" id="ai-config-error-text">Failed to fetch AI status</p>
+                <div id="ai-config-error" class="hidden error-banner">
+                    <p class="flex-1" id="ai-config-error-text">Failed to fetch AI status</p>
+                    <button class="error-dismiss" onclick="this.parentElement.classList.add('hidden')">&times;</button>
                 </div>
                 <!-- Content -->
                 <div id="ai-config-content" class="hidden">
@@ -1879,8 +2020,9 @@
                     <span class="ml-3 text-gray-400 text-sm">Loading settings...</span>
                 </div>
                 <!-- Error State -->
-                <div id="room-settings-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-3">
-                    <p class="text-red-400 text-sm" id="room-settings-error-text">Failed to fetch settings</p>
+                <div id="room-settings-error" class="hidden error-banner">
+                    <p class="flex-1" id="room-settings-error-text">Failed to fetch settings</p>
+                    <button class="error-dismiss" onclick="this.parentElement.classList.add('hidden')">&times;</button>
                 </div>
                 <!-- Content -->
                 <div id="room-settings-content" class="hidden space-y-4">
@@ -2068,14 +2210,9 @@
                     <span class="text-gray-400 text-sm">Distilling conversation...</span>
                 </div>
                 <!-- Error State -->
-                <div id="summary-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-4">
-                    <div class="flex items-center gap-2 mb-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
-                            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                        </svg>
-                        <span class="text-red-400 font-medium">Distillation Failed</span>
-                    </div>
-                    <p class="text-red-300 text-sm" id="summary-error-text">Unable to distill conversation.</p>
+                <div id="summary-error" class="hidden error-banner">
+                    <p class="flex-1" id="summary-error-text">Unable to distill conversation.</p>
+                    <button class="error-dismiss" onclick="this.parentElement.classList.add('hidden')">&times;</button>
                 </div>
                 <!-- Summary Content -->
                 <div id="summary-content" class="hidden space-y-4">
@@ -2136,8 +2273,9 @@
                         </div>
 
                         <!-- Error state -->
-                        <div id="code-prompt-error" class="hidden bg-red-900/30 border border-red-700 rounded-lg p-3 mt-2">
-                            <p class="text-red-300 text-xs" id="code-prompt-error-text">Failed to generate code prompt.</p>
+                        <div id="code-prompt-error" class="hidden error-banner mt-2">
+                            <p class="flex-1" id="code-prompt-error-text">Failed to generate code prompt.</p>
+                            <button class="error-dismiss" onclick="this.parentElement.classList.add('hidden')">&times;</button>
                         </div>
 
                         <!-- Result state: Code prompt display -->
@@ -2214,7 +2352,10 @@
                     <button id="btn-collect-vscode-tests" class="btn-secondary text-xs py-2">Collect Failing Tests from Test Explorer</button>
                     <div id="vscode-tests-preview" class="hidden text-xs text-gray-300 bg-gray-800 rounded-lg p-3 font-mono max-h-40 overflow-y-auto"></div>
                 </div>
-                <div id="stack-trace-error" class="hidden text-xs text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2"></div>
+                <div id="stack-trace-error" class="hidden error-banner">
+                    <p class="flex-1" id="stack-trace-error-text"></p>
+                    <button class="error-dismiss" onclick="this.parentElement.classList.add('hidden')">&times;</button>
+                </div>
             </div>
             <div class="px-5 py-4 border-t border-gray-700 flex gap-2 justify-end flex-shrink-0">
                 <button id="btn-cancel-stack-trace" class="btn-secondary text-sm px-4 py-2">Cancel</button>
@@ -2410,10 +2551,10 @@
         const readyInviteUrlInput = document.getElementById('ready-invite-url-input');
         const btnDisconnectedJoin = document.getElementById('btn-disconnected-join');
         const disconnectedInviteUrlInput = document.getElementById('disconnected-invite-url-input');
-        const btnStopSession = document.getElementById('btn-stop-session');
+        const btnQuitHosting = document.getElementById('btn-quit-hosting');
         const btnCopyInvite = document.getElementById('btn-copy-invite');
         const inviteUrlInput = document.getElementById('invite-url-input');
-        const btnLeaveSession = document.getElementById('btn-leave-session');
+        const btnQuitJoined = document.getElementById('btn-quit-joined');
 
         // File upload elements
         // Note: fileInput, filePreview, btnAttach are stable (never replaced).
@@ -2681,6 +2822,216 @@
         if (ssoIdentity) {
             showSSOSignedInState(ssoIdentity, ssoProvider);
         }
+
+        // ============================================================
+        // Panel-ready: pre-SSO / post-SSO toggle + mode selector
+        // ============================================================
+        const readyPreSSO = document.getElementById('ready-pre-sso');
+        const readyPostSSO = document.getElementById('ready-post-sso');
+        const readySubtitle = document.getElementById('ready-subtitle');
+        const btnModeLocal = document.getElementById('btn-mode-local');
+        const btnModeOnline = document.getElementById('btn-mode-online');
+        const localModePanel = document.getElementById('local-mode-panel');
+        const onlineModePanel = document.getElementById('online-mode-panel');
+        const roomListContainer = document.getElementById('room-list-container');
+        const onlineRoomListContainer = document.getElementById('online-room-list-container');
+        const workspaceReminder = document.getElementById('workspace-reminder');
+        const ssoReadyIdentity = document.getElementById('sso-ready-identity');
+        const btnStartOnline = document.getElementById('btn-start-online');
+        const btnReadyJoinPost = document.getElementById('btn-ready-join-post');
+        const readyRoomIdInput = document.getElementById('ready-room-id-input');
+
+        /** Switch panel-ready between pre-SSO and post-SSO views. */
+        function updateReadyPanelForSSO() {
+            if (ssoIdentity && readyPreSSO && readyPostSSO) {
+                readyPreSSO.classList.add('hidden');
+                readyPostSSO.classList.remove('hidden');
+                if (readySubtitle) readySubtitle.textContent = 'Choose a mode to get started.';
+                // Populate identity in the post-SSO badge
+                const email = ssoIdentity?.email || ssoIdentity?.arn || 'Signed in';
+                const badge = getProviderBadge(ssoProvider);
+                const badgeEl = ssoReadyIdentity?.querySelector('.sso-provider-badge');
+                const emailEl = ssoReadyIdentity?.querySelector('.sso-email-display');
+                if (badgeEl) badgeEl.textContent = badge;
+                if (emailEl) { emailEl.textContent = email; emailEl.title = email; }
+                // Load room list
+                loadRoomList();
+            } else if (readyPreSSO && readyPostSSO) {
+                readyPreSSO.classList.remove('hidden');
+                readyPostSSO.classList.add('hidden');
+                if (readySubtitle) readySubtitle.textContent = 'Sign in to start, or join a room directly.';
+            }
+        }
+
+        // Call on load
+        updateReadyPanelForSSO();
+
+        // Sign out from post-SSO view
+        const ssoLogoutBtn = ssoReadyIdentity?.querySelector('.sso-logout-btn');
+        if (ssoLogoutBtn) {
+            ssoLogoutBtn.addEventListener('click', () => {
+                ssoIdentity = null;
+                ssoProvider = null;
+                vscode.postMessage({ command: 'clearSSO' });
+                updateReadyPanelForSSO();
+                // Also reset SSO panels to signin state
+                ssoPanels.forEach(p => {
+                    if (!p) return;
+                    p.querySelector('.sso-signin')?.classList.remove('hidden');
+                    p.querySelector('.sso-done')?.classList.add('hidden');
+                });
+            });
+        }
+
+        /** Track which mode the user selected (used to control in-chat UI). */
+        let _selectedMode = 'local';
+
+        /** Mode selector toggle. */
+        function selectMode(mode) {
+            _selectedMode = mode;
+            if (mode === 'local') {
+                btnModeLocal?.classList.add('bg-violet-500/15', 'text-violet-300');
+                btnModeLocal?.classList.remove('text-gray-400');
+                btnModeOnline?.classList.remove('bg-violet-500/15', 'text-violet-300');
+                btnModeOnline?.classList.add('text-gray-400');
+                localModePanel?.classList.remove('hidden');
+                onlineModePanel?.classList.add('hidden');
+            } else {
+                btnModeOnline?.classList.add('bg-violet-500/15', 'text-violet-300');
+                btnModeOnline?.classList.remove('text-gray-400');
+                btnModeLocal?.classList.remove('bg-violet-500/15', 'text-violet-300');
+                btnModeLocal?.classList.add('text-gray-400');
+                onlineModePanel?.classList.remove('hidden');
+                localModePanel?.classList.add('hidden');
+                // Fetch online rooms from backend
+                loadOnlineRooms();
+            }
+        }
+
+        /** Fetch rooms from backend for the current SSO user. */
+        async function loadOnlineRooms() {
+            if (!onlineRoomListContainer) return;
+            const email = ssoIdentity?.email || ssoIdentity?.arn;
+            if (!email) {
+                onlineRoomListContainer.innerHTML = '<p class="text-[0.65rem] text-gray-500 text-center py-2">Sign in to view sessions</p>';
+                return;
+            }
+            onlineRoomListContainer.innerHTML = '<p class="text-[0.65rem] text-gray-500 text-center py-2">Loading sessions…</p>';
+            vscode.postMessage({ command: 'getOnlineRooms', email });
+        }
+
+        /** Render online room cards (called when extension responds). */
+        function renderOnlineRoomList(rooms) {
+            if (!onlineRoomListContainer) return;
+            if (!rooms || rooms.length === 0) {
+                onlineRoomListContainer.innerHTML = '<p class="text-[0.65rem] text-gray-500 text-center py-2">No active sessions</p>';
+                return;
+            }
+            onlineRoomListContainer.innerHTML = rooms.map(r => {
+                const roomId = r.id || r.roomId;
+                const label = r.name || (roomId ? roomId.substring(0, 8) + '…' : '?');
+                const status = r.status || 'active';
+                const statusColor = status === 'active' ? 'text-emerald-400' : 'text-gray-500';
+                const statusDot = status === 'active' ? 'bg-emerald-400' : 'bg-gray-500';
+                const ago = r.last_active_at ? timeAgo(new Date(r.last_active_at).getTime()) : '';
+                return `<div class="flex items-center gap-2 py-1.5 px-2 rounded-lg border border-gray-700/30 bg-gray-800/20 hover:bg-gray-800/40 transition-colors cursor-pointer" data-room-id="${roomId}">
+                    <span class="w-1.5 h-1.5 rounded-full ${statusDot} flex-shrink-0"></span>
+                    <span class="text-xs text-gray-300 truncate flex-1" title="${roomId}">${label}</span>
+                    <span class="text-[0.6rem] text-gray-500">${ago}</span>
+                    <button class="online-room-join-btn text-[0.6rem] text-violet-400 hover:text-violet-300 px-1.5 py-0.5 rounded border border-violet-500/20 hover:border-violet-500/40" data-room-id="${roomId}">Join</button>
+                </div>`;
+            }).join('');
+
+            // Attach join handlers
+            onlineRoomListContainer.querySelectorAll('.online-room-join-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const rid = e.target.dataset.roomId;
+                    vscode.postMessage({ command: 'rejoinRoom', roomId: rid });
+                });
+            });
+        }
+        btnModeLocal?.addEventListener('click', () => selectMode('local'));
+        btnModeOnline?.addEventListener('click', () => selectMode('online'));
+
+        // Refresh buttons
+        document.getElementById('btn-refresh-local-rooms')?.addEventListener('click', () => loadRoomList());
+        document.getElementById('btn-refresh-online-rooms')?.addEventListener('click', () => loadOnlineRooms());
+
+        /** Load and render room list (quit rooms from extension + backend). */
+        async function loadRoomList() {
+            if (!roomListContainer) return;
+            // Request quit rooms from extension host
+            vscode.postMessage({ command: 'getQuitRooms' });
+        }
+
+        /** Render room cards (called when extension responds with room data). */
+        function renderRoomList(rooms) {
+            if (!roomListContainer) return;
+            if (!rooms || rooms.length === 0) {
+                roomListContainer.innerHTML = '<p class="text-[0.65rem] text-gray-500 text-center py-2">No previous sessions</p>';
+                return;
+            }
+            roomListContainer.innerHTML = rooms.map(r => {
+                const ago = r.quitAt ? timeAgo(r.quitAt) : (r.last_active_at ? timeAgo(new Date(r.last_active_at).getTime()) : '');
+                const label = r.roomId ? r.roomId.substring(0, 8) : (r.id ? r.id.substring(0, 8) : '?');
+                const roomId = r.roomId || r.id;
+                return `<div class="flex items-center gap-2 py-1.5 px-2 rounded-lg border border-gray-700/30 bg-gray-800/20 hover:bg-gray-800/40 transition-colors cursor-pointer" data-room-id="${roomId}">
+                    <span class="text-xs text-gray-300 font-mono truncate flex-1">${label}…</span>
+                    <span class="text-[0.6rem] text-gray-500">${ago}</span>
+                    <button class="room-rejoin-btn text-[0.6rem] text-violet-400 hover:text-violet-300 px-1.5 py-0.5 rounded border border-violet-500/20 hover:border-violet-500/40" data-room-id="${roomId}">Rejoin</button>
+                    <button class="room-delete-btn text-[0.6rem] text-gray-500 hover:text-red-400 px-1" data-room-id="${roomId}" title="Remove">&times;</button>
+                </div>`;
+            }).join('');
+
+            // Attach handlers
+            roomListContainer.querySelectorAll('.room-rejoin-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const rid = e.target.dataset.roomId;
+                    vscode.postMessage({ command: 'rejoinRoom', roomId: rid });
+                });
+            });
+            roomListContainer.querySelectorAll('.room-delete-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const rid = e.target.dataset.roomId;
+                    vscode.postMessage({ command: 'removeQuitRoom', roomId: rid });
+                    e.target.closest('[data-room-id]')?.remove();
+                });
+            });
+        }
+
+        function timeAgo(ts) {
+            const now = Date.now();
+            const diff = now - ts;
+            if (diff < 60000) return 'just now';
+            if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+            if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+            return Math.floor(diff / 86400000) + 'd ago';
+        }
+
+        // Online mode: Start Session
+        btnStartOnline?.addEventListener('click', () => {
+            vscode.postMessage({ command: 'startSession' });
+        });
+
+        // Post-SSO join button
+        btnReadyJoinPost?.addEventListener('click', () => {
+            const input = document.getElementById('ready-invite-url-input');
+            const url = input?.value?.trim();
+            if (!url) return;
+            vscode.postMessage({ command: 'joinSession', inviteUrl: url });
+            if (input) input.value = '';
+        });
+
+        // Pre-SSO: direct Room ID join
+        const btnReadyJoinPre = document.getElementById('btn-ready-join');
+        btnReadyJoinPre?.addEventListener('click', () => {
+            const val = readyRoomIdInput?.value?.trim();
+            if (!val) return;
+            // If it looks like a UUID (room ID), construct invite URL; else treat as invite URL
+            const inviteUrl = val.includes('://') ? val : (backendUrl + '/chat?roomId=' + val);
+            vscode.postMessage({ command: 'joinSession', inviteUrl });
+            if (readyRoomIdInput) readyRoomIdInput.value = '';
+        });
 
         // Track session state
         let sessionEnded = false;
@@ -3095,6 +3446,9 @@
             } else if (state === 'ReadyToHost') {
                 panelReady.classList.remove('hidden');
                 panelReady.classList.add('flex');
+                // Refresh room lists when returning to ready panel
+                loadRoomList();
+                if (_selectedMode === 'online') { loadOnlineRooms(); }
             } else if (state === 'Joining') {
                 panelJoining.classList.remove('hidden');
                 panelJoining.classList.add('flex');
@@ -3519,11 +3873,12 @@
                     if (message.ssoIdentity && !ssoIdentity) {
                         ssoIdentity = message.ssoIdentity;
                         ssoProvider = message.ssoProvider || ssoProvider;
+                        updateReadyPanelForSSO();
                     }
                     render(message.state, message.session);
                     // Show setup/rebuild rows only when a session is active
                     if (message.state === 'Hosting' || message.state === 'Joined') {
-                        if (!_workspaceSetupDone) {
+                        if (!_workspaceSetupDone && _selectedMode === 'online') {
                             document.getElementById('setup-index-row')?.classList.remove('hidden');
                         }
                         document.getElementById('rebuild-index-row')?.classList.remove('hidden');
@@ -3606,6 +3961,7 @@
                         ssoIdentity = message.identity;
                         ssoProvider = message.provider || ssoProvider;
                         showSSOSignedInState(message.identity, message.provider);
+                        updateReadyPanelForSSO();
                         const loginName = getSSODisplayName(message.identity);
                         if (loginName) session.displayName = loginName;
                         console.log('[WebView] SSO identity:', message.identity, 'provider:', message.provider);
@@ -3628,6 +3984,24 @@
                 case 'ssoProvidersUpdate':
                     enabledProviders = message.providers;
                     applySSOProviderVisibility(enabledProviders);
+                    break;
+                case 'quitRoomsList':
+                    renderRoomList(message.rooms || []);
+                    break;
+                case 'onlineRoomsList':
+                    renderOnlineRoomList(message.rooms || []);
+                    break;
+                case 'localMessagesLoaded':
+                    // Render cached messages instantly before server sync
+                    if (message.messages && message.messages.length > 0) {
+                        console.log(`[WebView] Rendering ${message.messages.length} cached messages`);
+                        message.messages.forEach(msg => {
+                            if (!isDuplicateMessage(msg.id)) {
+                                renderMessageByType(msg);
+                                updateLastMessageTimestamp(msg.ts);
+                            }
+                        });
+                    }
                     break;
 
                 // ---- Jira integration ----
@@ -3862,18 +4236,19 @@
         });
 
         // Hosting: Stop + Copy Invite
-        btnStopSession.addEventListener('click', () => {
-            vscode.postMessage({ command: 'stopSession' });
-        });
-
         btnCopyInvite.addEventListener('click', () => {
             vscode.postMessage({ command: 'copyInviteLink' });
         });
 
-        // Joined: Leave
-        btnLeaveSession.addEventListener('click', () => {
-            vscode.postMessage({ command: 'leaveSession' });
-        });
+        // Leave (hosting or joined): send quit_chat via WebSocket, preserve data for rejoin
+        function handleQuitChat() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'quit_chat' }));
+            }
+            vscode.postMessage({ command: 'quitChat' });
+        }
+        if (btnQuitHosting) { btnQuitHosting.addEventListener('click', handleQuitChat); }
+        if (btnQuitJoined) { btnQuitJoined.addEventListener('click', handleQuitChat); }
 
         // Button click handlers
         btnCreateSummary.addEventListener('click', () => {
@@ -3999,6 +4374,24 @@
          * Render any pending mermaid diagrams inside the given container.
          * Call this after inserting HTML that may contain .mermaid-pending divs.
          */
+        /** Map file extension to highlight.js language name. */
+        function langFromFilename(filename) {
+            const ext = (filename || '').split('.').pop()?.toLowerCase();
+            const map = { py: 'python', ts: 'typescript', js: 'javascript', jsx: 'javascript', tsx: 'typescript', java: 'java', go: 'go', rs: 'rust', c: 'c', cpp: 'cpp', cc: 'cpp', rb: 'ruby', sh: 'bash', bash: 'bash', yml: 'yaml', yaml: 'yaml', json: 'json', html: 'xml', xml: 'xml', css: 'css', sql: 'sql', md: 'markdown', kt: 'kotlin', swift: 'swift', scala: 'scala', cs: 'csharp' };
+            return map[ext] || ext || '';
+        }
+
+        /** Apply highlight.js to all code blocks in a container. */
+        function highlightCodeBlocks(container) {
+            if (typeof hljs === 'undefined') return;
+            const blocks = (container || document).querySelectorAll('pre code[class*="language-"]');
+            blocks.forEach(block => {
+                if (!block.classList.contains('hljs')) {
+                    hljs.highlightElement(block);
+                }
+            });
+        }
+
         function renderMermaidDiagrams(container) {
             if (typeof mermaid === 'undefined') return;
             const pending = (container || document).querySelectorAll('.mermaid-pending');
@@ -4024,9 +4417,28 @@
                             wrapper.addEventListener('click', () => openDiagramLightbox(el));
                         }
                     });
+                }).catch(e => {
+                    console.warn('[Mermaid] render promise rejected:', e);
+                    // Fallback: show raw source as code block
+                    nodes.forEach(el => {
+                        if (!el.querySelector('svg')) {
+                            const raw = el.textContent || '';
+                            el.classList.remove('mermaid');
+                            el.innerHTML = `<pre class="text-xs font-mono text-gray-400 whitespace-pre overflow-x-auto p-2" style="background:rgba(0,0,0,0.2)">${escapeHtml(raw)}</pre>`;
+                            const hint = el.closest('.mermaid-container')?.querySelector('.mermaid-zoom-hint');
+                            if (hint) hint.textContent = 'diagram parse error';
+                        }
+                    });
                 });
             } catch (e) {
                 console.warn('[Mermaid] render error:', e);
+                nodes.forEach(el => {
+                    if (!el.querySelector('svg')) {
+                        const raw = el.textContent || '';
+                        el.classList.remove('mermaid');
+                        el.innerHTML = `<pre class="text-xs font-mono text-gray-400 whitespace-pre overflow-x-auto p-2" style="background:rgba(0,0,0,0.2)">${escapeHtml(raw)}</pre>`;
+                    }
+                });
             }
         }
 
@@ -4601,7 +5013,7 @@
                                 </button>
                             </div>
                         </div>
-                        <pre class="code-snippet-plain p-3 text-xs font-mono text-gray-300 whitespace-pre-wrap break-words max-h-48 overflow-y-auto max-w-full">${escapeHtml(snippet.code || '')}</pre>
+                        <pre class="p-3 text-xs font-mono text-gray-300 whitespace-pre-wrap break-words max-h-80 overflow-y-auto max-w-full" style="background:rgba(0,0,0,0.3)"><code class="language-${langFromFilename(snippet.filename)}">${escapeHtml(snippet.code || '')}</code></pre>
                         <!-- Inline question input (hidden until Explain button is clicked) -->
                         <div id="${explainAreaId}" class="hidden border-t border-gray-700/50">
                             <div class="px-3 py-2 flex flex-col gap-1.5" style="background:rgba(5,20,15,0.6);">
@@ -4623,6 +5035,7 @@
             `;
 
             messagesContainer.appendChild(div);
+            highlightCodeBlocks(div);
 
             // Navigate button
             const navigateBtn = document.getElementById(navigateBtnId);
@@ -5178,6 +5591,7 @@
 
             // Render any mermaid diagrams in the newly added message
             renderMermaidDiagrams(div);
+            highlightCodeBlocks(div);
 
             smartScroll(true);
         }
@@ -5304,6 +5718,7 @@
 
             // Render any mermaid diagrams in the newly added message
             renderMermaidDiagrams(div);
+            highlightCodeBlocks(div);
 
             smartScroll(false);
             if (msg.id && messageReadObserver) messageReadObserver.observe(div);
@@ -5884,6 +6299,33 @@
         }
 
         /**
+         * Dispatch a message to the correct renderer based on its type.
+         * Used by history loading and local cache to match live-message rendering.
+         * @param {Object} msg - Message object from history/cache.
+         */
+        function renderMessageByType(msg) {
+            const t = msg.type;
+            // For code_snippet, ensure codeSnippet field exists (history stores it as metadata)
+            if (t === 'code_snippet') {
+                if (!msg.codeSnippet && msg.metadata) { msg.codeSnippet = msg.metadata; }
+                renderCodeSnippetMessage(msg);
+            } else if (t === 'file') {
+                renderFileMessage(msg);
+            } else if (t === 'ai_summary') {
+                renderAiSummaryMessage(msg);
+            } else if (t === 'ai_code_prompt') {
+                renderAiCodePromptMessage(msg);
+            } else if (t === 'ai_explanation') {
+                renderAiExplanationMessage(msg);
+            } else if (t === 'ai_answer') {
+                renderAiAnswerMessage(msg);
+            } else {
+                // Default: plain text message
+                renderMessage(msg);
+            }
+        }
+
+        /**
          * Render a chat message in the UI.
          * Includes message grouping and status indicators.
          * @param {Object} msg - Message object with id, userId, displayName, role, content, ts.
@@ -6019,7 +6461,19 @@
                     const sortedMessages = data.messages.sort((a, b) => a.ts - b.ts);
                     sortedMessages.forEach(msg => {
                         if (!isDuplicateMessage(msg.id)) {
-                            prependMessage(msg);
+                            const t = msg.type;
+                            if (t && t !== 'message') {
+                                // Specialized types: render at bottom, then move to top
+                                const beforeFirst = messagesContainer.firstChild;
+                                renderMessageByType(msg);
+                                // The renderer appended to the end — move it to the top
+                                const rendered = messagesContainer.lastChild;
+                                if (rendered && beforeFirst && rendered !== beforeFirst) {
+                                    messagesContainer.insertBefore(rendered, messagesContainer.firstChild);
+                                }
+                            } else {
+                                prependMessage(msg);
+                            }
                         }
                     });
 
@@ -6103,13 +6557,23 @@
         /**
          * Update connection status display
          */
-        function updateConnectionStatus(status, isError = false) {
+        function updateConnectionStatus(status, isError = false, isSuccess = false) {
             if (connectionStatus) {
                 connectionStatus.style.display = '';
-                const colorClass = isError ? 'text-red-400 border-red-700' : 'text-gray-400 border-gray-700';
+                let colorClass = 'text-gray-400 border-gray-700/40 bg-gray-800/30';
+                let dot = '';
+                if (isError) {
+                    colorClass = 'text-red-400 border-red-700/50 bg-red-900/20';
+                    dot = '<span class="w-1.5 h-1.5 rounded-full bg-red-400 flex-shrink-0"></span>';
+                } else if (isSuccess) {
+                    colorClass = 'text-emerald-400 border-emerald-700/50 bg-emerald-900/20';
+                    dot = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"></span>';
+                } else if (status.startsWith('Reconnecting')) {
+                    dot = '<div class="h-2.5 w-2.5 border border-gray-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>';
+                }
                 connectionStatus.innerHTML = `
-                    <div class="bg-gray-800/50 ${colorClass} text-xs px-3 py-1.5 rounded-full border">
-                        <span>${status}</span>
+                    <div class="${colorClass} text-xs px-3 py-1.5 rounded-full border flex items-center gap-1.5">
+                        ${dot}<span>${status}</span>
                     </div>
                 `;
             }
@@ -6198,6 +6662,31 @@
         }
 
         /**
+         * Cache a single incoming message to extension local storage.
+         * Batches into groups of 5 to reduce postMessage overhead.
+         */
+        const _cacheBuf = [];
+        let _cacheFlushTimer = null;
+        function _cacheMessage(msg) {
+            if (!session.roomId || !msg.id) return;
+            _cacheBuf.push(msg);
+            if (_cacheBuf.length >= 5) {
+                _flushCacheBuf();
+            } else if (!_cacheFlushTimer) {
+                _cacheFlushTimer = setTimeout(_flushCacheBuf, 2000);
+            }
+        }
+        function _flushCacheBuf() {
+            if (_cacheFlushTimer) { clearTimeout(_cacheFlushTimer); _cacheFlushTimer = null; }
+            if (_cacheBuf.length === 0) return;
+            vscode.postMessage({
+                command: 'saveLocalMessages',
+                roomId: session.roomId,
+                messages: _cacheBuf.splice(0),
+            });
+        }
+
+        /**
          * Connect to WebSocket chat server.
          * Supports message recovery on reconnect via `since` parameter.
          */
@@ -6207,6 +6696,9 @@
                 updateConnectionStatus('❌ Missing session info', true);
                 return;
             }
+
+            // Request local cache from extension host — renders instantly before server sync
+            vscode.postMessage({ command: 'loadLocalMessages', roomId: session.roomId });
 
             // Build WebSocket URL with optional `since` parameter for reconnection
             let wsUrl = session.backendUrl.replace('http', 'ws') + '/ws/chat/' + session.roomId;
@@ -6228,7 +6720,7 @@
                 console.log('[WebView] WebSocket connected');
                 hasConnectedToChat = true;
                 reconnectAttempts = 0;
-                updateConnectionStatus('✅ Connected');
+                updateConnectionStatus('Connected', false, true);
                 // Hide status after a moment
                 setTimeout(() => {
                     if (connectionStatus) connectionStatus.style.display = 'none';
@@ -6271,10 +6763,10 @@
                             renderUsersList(data.users);
                         }
 
-                        // Render message history (with deduplication)
+                        // Render message history (with deduplication + type dispatch)
                         data.messages.forEach(msg => {
                             if (!isDuplicateMessage(msg.id)) {
-                                renderMessage(msg);
+                                renderMessageByType(msg);
                                 updateLastMessageTimestamp(msg.ts);
                             }
                         });
@@ -6291,6 +6783,15 @@
                             }));
                         }
 
+                        // Save history to local cache for instant load on next connect
+                        if (data.messages && data.messages.length > 0) {
+                            vscode.postMessage({
+                                command: 'saveLocalMessages',
+                                roomId: session.roomId,
+                                messages: data.messages,
+                            });
+                        }
+
                         // Proactively fetch AI status so AI-gated buttons start in the correct state.
                         // This is a fire-and-forget call; errors are silently ignored.
                         vscode.postMessage({ command: 'getAiStatus' });
@@ -6298,26 +6799,31 @@
                         if (!isDuplicateMessage(data.id)) {
                             renderMessage(data);
                             updateLastMessageTimestamp(data.ts);
+                            _cacheMessage(data);
                         }
                     } else if (data.type === 'file') {
                         if (!isDuplicateMessage(data.id)) {
                             renderFileMessage(data);
                             updateLastMessageTimestamp(data.ts);
+                            _cacheMessage(data);
                         }
                     } else if (data.type === 'code_snippet') {
                         if (!isDuplicateMessage(data.id)) {
                             renderCodeSnippetMessage(data);
                             updateLastMessageTimestamp(data.ts);
+                            _cacheMessage(data);
                         }
                     } else if (data.type === 'ai_summary') {
                         if (!isDuplicateMessage(data.id)) {
                             renderAiSummaryMessage(data);
                             updateLastMessageTimestamp(data.ts);
+                            _cacheMessage(data);
                         }
                     } else if (data.type === 'ai_code_prompt') {
                         if (!isDuplicateMessage(data.id)) {
                             renderAiCodePromptMessage(data);
                             updateLastMessageTimestamp(data.ts);
+                            _cacheMessage(data);
                         }
                     } else if (data.type === 'user_joined') {
                         renderUsersList(data.users);
@@ -7191,7 +7697,6 @@
 
         const setupIndexRow       = document.getElementById('setup-index-row');
         const btnSetupIndex       = document.getElementById('btn-setup-index');
-        const btnSetupLocal       = document.getElementById('btn-setup-local');
         const setupIndexModal     = document.getElementById('setup-index-modal');
         const btnCloseSetupModal  = document.getElementById('btn-close-setup-modal');
         const btnSetupCancel      = document.getElementById('btn-setup-cancel');
@@ -7206,13 +7711,6 @@
         btnSetupIndex.addEventListener('click', () => {
             setupError.classList.add('hidden');
             setupIndexModal.classList.remove('hidden');
-        });
-
-        // "Use Local" button — register current VS Code workspace with backend
-        btnSetupLocal.addEventListener('click', () => {
-            btnSetupLocal.disabled = true;
-            btnSetupLocal.innerHTML = `<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg> Registering\u2026`;
-            vscode.postMessage({ command: 'setupLocalWorkspace' });
         });
 
         // "Open Workspace" button — opens the conductor:// workspace in a new VS Code window
@@ -7334,9 +7832,6 @@
             // Restore buttons
             btnSetupIndex.disabled = false;
             btnSetupIndex.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor"><path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/><path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z"/><path d="M17 5c0 1.657-3.134 3-7 3S3 6.657 3 5s3.134-3 7-3 7 1.343 7 3z"/></svg> Git Repo`;
-            btnSetupLocal.disabled = false;
-            btnSetupLocal.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clip-rule="evenodd"/></svg> Use Local`;
-
             if (message.success) {
                 _workspaceSetupDone = true;
                 setupIndexRow.classList.add('hidden');
@@ -7413,7 +7908,7 @@
             if (activeTab === 'paste') {
                 const text = stackTraceInput.value.trim();
                 if (!text) {
-                    stackTraceError.textContent = 'Please paste a stack trace.';
+                    stackTraceError.querySelector('#stack-trace-error-text').textContent = 'Please paste a stack trace.';
                     stackTraceError.classList.remove('hidden');
                     return;
                 }
@@ -7425,7 +7920,7 @@
                 const text = document.getElementById('test-output-input').value.trim();
                 const framework = document.getElementById('test-framework-select').value;
                 if (!text) {
-                    stackTraceError.textContent = 'Please paste test output.';
+                    stackTraceError.querySelector('#stack-trace-error-text').textContent = 'Please paste test output.';
                     stackTraceError.classList.remove('hidden');
                     return;
                 }
@@ -8261,6 +8756,9 @@
          * Handle AI status response from extension.
          * @param {Object} data - AI status data or error
          */
+        let _aiStatusRetries = 0;
+        const _AI_STATUS_MAX_RETRIES = 3;
+
         function handleAiStatusResponse(data) {
             console.log('[WebView] handleAiStatusResponse called with:', JSON.stringify(data));
 
@@ -8268,13 +8766,23 @@
             aiConfigLoading.classList.add('hidden');
 
             if (data.error) {
-                // Show error state
-                console.log('[WebView] AI status error:', data.error);
-                aiConfigError.classList.remove('hidden');
-                aiConfigErrorText.textContent = data.error;
-                aiConfigContent.classList.add('hidden');
+                console.log('[WebView] AI status error:', data.error, `(retry ${_aiStatusRetries}/${_AI_STATUS_MAX_RETRIES})`);
+                // Only show error if retries exhausted or AI config panel is open
+                if (_aiStatusRetries >= _AI_STATUS_MAX_RETRIES) {
+                    aiConfigError.classList.remove('hidden');
+                    aiConfigErrorText.textContent = data.error;
+                    aiConfigContent.classList.add('hidden');
+                } else {
+                    // Silently retry — backend may still be starting up
+                    _aiStatusRetries++;
+                    setTimeout(() => {
+                        vscode.postMessage({ command: 'getAiStatus' });
+                    }, 5000);
+                }
                 return;
             }
+            // Success — reset retry counter
+            _aiStatusRetries = 0;
 
             // Show content
             aiConfigError.classList.add('hidden');
@@ -8932,6 +9440,11 @@
             text = text.replace(/`([^`]+)`/g, '<code class="bg-emerald-950/40 text-emerald-300 px-1 rounded text-xs">$1</code>');
             // Bold
             text = text.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-white">$1</strong>');
+            // Links [text](url) — must come before italic to avoid underscore conflicts
+            text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="text-blue-400 hover:text-blue-300 underline" title="$2">$1</a>');
+            // Italic *text* (not **bold**) and _text_
+            text = text.replace(/(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)/g, '<em class="italic text-gray-300">$1</em>');
+            text = text.replace(/(?<![a-zA-Z0-9])_([^_]+?)_(?![a-zA-Z0-9])/g, '<em class="italic text-gray-300">$1</em>');
             return text;
         }
 
@@ -8952,6 +9465,25 @@
             let inCodeBlock = false;
             let codeBlockLang = '';
             let codeBlockLines = [];
+            let inTable = false;
+            let tableRows = [];
+
+            function emitTable() {
+                if (tableRows.length === 0) return;
+                let t = '<div class="my-2 overflow-x-auto"><table class="text-xs text-gray-200 border-collapse w-full">';
+                tableRows.forEach((row, i) => {
+                    const cells = row.split('|').filter((_, idx, arr) => idx > 0 && idx < arr.length - 1).map(c => c.trim());
+                    const tag = i === 0 ? 'th' : 'td';
+                    const cls = i === 0
+                        ? 'px-2 py-1 border border-gray-700/50 bg-gray-800/50 font-semibold text-white text-left'
+                        : 'px-2 py-1 border border-gray-700/50';
+                    t += '<tr>' + cells.map(c => `<${tag} class="${cls}">${inlineFormat(escapeHtml(c))}</${tag}>`).join('') + '</tr>';
+                });
+                t += '</table></div>';
+                html += t;
+                inTable = false;
+                tableRows = [];
+            }
 
             function closeLists() {
                 if (inUl) { html += '</ul>'; inUl = false; }
@@ -8977,12 +9509,13 @@
                     return;
                 }
                 const codeContent = codeBlockLines.map(l => escapeHtml(l)).join('\n');
+                const langClass = codeBlockLang ? `language-${codeBlockLang}` : '';
                 const langLabel = codeBlockLang
                     ? `<span class="text-[0.6rem] text-emerald-400/80 font-mono uppercase tracking-wide">${escapeHtml(codeBlockLang)}</span>`
                     : '';
                 html += `<div class="my-2 rounded overflow-hidden border border-gray-700/50 text-left">` +
                         `<div class="flex items-center px-2 py-1 bg-gray-800/70 border-b border-gray-700/50 min-h-[1.5rem]">${langLabel}</div>` +
-                        `<pre class="px-3 py-2 text-xs font-mono text-gray-200 overflow-x-auto bg-black/30 whitespace-pre leading-relaxed">${codeContent}</pre>` +
+                        `<pre class="px-3 py-2 text-xs font-mono text-gray-200 overflow-x-auto bg-black/30 whitespace-pre leading-relaxed"><code class="${langClass}">${codeContent}</code></pre>` +
                         `</div>`;
                 inCodeBlock = false;
                 codeBlockLang = '';
@@ -9010,6 +9543,17 @@
                 }
 
                 const trimmed = line.trim();
+
+                // GFM table rows (pipe-delimited)
+                if (/^\|(.+)\|$/.test(trimmed)) {
+                    if (!inTable) { closeLists(); inTable = true; tableRows = []; }
+                    // Skip separator rows (|---|---|)
+                    if (/^\|[\s\-:|]+\|$/.test(trimmed)) return;
+                    tableRows.push(trimmed);
+                    return;
+                } else if (inTable) {
+                    emitTable();
+                }
 
                 // Headings
                 if (/^###\s+/.test(trimmed)) {
@@ -9046,8 +9590,9 @@
                 }
             });
 
-            // Close any unclosed code block (missing closing fence)
+            // Close any unclosed blocks
             if (inCodeBlock && codeBlockLines.length > 0) emitCodeBlock();
+            if (inTable && tableRows.length > 0) emitTable();
             if (inUl) html += '</ul>';
             if (inOl) html += '</ol>';
             return html;

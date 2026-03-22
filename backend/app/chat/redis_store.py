@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
-TTL_SECONDS = 86400  # 24 hours
+TTL_SECONDS = 21600  # 6 hours
 
 
 class RedisChatStore:

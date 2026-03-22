@@ -2,8 +2,8 @@
  * Conductor workspace storage initialization.
  *
  * Creates and maintains the `.conductor/` directory at the workspace root,
- * which holds local configuration, file metadata, and vector storage for
- * the context enricher.
+ * which holds local configuration (config.json).  The repo graph and symbol
+ * index are managed separately by repoGraphBuilder and the backend.
  *
  * Idempotent — safe to call on every session start.
  *
@@ -13,19 +13,10 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
-import { ConductorDb } from './conductorDb';
-
 // ---------------------------------------------------------------------------
 // Workspace configuration types
 // ---------------------------------------------------------------------------
 
-/**
- * Shape of `.conductor/config.json`.
- *
- * All fields are optional when reading from disk — missing fields fall back to
- * the values in `DEFAULT_WORKSPACE_CONFIG`.  This means old config files
- * written before a field was added continue to work without manual migration.
- */
 /**
  * Settings stored in `.conductor/config.json` — extension-side tuning knobs.
  */
@@ -59,14 +50,6 @@ export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfig = {
     maxRelated:      8,
     maxContextFiles: 15,
     semanticTopK:    20,
-};
-
-/** @deprecated Use `DEFAULT_WORKSPACE_CONFIG` — kept for backward compatibility. */
-const DEFAULT_CONFIG = DEFAULT_WORKSPACE_CONFIG;
-
-/** Default contents for `.conductor/file_meta.json`. */
-const DEFAULT_FILE_META = {
-    files: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -125,81 +108,32 @@ async function ensureJsonFile(
  * Creates the following structure (only missing pieces are created):
  * ```
  * .conductor/
- * ├── config.json       — enricher settings  (see WorkspaceConfig)
- * ├── file_meta.json    — tracked file metadata
- * └── cache.db          — SQLite symbol index
+ * └── config.json       — enricher settings  (see WorkspaceConfig)
  * ```
  *
+ * Repo graph (`repo_graph.json`) and symbol index (`symbol_index.json`)
+ * are created on demand by their respective builders.
+ *
  * @param workspaceRoot - Absolute path to the workspace root folder.
- * @returns An opened `ConductorDb` instance backed by `.conductor/cache.db`.
  */
 export async function initConductorWorkspaceStorage(
     workspaceRoot: string,
-): Promise<ConductorDb> {
-    const conductorDir  = path.join(workspaceRoot, '.conductor');
-    const vectorsDir    = path.join(conductorDir, 'vectors');
-    const configPath    = path.join(conductorDir, 'config.json');
-    const fileMetaPath  = path.join(conductorDir, 'file_meta.json');
+): Promise<void> {
+    const conductorDir = path.join(workspaceRoot, '.conductor');
+    const configPath   = path.join(conductorDir, 'config.json');
 
-    // Ensure .conductor/ and .conductor/vectors/ exist
-    await fs.mkdir(vectorsDir, { recursive: true });
+    // Ensure .conductor/ exists
+    await fs.mkdir(conductorDir, { recursive: true });
     console.log(`[ConductorStorage] Ensured directory: ${conductorDir}`);
 
-    // Write default files if missing
-    const configCreated = await ensureJsonFile(configPath, DEFAULT_CONFIG);
+    // Write default config if missing
+    const configCreated = await ensureJsonFile(configPath, DEFAULT_WORKSPACE_CONFIG);
     if (configCreated) {
         console.log('[ConductorStorage] Created config.json with defaults');
     }
 
-    const metaCreated = await ensureJsonFile(fileMetaPath, DEFAULT_FILE_META);
-    if (metaCreated) {
-        console.log('[ConductorStorage] Created file_meta.json with defaults');
-    }
-
     // Ensure .conductor/ is in the workspace .gitignore
     await ensureGitignoreEntry(workspaceRoot);
-
-    // Open the SQLite database
-    const dbPath = path.join(conductorDir, 'cache.db');
-    const db     = new ConductorDb(dbPath);
-    console.log(`[ConductorStorage] Opened cache DB: ${dbPath}`);
-
-    return db;
-}
-
-/**
- * Hard-reset the workspace index:
- * 1. Close the existing database connection.
- * 2. Delete `cache.db`, `cache.db-shm`, `cache.db-wal` and the `vectors/` directory.
- * 3. Open and return a fresh `ConductorDb` with an empty schema.
- *
- * Config files (`config.json`, `file_meta.json`) are preserved.
- */
-export async function resetWorkspaceDb(
-    workspaceRoot: string,
-    oldDb: ConductorDb,
-): Promise<ConductorDb> {
-    const conductorDir = path.join(workspaceRoot, '.conductor');
-    const dbPath       = path.join(conductorDir, 'cache.db');
-    const vectorsDir   = path.join(conductorDir, 'vectors');
-
-    // 1. Close the open connection before touching the files.
-    oldDb.close();
-
-    // 2. Remove SQLite files (WAL artefacts included).
-    for (const suffix of ['', '-shm', '-wal']) {
-        await fs.rm(dbPath + suffix, { force: true });
-    }
-
-    // 3. Clear vectors directory contents (keep the directory itself).
-    try {
-        const entries = await fs.readdir(vectorsDir);
-        await Promise.all(entries.map(e => fs.rm(path.join(vectorsDir, e), { force: true, recursive: true })));
-    } catch { /* vectors dir might not exist */ }
-
-    // 4. Open a fresh database (schema is recreated by the ConductorDb constructor).
-    console.log(`[ConductorStorage] Hard-reset complete, reopening: ${dbPath}`);
-    return new ConductorDb(dbPath);
 }
 
 /**

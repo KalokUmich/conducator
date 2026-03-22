@@ -4,7 +4,6 @@ pytest
 pytest-asyncio
 httpx
 jsonschema
-duckdb
 pyyaml
 pyngrok
 python-multipart
@@ -39,3 +38,8 @@ openai>=1.0.0
 # LLM tracing, cost tracking, execution tree visualization
 # Self-hosted via docker/docker-compose.langfuse.yaml
 langfuse>=2.0
+
+# --- Playwright (Browser Automation) ---
+# Headless browser for web browsing, form filling, screenshots
+# After install: playwright install chromium
+playwright>=1.40

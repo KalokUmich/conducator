@@ -195,10 +195,12 @@ export interface FileOutlineParams {
 
 export interface GetDependenciesParams {
     file_path: string;
+    max_depth?: number;
 }
 
 export interface GetDependentsParams {
     file_path: string;
+    max_depth?: number;
 }
 
 export interface GitLogParams {

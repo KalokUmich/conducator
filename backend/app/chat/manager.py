@@ -157,10 +157,23 @@ class ChatMessage(BaseModel):
         default_factory=time.time,
         description="Timestamp in seconds since epoch"
     )
+    identitySource: str = Field(
+        default="anonymous",
+        description="How sender identity was established: sso, named, anonymous"
+    )
+    parentMessageId: Optional[str] = Field(
+        default=None,
+        description="ID of the parent message this is replying to (thread/chain support)"
+    )
     # AI-specific data (only for ai_summary and ai_code_prompt types)
     aiData: Optional[dict] = Field(
         default=None,
         description="AI-specific data (summary details or code prompt)"
+    )
+    # Structured metadata for specific message types (code_snippet: file_path/language, file: file_id, etc.)
+    metadata: Optional[dict] = Field(
+        default=None,
+        description="Type-specific structured data (JSON)"
     )
 
 
@@ -208,13 +221,15 @@ class ConnectionManager:
     (WebSocket objects cannot be serialised).
     """
 
-    def __init__(self, redis_store=None) -> None:
+    def __init__(self, redis_store=None, persistence=None) -> None:
         """Initialize empty connection manager.
 
         Args:
             redis_store: Optional ``RedisChatStore`` for durable state.
+            persistence: Optional ``ChatPersistenceService`` for Postgres write-through.
         """
         self._redis_store = redis_store
+        self._persistence = persistence  # injected by main.py lifespan
         # room_id -> list of active WebSocket connections
         self.active_connections: Dict[str, List[WebSocket]] = {}
 
@@ -460,12 +475,19 @@ class ConnectionManager:
         if room_id not in self.message_history:
             self.message_history[room_id] = []
         self.message_history[room_id].append(message)
-        # Write-through to Redis
+        msg_dict = message.model_dump()
+        # Write-through to Redis (hot cache)
         if self._redis_store:
             try:
-                await self._redis_store.append_message(room_id, message.model_dump())
+                await self._redis_store.append_message(room_id, msg_dict)
             except Exception as exc:
                 logger.warning("Redis write failed for message in room %s: %s", room_id, exc)
+        # Write-through to Postgres (micro-batch)
+        if self._persistence:
+            try:
+                await self._persistence.enqueue_message(room_id, msg_dict)
+            except Exception as exc:
+                logger.warning("Postgres enqueue failed for message in room %s: %s", room_id, exc)
         return message
 
     async def broadcast(self, message: dict, room_id: str) -> None:
@@ -959,6 +981,50 @@ class ConnectionManager:
             Set of user IDs who have read the message.
         """
         return self.message_read_by.get(room_id, {}).get(message_id, set())
+
+
+# =============================================================================
+# End Chat Blocker System
+# =============================================================================
+#
+# Extensible guard that prevents ending a session when certain conditions
+# are active.  Register/unregister blockers at runtime; check_end_chat_blockers
+# before processing an end_session request.
+#
+# Future blocker names (add to END_CHAT_BLOCKERS when ready):
+#   "agent_running"          — an agent loop is still executing
+#   "file_upload_in_progress" — a file upload hasn't completed
+#   "code_review_running"    — a code review pipeline is active
+
+END_CHAT_BLOCKERS: List[str] = []
+"""Registered blocker *types*.  Only these names are considered valid."""
+
+_active_blockers: Dict[str, Set[str]] = {}
+"""room_id → set of currently active blocker names."""
+
+
+def register_blocker(room_id: str, blocker: str) -> None:
+    """Mark *blocker* as active for *room_id*."""
+    _active_blockers.setdefault(room_id, set()).add(blocker)
+
+
+def unregister_blocker(room_id: str, blocker: str) -> None:
+    """Remove *blocker* for *room_id*."""
+    s = _active_blockers.get(room_id)
+    if s:
+        s.discard(blocker)
+        if not s:
+            del _active_blockers[room_id]
+
+
+def check_end_chat_blockers(room_id: str) -> List[str]:
+    """Return list of active blockers for *room_id*.  Empty ⇒ safe to end."""
+    active = _active_blockers.get(room_id, set())
+    # Only report blockers that are in the registered list
+    if END_CHAT_BLOCKERS:
+        return sorted(active & set(END_CHAT_BLOCKERS))
+    # If no blocker types registered yet, report all active ones
+    return sorted(active)
 
 
 # Global singleton instance used by all WebSocket handlers

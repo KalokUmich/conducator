@@ -36,13 +36,12 @@ import { parseStackTrace, resolveFramePaths } from './services/stackTraceParser'
 import { scanWorkspaceTodos, updateWorkspaceTodoInFile, UpdateTodoPayload } from './services/todoScanner';
 import {
     initConductorWorkspaceStorage,
-    resetWorkspaceDb,
     loadWorkspaceConfig,
     WorkspaceConfig,
 } from './services/workspaceStorage';
-import { ConductorDb } from './services/conductorDb';
+// ConductorDb removed — repo graph and symbol index managed by treeSitterService + repoGraphBuilder
 import { runExplainPipeline } from './services/explainWithContextPipeline';
-import { indexWorkspace, reindexSingleFile, cancelCurrentIndex } from './services/workspaceIndexer';
+// workspaceIndexer removed — symbol extraction handled by treeSitterService
 import { RagClient, RagFileChange } from './services/ragClient';
 import { ConductorFileSystemProvider } from './services/conductorFileSystemProvider';
 import { WorkflowPanel } from './services/workflowPanel';
@@ -53,14 +52,15 @@ import {
     isJiraConnectionStale,
     JIRA_GLOBALSTATE_KEY,
 } from './services/jiraAuthService';
+import { ChatLocalStore } from './services/chatLocalStore';
 
 /** Output channel for logging invite links to the user. */
 let outputChannel: vscode.OutputChannel;
 
-/** SQLite DB instance for context enricher metadata (set after hosting starts). */
-let conductorDb: ConductorDb | null = null;
+/** Chat local message cache (initialized in activate). */
+let chatLocalStore: ChatLocalStore | null = null;
 
-/** Active workspace root (set alongside conductorDb). */
+/** Active workspace root (set during session start). */
 let conductorWsRoot: string | null = null;
 
 /** Workspace configuration loaded from .conductor/config.json (set after hosting starts). */
@@ -74,12 +74,6 @@ let conductorFsProvider: ConductorFileSystemProvider | null = null;
 
 /** GlobalState key for persisting FSM state across reloads. */
 const FSM_STATE_KEY = 'conductor.fsmState';
-
-/**
- * If the index was last built less than this many milliseconds ago
- * (and the branch hasn't changed) skip Phase 1+2 on session start.
- */
-const SCAN_FRESHNESS_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Get the backend server URL from configuration.
@@ -145,6 +139,15 @@ export function activate(context: vscode.ExtensionContext): void {
     // Initialize session service - must happen before WebView creation
     getSessionService().initialize(context);
     console.log(`[AI Collab] Session initialized with roomId: ${getSessionService().getRoomId()}`);
+
+    // Initialize chat local message cache
+    chatLocalStore = new ChatLocalStore(context.globalStorageUri.fsPath);
+    console.log(`[AI Collab] Chat local store initialized at: ${context.globalStorageUri.fsPath}`);
+
+    // Prune stale room caches in background (rooms that no longer exist or are archived)
+    pruneStaleRoomCaches(chatLocalStore, getSessionService().getBackendUrl()).catch(
+        err => console.warn('[AI Collab] pruneStaleRoomCaches failed:', err)
+    );
 
     // Clear language detection cache when workspace folders change
     context.subscriptions.push(
@@ -234,6 +237,32 @@ export function activate(context: vscode.ExtensionContext): void {
             console.warn('[Conductor] Health check start failed:', err);
         });
     }
+
+    // Auto-register workspace with backend when folder is opened during active session
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(async () => {
+            const folders = vscode.workspace.workspaceFolders;
+            if (!folders || folders.length === 0) { return; }
+            const state = controller.getState();
+            if (state !== ConductorState.Hosting && state !== ConductorState.Joined) { return; }
+            const wsRoot = folders[0].uri.fsPath;
+            const roomId = getSessionService().getRoomId();
+            if (!roomId) { return; }
+            try {
+                const resp = await fetch(`${getBackendUrl()}/api/git-workspace/workspaces/local`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ room_id: roomId, local_path: wsRoot }),
+                });
+                if (resp.ok) {
+                    console.log('[Conductor] Workspace auto-registered after folder change:', wsRoot);
+                    vscode.window.showInformationMessage(`Workspace registered: ${wsRoot}`);
+                }
+            } catch (e) {
+                console.warn('[Conductor] Auto-register workspace failed:', e);
+            }
+        })
+    );
 
     // Register the WebView provider for the sidebar chat panel
     const provider = new AICollabViewProvider(context.extensionUri, context, controller);
@@ -712,12 +741,43 @@ async function compareLocalTools(): Promise<void> {
  * Performs cleanup of any resources.
  */
 export function deactivate(): void {
-    if (conductorDb) {
-        conductorDb.close();
-        conductorDb = null;
-    }
     workspaceConfig = null;
     console.log('AI Collab extension is now deactivated');
+}
+
+/**
+ * Prune local chat caches for rooms that no longer exist or are archived.
+ * Runs once at extension activation — non-blocking, best-effort.
+ */
+async function pruneStaleRoomCaches(store: ChatLocalStore, backendUrl: string): Promise<void> {
+    const rooms = await store.listRooms();
+    if (rooms.length === 0) { return; }
+
+    const normalizedUrl = backendUrl.replace('://localhost', '://127.0.0.1');
+    let pruned = 0;
+
+    for (const roomId of rooms) {
+        try {
+            const resp = await fetch(`${normalizedUrl}/chat/${roomId}/status`);
+            if (!resp.ok) {
+                // Room not found (404) — prune
+                await store.clearRoom(roomId);
+                pruned++;
+                continue;
+            }
+            const data = await resp.json() as { pg_status?: string | null };
+            if (data.pg_status === 'archived') {
+                await store.clearRoom(roomId);
+                pruned++;
+            }
+        } catch {
+            // Backend unavailable — skip pruning for this room
+        }
+    }
+
+    if (pruned > 0) {
+        console.log(`[AI Collab] Pruned ${pruned} stale room cache(s)`);
+    }
 }
 
 /**
@@ -873,8 +933,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     } catch (e) {
                         console.warn('[Conductor] FSM transition on sessionEnded failed:', e);
                     }
-                    // Stop all background indexing work before closing the session.
-                    cancelCurrentIndex();
+                    // Stop all background work before closing the session.
                     ragClient?.cancel();
                     ragClient = null;
                     if (this._ragBatchTimer) { clearTimeout(this._ragBatchTimer); this._ragBatchTimer = null; }
@@ -910,6 +969,83 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     return;
                 case 'leaveSession':
                     this._handleLeaveSession();
+                    return;
+                case 'quitChat':
+                    this._handleQuitChat();
+                    return;
+                case 'getQuitRooms': {
+                    const rooms = getSessionService().getQuitRooms();
+                    this._view?.webview.postMessage({ command: 'quitRoomsList', rooms });
+                    return;
+                }
+                case 'getOnlineRooms': {
+                    const backendUrl = getSessionService().getBackendUrl();
+                    const email = message.email;
+                    if (!backendUrl || !email) {
+                        this._view?.webview.postMessage({ command: 'onlineRoomsList', rooms: [] });
+                        return;
+                    }
+                    try {
+                        const resp = await fetch(`${backendUrl}/chat/rooms?email=${encodeURIComponent(email)}`);
+                        const data = await resp.json() as { rooms: unknown[] };
+                        this._view?.webview.postMessage({ command: 'onlineRoomsList', rooms: data.rooms || [] });
+                    } catch {
+                        this._view?.webview.postMessage({ command: 'onlineRoomsList', rooms: [] });
+                    }
+                    return;
+                }
+                case 'removeQuitRoom': {
+                    const roomToDelete = message.roomId;
+                    getSessionService().removeQuitRoom(roomToDelete);
+                    // Clear local message cache
+                    if (chatLocalStore) {
+                        await chatLocalStore.clearRoom(roomToDelete);
+                    }
+                    // Delete room from backend (history, files, audit logs)
+                    const delBackendUrl = getSessionService().getBackendUrl();
+                    if (delBackendUrl) {
+                        fetch(`${delBackendUrl}/chat/${encodeURIComponent(roomToDelete)}`, {
+                            method: 'DELETE',
+                        }).catch(() => { /* best-effort */ });
+                    }
+                    return;
+                }
+                case 'loadLocalMessages': {
+                    // WebView requests cached messages for a room
+                    if (chatLocalStore && message.roomId) {
+                        const cache = await chatLocalStore.loadMessages(message.roomId);
+                        const lastId = cache && cache.messages.length > 0
+                            ? cache.messages[cache.messages.length - 1].id
+                            : null;
+                        this._view?.webview.postMessage({
+                            command: 'localMessagesLoaded',
+                            roomId: message.roomId,
+                            messages: cache ? cache.messages : [],
+                            lastMessageId: lastId,
+                        });
+                    }
+                    return;
+                }
+                case 'saveLocalMessages':
+                    // WebView sends messages to cache locally
+                    if (chatLocalStore && message.roomId && message.messages) {
+                        await chatLocalStore.appendMessages(message.roomId, message.messages);
+                    }
+                    return;
+                case 'clearLocalMessages':
+                    if (chatLocalStore && message.roomId) {
+                        await chatLocalStore.clearRoom(message.roomId);
+                    }
+                    return;
+                case 'rejoinRoom':
+                    // Set the session to the quit room's ID and start hosting
+                    if (message.roomId) {
+                        getSessionService().removeQuitRoom(message.roomId);
+                        // Trigger a join using the room ID as an invite URL
+                        this._handleJoinSession(
+                            getSessionService().getBackendUrl() + '/chat?roomId=' + message.roomId
+                        );
+                    }
                     return;
                 case 'uploadFile':
                     this._handleUploadFile(message);
@@ -1161,83 +1297,36 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             const roomId = this._controller.startHosting();
             console.log(`[Conductor] Hosting started, roomId=${roomId}`);
 
-            // Initialize .conductor/ workspace storage + SQLite DB, then run
-            // two-phase workspace indexing:
-            //   Phase 1 (blocking ≤5s): fast file metadata scan
-            //   Phase 2 (background):   symbol extraction + embedding
+            // Initialize .conductor/ workspace storage directory and load config.
             const folders = vscode.workspace.workspaceFolders;
             console.log('[Conductor][StartSession] workspaceFolders:', folders?.length ?? 0,
                 folders?.map(f => f.uri.fsPath));
             if (folders && folders.length > 0) {
                 const wsRoot = folders[0].uri.fsPath;
                 console.log('[Conductor][StartSession] Initializing workspace storage at:', wsRoot);
-                initConductorWorkspaceStorage(wsRoot).then(async db => {
-                    conductorDb    = db;
+                initConductorWorkspaceStorage(wsRoot).then(async () => {
                     conductorWsRoot = wsRoot;
-
-                    // Cancel any Phase 2 still running from a previous session.
-                    cancelCurrentIndex();
 
                     // Load extension-side tuning from .conductor/config.json.
                     workspaceConfig = await loadWorkspaceConfig(wsRoot);
 
-                    // --- Branch-aware + empty-index auto-scan logic ---
-                    const currentBranch = _getGitBranch(wsRoot);
-                    const indexedBranch = db.getMeta('indexed_branch');
-                    const fileCount     = db.getFileCount();
+                    console.log('[Conductor][StartSession] Workspace storage initialized');
 
-                    const branchChanged = !!(currentBranch && indexedBranch && currentBranch !== indexedBranch);
-                    const isEmpty       = fileCount === 0;
-
-                    if (branchChanged) {
-                        console.log(`[Conductor][StartSession] Branch changed: ${indexedBranch} → ${currentBranch} — hard-resetting index`);
-                        // Hard-reset: close DB, delete files, reopen fresh.
-                        conductorDb = db = await resetWorkspaceDb(wsRoot, db);
-                        this._view?.webview.postMessage({
-                            command: 'indexBranchChanged',
-                            from: indexedBranch,
-                            to: currentBranch,
+                    // Auto-register local workspace with backend so AI tools work
+                    try {
+                        const regResp = await fetch(`${getBackendUrl()}/api/git-workspace/workspaces/local`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ room_id: roomId, local_path: wsRoot }),
                         });
-                    } else if (isEmpty) {
-                        console.log('[Conductor][StartSession] Empty index — running initial scan');
-                    } else {
-                        console.log(`[Conductor][StartSession] Incremental scan on branch=${currentBranch ?? 'unknown'} (${fileCount} files cached)`);
+                        if (regResp.ok) {
+                            console.log('[Conductor][StartSession] Local workspace registered with backend');
+                        } else {
+                            console.warn('[Conductor][StartSession] Workspace registration failed:', regResp.status);
+                        }
+                    } catch (regErr) {
+                        console.warn('[Conductor][StartSession] Workspace registration error:', regErr);
                     }
-
-                    // Collect open editor files to process them first in Phase 2.
-                    const priorityFiles = vscode.window.tabGroups.all
-                        .flatMap(g => g.tabs)
-                        .map(tab => (tab.input instanceof vscode.TabInputText) ? tab.input.uri.fsPath : null)
-                        .filter((p): p is string => p !== null);
-
-                    // [DISABLED] Start backend RAG reindex in parallel (non-blocking, best-effort).
-                    // Temporarily disabled for debugging — trigger manually via Rebuild Index button.
-                    // ragClient = new RagClient(getBackendUrl());
-                    // this._sendWorkspaceToRag(wsRoot, roomId).catch(err => {
-                    //     if (err instanceof Error && err.name === 'AbortError') return;
-                    //     console.warn('[Conductor][StartSession] RAG reindex failed:', err);
-                    // });
-
-                    // Run two-phase indexing.  Phase 1 always runs (fast mtime diff).
-                    // Phase 2 processes only stale files (AST-only mode).
-                    const indexResult = await indexWorkspace(wsRoot, db, {
-                        backendUrl:      getBackendUrl(),
-                        phase1TimeoutMs: 5000,
-                        priorityFiles,
-                        onProgress: (p) => {
-                            this._view?.webview.postMessage({ command: 'indexProgress', payload: p });
-                        },
-                    });
-
-                    // Persist the current branch.
-                    if (currentBranch) {
-                        db.setMeta('indexed_branch', currentBranch);
-                    }
-
-                    console.log(
-                        `[Conductor][StartSession] Index done: ${indexResult.filesScanned} files, ` +
-                        `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols`,
-                    );
 
                     // Start watching for file changes (hot incremental updates).
                     this._startFileWatcher(wsRoot);
@@ -1248,7 +1337,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     }
                 });
             } else {
-                console.warn('[Conductor][StartSession] No workspace folders — skipping workspace storage init');
+                console.warn('[Conductor][StartSession] No workspace folders — prompting user');
+                vscode.window.showWarningMessage(
+                    'No workspace folder open. AI features require a workspace.',
+                    'Open Folder',
+                ).then(choice => {
+                    if (choice === 'Open Folder') {
+                        vscode.commands.executeCommand('vscode.openFolder');
+                    }
+                });
             }
 
             // Send the fresh session state so the WebView can connect WebSocket
@@ -1402,6 +1499,29 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             const msg = error instanceof Error ? error.message : String(error);
             console.warn('[Conductor] leaveSession failed:', msg);
             vscode.window.showWarningMessage(`Cannot leave session: ${msg}`);
+        }
+    }
+
+    /**
+     * Handle "Quit Chat" command from WebView.
+     * Preserves room data and saves room for later rejoin.
+     */
+    private _handleQuitChat(): void {
+        try {
+            const sessionService = getSessionService();
+            const roomId = sessionService.getRoomId();
+            const backendUrl = sessionService.getBackendUrl?.() || '';
+
+            // Save room for later rejoin
+            sessionService.saveQuitRoom(roomId, backendUrl);
+
+            // FSM transition (does NOT reset session — roomId preserved)
+            this._controller.quitSession();
+            console.log(`[Conductor] Quit chat — room ${roomId} saved for rejoin`);
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.warn('[Conductor] quitChat failed:', msg);
+            vscode.window.showWarningMessage(`Cannot quit chat: ${msg}`);
         }
     }
 
@@ -3650,7 +3770,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             'lines:', message.startLine, '-', message.endLine,
             'lang:', message.language);
         console.log('[Conductor][ExplainCode] code length:', message.code.length, 'chars');
-        console.log('[Conductor][ExplainCode] conductorDb:', conductorDb ? 'SET' : 'NULL');
         console.log('[Conductor][ExplainCode] workspaceConfig:', workspaceConfig ? JSON.stringify(workspaceConfig) : 'NULL');
         console.log('[Conductor][ExplainCode] backendUrl:', backendUrl);
 
@@ -3704,7 +3823,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 question:          message.question,
                 backendUrl,
                 workspaceId:       message.roomId,
-                conductorDb,
                 workspaceFolders:  [...(vscode.workspace.workspaceFolders ?? [])],
                 workspaceConfig:   workspaceConfig  ?? undefined,
                 onProgress:        (evt) => this._view?.webview.postMessage({ command: 'explainProgress', ...evt }),
@@ -4046,7 +4164,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         this._fileWatcher = vscode.workspace.createFileSystemWatcher(pattern);
 
         const schedule = (uri: vscode.Uri) => {
-            if (!conductorDb) return;
             const existing = this._fileSyncDebounces.get(uri.fsPath);
             if (existing) clearTimeout(existing);
             const timer = setTimeout(() => {
@@ -4069,7 +4186,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async _reindexSingleFile(absPath: string, wsRoot: string): Promise<void> {
-        if (!conductorDb) return;
         const relPath = path.relative(wsRoot, absPath);
         // Skip paths inside ignored directories
         const firstSegment = relPath.split(/[\\/]/)[0];
@@ -4078,12 +4194,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         ]);
         if (SKIP.has(firstSegment)) return;
 
-        const count = await reindexSingleFile(wsRoot, absPath, conductorDb);
-
-        console.log(`[Conductor][FileWatcher] Reindexed ${relPath} (${count} symbols)`);
-        this._view?.webview.postMessage({ command: 'indexFileSynced', file: relPath, symbols: count });
-
-        // Also queue for backend RAG indexing (batched)
+        // Queue for backend RAG indexing (batched)
         this._queueRagFileChange(relPath, absPath, wsRoot);
     }
 
@@ -4143,7 +4254,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     `the business scenario it serves, and any key dependencies or side-effects.`,
                 backendUrl,
                 workspaceId:       message.roomId,
-                conductorDb,
                 workspaceFolders:  [...folders],
                 workspaceConfig:   workspaceConfig  ?? undefined,
                 onProgress:        (evt) => this._view?.webview.postMessage({ command: 'explainProgress', ...evt }),
@@ -4361,11 +4471,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
     private async _handleRebuildIndex(): Promise<void> {
         const folders = vscode.workspace.workspaceFolders;
-        if (!conductorDb || !folders || folders.length === 0) {
+        if (!folders || folders.length === 0) {
             this._view?.webview.postMessage({
                 command: 'indexRebuildComplete',
                 success: false,
-                error: 'No workspace or database available',
+                error: 'No workspace available',
             });
             return;
         }
@@ -4373,39 +4483,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         const wsRoot = conductorWsRoot ?? folders[0].uri.fsPath;
 
         try {
-            // 1. Stop all running indexing tasks.
-            cancelCurrentIndex();
             this._stopFileWatcher();
 
-            // 2. Hard-reset: close DB, delete cache.db* + vectors/, reopen fresh.
-            conductorDb = await resetWorkspaceDb(wsRoot, conductorDb);
-            // Also clear the repo graph index so it gets rebuilt on next agent query.
+            // Clear the repo graph index so it gets rebuilt on next agent query.
             const { clearRepoGraph } = require('./services/repoGraphBuilder');
             clearRepoGraph(wsRoot);
-            console.log('[Conductor][RebuildIndex] Workspace hard-reset complete (repo graph cleared)');
+            console.log('[Conductor][RebuildIndex] Repo graph cleared');
 
-            // 3. Re-index workspace from scratch (AST-only mode).
-            const indexResult = await indexWorkspace(wsRoot, conductorDb, {
-                backendUrl:      getBackendUrl(),
-                phase1TimeoutMs: 5000,
-                onProgress: (p) => {
-                    this._view?.webview.postMessage({ command: 'indexProgress', payload: p });
-                },
-            });
-
-            // 4. Persist current branch and restart file watcher.
-            const currentBranch = _getGitBranch(wsRoot);
-            if (currentBranch) {
-                conductorDb.setMeta('indexed_branch', currentBranch);
-            }
-            this._startFileWatcher(wsRoot);
-
-            console.log(
-                `[Conductor][RebuildIndex] Done: ${indexResult.filesScanned} files, ` +
-                `${indexResult.staleFilesCount} stale, ${indexResult.symbolsExtracted} symbols`,
-            );
-
-            // 6. Invalidate backend-side symbol + graph caches (best-effort).
+            // Invalidate backend-side symbol + graph caches (best-effort).
             const roomId = getSessionService().getRoomId();
             if (roomId) {
                 const backendUrl = getBackendUrl();
@@ -4421,6 +4506,8 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     console.warn('[Conductor][RebuildIndex] Backend cache invalidation failed:', err);
                 });
             }
+
+            this._startFileWatcher(wsRoot);
 
             this._view?.webview.postMessage({
                 command: 'indexRebuildComplete',
@@ -5703,13 +5790,23 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         // Replace the relative CSS path with the webview URI
         html = html.replace('href="tailwind.css"', `href="${cssUri}"`);
 
+        // Highlight.js for code syntax highlighting
+        const hljsJsUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.min.js')
+        );
+        const hljsCssUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, 'media', 'github-dark.min.css')
+        );
+        html = html.replace('src="highlight.min.js"', `src="${hljsJsUri}"`);
+        html = html.replace('href="github-dark.min.css"', `href="${hljsCssUri}"`);
+
         // Build Content Security Policy that allows WebSocket and fetch connections.
         // Include both localhost and all ngrok patterns explicitly so that the CSP
         // remains valid even if session.backendUrl is updated to a ngrok URL after
         // the webview is first rendered (race between detectNgrokUrl and render time).
         const backendUrl = getSessionService().getBackendUrl();
         const wsUrl = backendUrl.replace('http', 'ws');
-        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; connect-src ${backendUrl} ${wsUrl} http://localhost:* https://localhost:* ws://localhost:* wss://localhost:* https://*.ngrok-free.dev wss://*.ngrok-free.dev https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok.io wss://*.ngrok.io https://*.ngrok.app wss://*.ngrok.app;">`;
+        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-inline' https://cdn.jsdelivr.net; connect-src ${backendUrl} ${wsUrl} http://localhost:* https://localhost:* ws://localhost:* wss://localhost:* https://*.ngrok-free.dev wss://*.ngrok-free.dev https://*.ngrok-free.app wss://*.ngrok-free.app https://*.ngrok.io wss://*.ngrok.io https://*.ngrok.app wss://*.ngrok.app;">`;
 
         // Inject initial permissions data (including sessionRole based on FSM state)
         const permissions = getPermissionsService().getPermissionsForWebView();

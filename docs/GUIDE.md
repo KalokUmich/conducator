@@ -440,9 +440,9 @@ backend/
 │   │   └── service.py             # RepoMapService（图构建 + 缓存）
 │   │
 │   ├── chat/                      # WebSocket + HTTP 聊天接口
-│   ├── files/                     # 文件上传下载（DuckDB 元数据）
-│   ├── audit/                     # DuckDB 审计日志
-│   ├── todos/                     # DuckDB TODO 追踪
+│   ├── files/                     # 文件上传下载（PostgreSQL 元数据）
+│   ├── audit/                     # PostgreSQL 审计日志
+│   ├── todos/                     # PostgreSQL TODO 追踪
 │   ├── auth/                      # AWS SSO + Google OAuth
 │   ├── policy/                    # 自动应用安全评估
 │   └── workspace_files/           # Worktree 文件 CRUD
@@ -1314,7 +1314,7 @@ VS Code WebView（浏览器沙盒）
   ↓  无法直接发 HTTP，通过 vscode.postMessage
 Extension Host（Node.js）
   ↓  multipart POST /api/files/upload
-Backend → DuckDB 记录元数据（file_id、room_id、sha256、原始文件名）
+Backend → PostgreSQL 记录元数据（file_id、room_id、sha256、原始文件名）
   ↓  返回 file_id
 Extension 通过 WebSocket 广播 file_id
   ↓  其他成员收到后请求 GET /api/files/{file_id}
@@ -1343,12 +1343,9 @@ def upload_file(self, room_id: str, filename: str, content: bytes) -> FileRecord
 
 ## 12. 审计日志与 TODO 管理
 
-### 12.1 为什么用 DuckDB？
+### 12.1 存储层
 
-DuckDB 是一个嵌入式分析数据库（类似 SQLite，但面向 OLAP）。选择它的原因：
-- **零依赖**：不需要单独部署 Postgres，一个文件搞定
-- **适合审计**：分析查询（按 room_id 过滤、按时间范围汇总）性能好
-- **本地优先**：适合单机部署场景
+审计日志和 TODO 数据持久化在 PostgreSQL，与其他业务数据共用同一个数据库实例。
 
 ### 12.2 审计日志
 
@@ -1392,7 +1389,7 @@ PATCH  /todos/{room_id}/{todo_id} # 更新状态/文本
 DELETE /todos/{room_id}/{todo_id} # 删除
 ```
 
-TODO 持久化在 DuckDB，服务重启后不丢失。
+TODO 持久化在 PostgreSQL，服务重启后不丢失。
 
 ---
 
@@ -1965,7 +1962,7 @@ EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-> 不需要 Postgres。所有持久化数据（审计日志、TODO、文件元数据）都在 DuckDB 文件中，随容器卷挂载即可。
+> 所有持久化数据（审计日志、TODO、文件元数据）存储在 PostgreSQL 中。
 
 ### 19.5 Docker 组件网络（本地开发）
 

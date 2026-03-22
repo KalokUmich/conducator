@@ -208,8 +208,8 @@ class TestEdgeCases:
 
     def test_default_config_values(self):
         cfg = BudgetConfig()
-        assert cfg.max_input_tokens == 880_000
+        assert cfg.max_input_tokens == 1_000_000
         assert cfg.warning_threshold == 0.7
         assert cfg.critical_threshold == 0.9
-        assert cfg.max_iterations == 40
+        assert cfg.max_iterations == 50
         assert cfg.diminishing_returns_window == 3
