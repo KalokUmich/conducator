@@ -1,8 +1,13 @@
-"""System prompts for the agent loop — 3-layer architecture.
+"""System prompts for the agent loop — 4-layer architecture.
 
-Layer 1: CORE_IDENTITY — always included; investigation guidance
-Layer 2: STRATEGY — only injected for code_review query type (structured output template)
-Layer 3: Runtime Guidance — injected dynamically by service.py (budget, scatter, etc.)
+For Brain-dispatched sub-agents (primary path):
+  Layer 1: SUB_AGENT_IDENTITY — per-agent identity from .md (system prompt)
+  Layer 2: Tools — handled by schemas.py (tool definitions)
+  Layer 3: SKILLS_AND_GUIDELINES — shared project context (appended to system prompt)
+  Layer 4: User message — query only, no role injection
+
+Legacy path (standalone / old workflow mode):
+  CORE_IDENTITY + STRATEGIES — kept for backward compatibility
 """
 from __future__ import annotations
 
@@ -100,7 +105,173 @@ Every claim in your answer must reference a specific file and line number.
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LAYER 2: Code review template (only query type that needs a structured prompt)
+# 4-LAYER PROMPT ARCHITECTURE (for Brain-dispatched sub-agents)
+#
+# Layer 1: System Prompt — who the agent is (per-agent, from .md file)
+# Layer 2: Tools — what the agent can do (handled by schemas.py)
+# Layer 3: Skills & Guidelines — project context and reusable patterns
+# Layer 4: User Messages — the actual query (handled by caller)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# --- Layer 1: Per-agent identity (built from agent .md file) ---
+
+SUB_AGENT_IDENTITY = """\
+You are **{agent_name}** — {description}
+
+{instructions}
+
+## Behavior
+
+Every claim in your answer must reference a specific file and line number.
+{signal_blocker_hint}
+## Answer format
+
+- **Direct answer** (1-3 sentences)
+- **Evidence**: file paths, line numbers, relevant code
+- **Call chain or data flow** (if applicable): Entry → A → B → C
+- **Caveats**: uncertainties, areas not fully traced
+"""
+
+
+# --- Layer 3: Shared skills & guidelines (same for all sub-agents) ---
+
+SKILLS_AND_GUIDELINES = """\
+## Workspace
+Operating inside: {workspace_path}
+
+{workspace_layout_section}
+
+{project_docs_section}
+
+## Budget
+You have {max_iterations} tool-calling iterations. Reserve the last 1-2 for \
+verification.
+
+## Tool usage guidelines
+
+- **Call multiple tools in parallel** when they are independent — search for two \
+different patterns simultaneously, or read multiple files at once.
+- **Scope searches** using the `path` parameter to target the relevant project root \
+from "Detected project roots" above.
+- Large files can consume many iterations if read blindly. Use outline tools to \
+discover method names and line numbers before reading specific sections.
+"""
+
+
+def build_sub_agent_system_prompt(
+    agent_name: str,
+    agent_description: str,
+    agent_instructions: str,
+    workspace_path: str,
+    workspace_layout: Optional[str] = None,
+    project_docs: Optional[str] = None,
+    max_iterations: int = 20,
+    risk_context: Optional[str] = None,
+    code_context: Optional[Dict[str, Any]] = None,
+    strategy_key: Optional[str] = None,
+    has_signal_blocker: bool = True,
+) -> str:
+    """Build the full system prompt for a Brain-dispatched sub-agent.
+
+    Combines Layer 1 (per-agent identity) with Layer 3 (shared skills &
+    guidelines).  Layer 2 (tools) is handled separately via tool definitions.
+    Layer 4 (user message) is the caller's responsibility.
+
+    Parameters
+    ----------
+    agent_name:
+        Agent name from .md frontmatter.
+    agent_description:
+        One-line description from .md frontmatter.
+    agent_instructions:
+        Full Markdown body from the agent .md file — the agent's perspective,
+        goals, and investigation approach.  This IS the agent's identity.
+    workspace_path:
+        Absolute path to the workspace root.
+    workspace_layout:
+        Pre-computed workspace layout string (from scan_workspace_layout).
+    project_docs:
+        Pre-computed project documentation string (from _read_key_docs).
+    max_iterations:
+        Maximum tool-calling iterations for this agent.
+    risk_context:
+        Pre-computed risk context from scan_workspace_risk().
+    code_context:
+        Optional code snippet dict (code, file_path, language, start_line, end_line).
+    strategy_key:
+        Optional Layer 3 strategy to inject (e.g. "code_review").
+    has_signal_blocker:
+        Whether the agent has the signal_blocker tool available.
+    """
+    if workspace_layout is None:
+        workspace_layout = scan_workspace_layout(workspace_path)
+    if project_docs is None:
+        project_docs = _read_key_docs(workspace_path)
+
+    # --- Layer 1: Agent identity ---
+    signal_hint = ""
+    if has_signal_blocker:
+        signal_hint = (
+            "\nIf you encounter ambiguity that you cannot resolve from the "
+            "codebase (e.g., multiple implementations and unsure which one), "
+            "use the signal_blocker tool to ask for direction.\n"
+        )
+
+    identity = SUB_AGENT_IDENTITY.format(
+        agent_name=agent_name,
+        description=agent_description,
+        instructions=agent_instructions,
+        signal_blocker_hint=signal_hint,
+    )
+
+    # --- Layer 3: Skills & guidelines ---
+    docs_section = ""
+    if project_docs:
+        docs_section = (
+            "### Project documentation (auto-detected)\n"
+            "Use this to understand the project before diving into code.\n\n"
+            + project_docs
+        )
+
+    skills = SKILLS_AND_GUIDELINES.format(
+        workspace_path=workspace_path,
+        workspace_layout_section=workspace_layout,
+        project_docs_section=docs_section,
+        max_iterations=max_iterations,
+    )
+
+    prompt = identity + "\n" + skills
+
+    # Code Under Discussion — between identity and strategy
+    if code_context:
+        lang = code_context.get("language", "")
+        prompt += (
+            "\n## Code Under Discussion\n\n"
+            f"The user is asking about this code from "
+            f"`{code_context['file_path']}` "
+            f"(lines {code_context.get('start_line', '?')}\u2013{code_context.get('end_line', '?')}):\n\n"
+            f"```{lang}\n{code_context['code']}\n```\n\n"
+            "Use this as your starting point. Explore the codebase to understand "
+            "the surrounding context, callers, callees, and dependencies."
+        )
+
+    # Strategy — Layer 3 skill for structured output (e.g. code_review)
+    strategy = STRATEGIES.get(strategy_key or "", "")
+    if strategy:
+        prompt += "\n\n" + strategy
+
+    # Risk context — Layer 3 skill
+    if risk_context:
+        prompt += "\n\n" + risk_context
+
+    return prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LEGACY: Code review template (only query type that needs a structured prompt)
+# Used by CORE_IDENTITY path (standalone/workflow). Brain path uses
+# build_sub_agent_system_prompt() with strategy_key instead.
 # ═══════════════════════════════════════════════════════════════════════
 
 # For non-review queries, no strategy is injected — Claude reasons freely.

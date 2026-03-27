@@ -307,7 +307,7 @@ class AgentToolExecutor(ToolExecutor):
         # Sub-agents can signal Brain for direction mid-execution
         agent_tool_names.append("signal_blocker")
 
-        # Build and run sub-agent
+        # Build and run sub-agent (4-layer prompt architecture)
         from .service import AgentLoopService
         svc = AgentLoopService(
             provider=self._agent_provider,
@@ -319,6 +319,11 @@ class AgentToolExecutor(ToolExecutor):
             _is_sub_agent=True,
             perspective=agent_config.instructions,
             forced_tools=agent_tool_names,
+            agent_identity={
+                "name": agent_config.name,
+                "description": getattr(agent_config, "description", "") or "",
+                "instructions": agent_config.instructions,
+            },
         )
         # Per-agent overrides from template
         if agent_config.limits.temperature is not None:
@@ -328,11 +333,8 @@ class AgentToolExecutor(ToolExecutor):
         if agent_config.strategy:
             svc._forced_strategy = agent_config.strategy
 
-        # Inject agent instructions into query (like old _build_agent_query)
-        # so the sub-agent knows its role/perspective
-        full_query = query
-        if agent_config.instructions:
-            full_query = query + "\n\n## Your Role\n\n" + agent_config.instructions
+        # 4-layer: query stays clean — agent identity is in system prompt (Layer 1),
+        # not in the user message (Layer 4).
 
         start = time.monotonic()
         try:
@@ -342,7 +344,7 @@ class AgentToolExecutor(ToolExecutor):
                 from .service import AgentResult
                 agent_result = AgentResult()
                 async for event in svc.run_stream(
-                    query=full_query,
+                    query=query,
                     workspace_path=self._workspace_path,
                     code_context=self._code_context,
                 ):
@@ -394,7 +396,7 @@ class AgentToolExecutor(ToolExecutor):
                 result = agent_result
             else:
                 result = await asyncio.wait_for(
-                    svc.run(query=full_query, workspace_path=self._workspace_path, code_context=self._code_context),
+                    svc.run(query=query, workspace_path=self._workspace_path, code_context=self._code_context),
                     timeout=self._sub_agent_timeout,
                 )
 

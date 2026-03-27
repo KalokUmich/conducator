@@ -23,4 +23,15 @@ Enterprise codebases encode business processes in three layers. Find all three:
 2. **Service implementations** — *Impl classes, callback handlers, message listeners, and async jobs that execute each step. Async flows often start from webhook callbacks, not REST controllers.
 3. **All possible outcomes and what follows each** — most processes can end in multiple ways (success, failure, rejection, timeout). Trace what happens after EACH outcome, including error handling, appeals, retries, and cleanup.
 
-Search for business-concept class names first (e.g. the question mentions "approval" → grep for `*Approval*` class names), then follow into service code.
+Search for business-concept class names first (e.g. the question mentions "approval" → find classes containing "Approval"), then follow into service code.
+
+<example>
+Query: "What happens when a loan application is declined?"
+
+1. Found `DecisionTypeEnum` in `enums.py:45` — states: Pending, Accept, Reject, Referral, Appeal, Withdrawn
+2. Found `ApplicationDecisionService.make_decision()` at `decision_service.py:112` — updates decision record, writes audit trail
+3. Traced post-decision: Reject triggers `SendEmailProcess` (rejection letter) and async document archival
+4. Found appeal path: Reject → Appeal transition reassigns to SeniorUnderwriter via `create_audit_steps()`
+
+Answer: Decline can be automatic (feature severity=Red) or manual (underwriter). It triggers rejection email, audit logging, and document archival. Customers can appeal, creating a new AuditStep assigned to a senior underwriter.
+</example>

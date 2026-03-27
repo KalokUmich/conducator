@@ -500,7 +500,10 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "Returns matching lines with file paths and line numbers. "
             "Use path to scope search to a subdirectory. "
             "Only use include_glob if you know the exact file extension (e.g. '*.java', '*.py'). "
-            "Omit include_glob to search ALL file types."
+            "Omit include_glob to search ALL file types. "
+            "Pattern tips: for class names use 'class\\s+Approval', for method calls use "
+            "'approve\\(', for enum values use 'APPROVED|REJECTED|PENDING', for config keys "
+            "use the key name as a literal string."
         ),
         "input_schema": GrepParams.model_json_schema(),
     },
@@ -526,7 +529,9 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "description": (
             "Find symbol definitions (functions, classes, methods, interfaces) by name using AST parsing. "
             "Returns exact file locations with line numbers and signatures. "
-            "More precise than grep for finding where something is defined."
+            "Prefer over grep when you need a definition, not usages — "
+            "e.g. find_symbol('ApplicationDecisionService') finds the class definition, "
+            "while grep('ApplicationDecisionService') finds every mention including imports."
         ),
         "input_schema": FindSymbolParams.model_json_schema(),
     },
@@ -534,7 +539,9 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "find_references",
         "description": (
             "Find all references (usages) of a symbol across the codebase. "
-            "Combines grep with AST validation for accurate results."
+            "Combines grep with AST validation for accurate results. "
+            "Use when you need to know everywhere a class, function, or constant is used — "
+            "e.g. find_references('affordability_score') shows every file that reads or writes it."
         ),
         "input_schema": FindReferencesParams.model_json_schema(),
     },
@@ -542,7 +549,9 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "file_outline",
         "description": (
             "Get the structure of a file: all classes, functions, methods with line numbers. "
-            "Useful for understanding a file's organization before reading specific sections."
+            "Call this BEFORE read_file on large files — it reveals all method names so you "
+            "can read_file with targeted line ranges instead of reading 500+ lines blindly. "
+            "Also useful for answering 'what methods does this class have?' in one call."
         ),
         "input_schema": FileOutlineParams.model_json_schema(),
     },
@@ -622,7 +631,9 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "description": (
             "Find all functions/methods that call a given function. "
             "Searches across the entire codebase (or a specific path). "
-            "Useful for understanding impact and usage patterns."
+            "Essential for impact analysis — e.g. get_callers('make_decision') reveals "
+            "every path that triggers a lending decision. Also useful for verifying "
+            "that callers handle errors from the function they call."
         ),
         "input_schema": GetCallersParams.model_json_schema(),
     },

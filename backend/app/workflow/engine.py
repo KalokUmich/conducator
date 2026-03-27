@@ -266,6 +266,9 @@ class WorkflowEngine:
             qa_cache=qa_cache,
         )
 
+        query = context.get("query") or context.get("query_text", "")
+        code_context = context.get("code_context")
+
         # Propagate code_context so sub-agents can include the snippet
         brain_executor._code_context = code_context
 
@@ -280,9 +283,6 @@ class WorkflowEngine:
             _is_brain=True,
             brain_system_prompt=brain_prompt,
         )
-
-        query = context.get("query") or context.get("query_text", "")
-        code_context = context.get("code_context")
 
         # Run Brain in background task, drain events from queue
         async def _execute():
@@ -586,6 +586,11 @@ class WorkflowEngine:
             verifier_provider=self._provider,  # strong model for completeness check
             perspective=agent.instructions,     # agent role for scoped verification
             interactive=context.get("_interactive", False),
+            agent_identity={
+                "name": agent.name,
+                "description": getattr(agent, "description", "") or "",
+                "instructions": agent.instructions or "",
+            },
         )
 
         # Stream agent events to UI in real-time (required for ask_user)
@@ -686,36 +691,12 @@ class WorkflowEngine:
         workflow: WorkflowConfig,
         context: Dict[str, Any],
     ) -> str:
-        """Build the full query string for an explorer agent.
+        """Build the query string for an explorer agent (Layer 4 only).
 
-        Composes: user's original question + agent-specific instructions.
-        When interactive mode is enabled, inserts an ask_user step as part
-        of the agent's investigation flow.
+        Returns just the user's question — agent identity is now in the
+        system prompt (Layer 1) via agent_identity, not in the user message.
         """
-        parts = []
-
-        # 1. User's original question
-        query = context.get("query", "")
-        if query:
-            parts.append(query)
-
-        # 2. Agent-specific instructions (from .md file)
-        if agent.instructions:
-            instructions = agent.instructions
-            # In interactive mode, prepend ask_user guidance into the agent's
-            # instructions so it becomes part of the investigation flow.
-            if context.get("_interactive"):
-                instructions = (
-                    "Before investigating, check whether this query has multiple "
-                    "valid directions (e.g. different features to build, different "
-                    "subsystems to focus on). If so, call `ask_user` with 2-4 "
-                    "concrete options to get the user's preference. Then proceed "
-                    "with your investigation focused on their answer.\n\n"
-                    + instructions
-                )
-            parts.append(f"\n## Your Role\n\n{instructions}")
-
-        return "\n\n".join(parts) if parts else "Review the code changes."
+        return context.get("query", "") or "Review the code changes."
 
     def _build_judge_prompt(
         self,

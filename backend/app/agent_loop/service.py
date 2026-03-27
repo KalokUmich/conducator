@@ -115,6 +115,7 @@ class AgentLoopService:
         _is_brain: bool = False,
         brain_system_prompt: str = "",
         forced_tools: Optional[List[str]] = None,
+        agent_identity: Optional[Dict[str, str]] = None,
     ) -> None:
         self._provider = provider
         self._max_iterations = max_iterations
@@ -134,9 +135,10 @@ class AgentLoopService:
         self._is_brain = _is_brain
         self._brain_system_prompt = brain_system_prompt
         self._forced_tools = forced_tools
+        self._agent_identity = agent_identity  # 4-layer: per-agent identity from .md
         self._temperature = None  # set per-agent via forced_tools dispatch
         self._quality_config = None  # set per-agent via brain dispatch
-        self._forced_strategy = ""  # Layer 2 strategy key override
+        self._forced_strategy = ""  # strategy key override (Layer 3 skill)
 
     @observe(name="agent_loop")
     async def run(
@@ -310,20 +312,36 @@ class AgentLoopService:
 
         # Build system prompt and tool list (skip for Brain — already set above)
         if not self._is_brain:
-            # Use forced_strategy if set (e.g., "code_review" for PR review agents),
-            # otherwise fall back to classification query_type
-            effective_query_type = self._forced_strategy or classification.query_type
-            system = build_system_prompt(
-                workspace_path,
-                workspace_layout=layout,
-                project_docs=project_docs,
-                max_iterations=self._max_iterations,
-                query_type=effective_query_type,
-                risk_context=risk_context,
-                code_context=code_context,
-                interactive=self._interactive,
-                has_signal_blocker=bool(self._forced_tools),
-            )
+            if self._agent_identity:
+                # 4-layer path: Brain-dispatched sub-agent with per-agent identity
+                from .prompts import build_sub_agent_system_prompt
+                system = build_sub_agent_system_prompt(
+                    agent_name=self._agent_identity["name"],
+                    agent_description=self._agent_identity["description"],
+                    agent_instructions=self._agent_identity["instructions"],
+                    workspace_path=workspace_path,
+                    workspace_layout=layout,
+                    project_docs=project_docs,
+                    max_iterations=self._max_iterations,
+                    risk_context=risk_context,
+                    code_context=code_context,
+                    strategy_key=self._forced_strategy or None,
+                    has_signal_blocker=bool(self._forced_tools),
+                )
+            else:
+                # Legacy path: standalone / old workflow mode
+                effective_query_type = self._forced_strategy or classification.query_type
+                system = build_system_prompt(
+                    workspace_path,
+                    workspace_layout=layout,
+                    project_docs=project_docs,
+                    max_iterations=self._max_iterations,
+                    query_type=effective_query_type,
+                    risk_context=risk_context,
+                    code_context=code_context,
+                    interactive=self._interactive,
+                    has_signal_blocker=bool(self._forced_tools),
+                )
 
             # Dynamic tool set: forced_tools (from Brain dispatch) > classification > all
             if self._forced_tools:

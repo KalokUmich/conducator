@@ -74,7 +74,7 @@ backend/app/
 │   ├── query_classifier.py  # QueryClassifier — keyword + optional LLM classification
 │   ├── evidence.py          # EvidenceEvaluator — rule-based answer quality check
 │   ├── completeness.py      # CompletenessCheck — verifies answer covers all query aspects
-│   ├── prompts.py           # 3-layer system prompt (Identity + Strategy + Runtime)
+│   ├── prompts.py           # 4-layer prompt architecture (Identity + Tools + Skills + Task)
 │   └── router.py            # POST /api/context/query
 ├── chat/                    # WebSocket chat + persistence
 │   ├── manager.py           # ConnectionManager — WebSocket room management
@@ -134,7 +134,7 @@ config/
 tests/
 ├── conftest.py              # Centralized stubs (cocoindex, litellm, etc.)
 ├── test_code_tools.py       # 98 tests — 24 tools + dispatcher + multi-language
-├── test_agent_loop.py       # 47 tests — agent loop + 3-layer prompt + completeness
+├── test_agent_loop.py       # 47 tests — agent loop + 4-layer prompt + completeness
 ├── test_query_classifier.py # 26 tests
 ├── test_compressed_tools.py # 24 tests
 ├── test_budget_controller.py # 20 tests
@@ -217,11 +217,18 @@ It understands queries, dispatches specialist agents, evaluates findings, and sy
 Query → Brain (Sonnet, meta-tools: dispatch_agent, dispatch_swarm, ask_user)
   → Brain decides: SIMPLE (1 agent) | COMPLEX (handoff) | SWARM (parallel preset)
   → dispatch_agent → AgentLoopService (Haiku, code tools, isolated context)
+    → 4-layer prompt: L1 system (agent identity) + L2 tools + L3 skills (workspace) + L4 query
     → Tool execution (up to 20 iter / 420K tokens)
-    → Evidence check + completeness check (internal retry)
+    → Evidence check (internal retry)
     → Returns condensed AgentFindings to Brain
   → Brain synthesizes final answer with file:line evidence
 ```
+
+**Sub-agent prompt assembly (4-layer):**
+- **Layer 1 (system prompt)**: Built per-agent from `.md` description + instructions — defines who this agent is
+- **Layer 2 (tools)**: `brain.yaml` core_tools ∪ agent `.md` tools ∪ signal_blocker
+- **Layer 3 (skills)**: Workspace layout, project docs, investigation patterns, risk signals, budget — shared across agents
+- **Layer 4 (user message)**: The query from Brain + optional code_context — no role injection
 
 **Three dispatch modes:**
 - **SIMPLE** (~80%): one agent, trust result, done
@@ -229,9 +236,9 @@ Query → Brain (Sonnet, meta-tools: dispatch_agent, dispatch_swarm, ask_user)
 - **SWARM** (~5%): `dispatch_swarm("pr_review")` or `dispatch_swarm("business_flow")` — predefined parallel presets
 
 **Configuration:**
-- `config/brain.yaml` — Brain limits (iterations, budget, concurrency, timeout)
-- `config/agents/*.md` — Agent templates (name, description, model, tools, limits + instructions)
-- `config/swarms/*.yaml` — Swarm presets (agent group + parallel/sequential mode)
+- `config/brain.yaml` — Brain limits (iterations, budget, concurrency, timeout) + core_tools
+- `config/agents/*.md` — Agent definitions (name, description, model, tools, limits + identity instructions)
+- `config/swarms/*.yaml` — Swarm presets (agent group + parallel/sequential mode + synthesis_guide)
 
 **Interactive AI:** Brain can `ask_user` for clarification when queries have multiple valid directions. Q&A answers are cached in session and injected into Brain's prompt for reuse across sub-agents.
 
@@ -403,24 +410,40 @@ eval/
 
 When creating or editing agent definitions (`config/agents/*.md`), system prompts (`prompts.py`), or workflow configs, follow these principles. Sources: [Anthropic Prompt Engineering](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/claude-4-best-practices), [Context Engineering for Agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents). We also maintain a local copy of [prompts.chat](https://github.com/f/prompts.chat) (1500+ prompts) at `config/prompt-library/` — primarily used as **example references** when designing new agent roles, not as direct templates.
 
+### 4-Layer Prompt Architecture (mandatory)
+
+Every agent prompt — Brain or sub-agent — MUST follow this 4-layer structure. Each layer has a distinct purpose and MUST NOT bleed into another.
+
+| Layer | Purpose | Where it lives | What goes here |
+|-------|---------|----------------|----------------|
+| **1. System Prompt** | Who the agent is, what it cares about, how it behaves | `system` parameter in LLM call | Agent identity, perspective, behavioral rules, answer format. **Each sub-agent gets its own system prompt** — no shared "generic agent" identity. Built from agent `.md` description + instructions. |
+| **2. Tools** | What the agent can do and when to use each tool | `tools` parameter in LLM call | Tool definitions with clear descriptions. Treat tool descriptions as prompts — they guide behavior. `brain.yaml` core_tools + agent-specific tools from `.md` frontmatter. |
+| **3. Skills & Guidelines** | Project-specific knowledge and reusable patterns | Appended to system prompt, clearly separated | Workspace layout, project docs (README/CLAUDE.md), investigation patterns (domain models first, scope searches, etc.), risk signals, budget. Shared across agents — same project context for all. |
+| **4. User Messages** | The actual task plus focused context | `messages` parameter in LLM call | The query from Brain, plus any code_context snippet. Keep it specific and scoped to what the agent needs right now. **Never inject agent identity or role into user messages.** |
+
+**Key rules:**
+- Agent identity (Layer 1) MUST be in the system prompt, never in the user message. The old pattern of appending `## Your Role` to the query violates this — the agent's role defines how it processes ALL messages, not just one.
+- Layer 3 (Skills & Guidelines) is shared context, not identity. Two agents in the same workspace see the same project docs and investigation patterns, but have different system prompts.
+- Layer 2 (Tools) is curated per agent. An implementation tracer gets `get_callers` + `trace_variable`; a usage tracer gets `find_tests` + `test_outline`. The tool set IS part of the agent's capabilities.
+
 ### Anthropic Core Principles
 
 1. **Right Altitude** — Not too vague ("investigate the code"), not too prescriptive ("call get_callers on the gate method"). Target: "Trace the complete lifecycle from trigger to final outcome."
 2. **Examples over rule lists** — 3-5 diverse examples teach behavior better than a laundry list of edge-case bullets. Wrap in `<example>` tags.
 3. **Explain why, not just what** — Claude generalizes from motivation. "Output will be read by TTS, so avoid ellipses" beats "never use ellipses."
 4. **Positive framing** — Say what to do, not what not to do.
-5. **Context over instructions** — Provide workspace layout, project docs, detected project roots. Let the model decide the investigation path.
+5. **Context over instructions** — Provide workspace layout, project docs, detected project roots (Layer 3). Let the model decide the investigation path.
 6. **Dial back aggressive language** — "Use this tool when..." not "CRITICAL: You MUST use this tool." Newer models overtrigger on forceful language.
-7. **Minimal tool guidance** — If a human can't definitively say which tool to use, don't prescribe it.
+7. **Minimal tool guidance** — If a human can't definitively say which tool to use, don't prescribe it. Let tool descriptions (Layer 2) guide the model.
 
 ### Multi-Agent Workflow Rules
 
-8. **Role specialization** — Each workflow agent has a distinct perspective. NEVER add shared investigation strategies to `explorer_base.md` — this destroys role separation (proven by eval: 60% → 25% regression).
-9. **Strategy = output format only** — Layer 2 strategies are for structured output templates (code_review). Don't inject investigation procedures for open-ended queries.
+8. **Role specialization** — Each agent has a distinct identity (Layer 1 system prompt). Shared investigation patterns belong in Layer 3, not Layer 1. Never add shared strategies to individual agent identities — this destroys role separation (proven by eval: 60% → 25% regression).
+9. **Structured output via strategy** — Output format templates (e.g. code_review) are injected as a Layer 3 skill when the agent's frontmatter sets `strategy: code_review`. Don't inject investigation procedures for open-ended queries.
 
 ### Agent `.md` File Design (informed by prompts.chat patterns)
 
-10. **One clear role sentence** — Open with what the agent IS and what it traces. prompts.chat's "I want you to act as..." pattern works because it's unambiguous. Our equivalent: "You are investigating from the [perspective] side. Your goal is to trace [scope]."
+10. **One clear role sentence** — Open with what the agent IS and what it traces. prompts.chat's "I want you to act as..." pattern works because it's unambiguous. Our equivalent: "You are investigating from the [perspective] side. Your goal is to trace [scope]." This becomes the core of the agent's Layer 1 system prompt.
 11. **Goal, not procedure** — Define WHAT to find (domain models, service implementations, completion effects), not HOW to find it (don't say "first grep, then read_file, then get_callers").
 12. **Short** — Agent instructions should be 50-150 words. prompts.chat averages 80 words. If you need more, you're probably being too prescriptive.
 13. **Consult the prompt library** — Before writing a new agent role, search `config/prompt-library/prompts.csv` for similar roles. Study how they define constraints and scope. Use `for_devs=TRUE` filter for developer-focused prompts.
