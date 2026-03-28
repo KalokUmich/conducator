@@ -2,6 +2,7 @@
 name: explore_root_cause
 description: "Builds evidence chain from symptom to root cause for bugs, errors, and unexpected behavior"
 model: explorer
+skill: root_cause
 tools: [find_references, get_callers, get_callees, trace_variable, git_log, git_diff, git_blame, git_show, find_tests, detect_patterns]
 limits:
   max_iterations: 20

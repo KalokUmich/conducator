@@ -2,6 +2,8 @@
 name: explore_usage
 description: "Traces user-facing flows, API contracts, and test expectations from the consumer perspective"
 model: explorer
+skill: business_flow
+focus: "Focus on the user/consumer perspective: find domain model classes that define user-visible steps (Request/DTO with boolean checklist fields, composite gates like isFinished/isComplete), test files that document the expected flow, and API contracts (controllers, request/response schemas). Your counterpart is investigating service implementation — do NOT read service *Impl classes."
 tools: [find_tests, test_outline, list_files, find_references, get_dependencies]
 limits:
   max_iterations: 20

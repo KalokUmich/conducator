@@ -2,6 +2,7 @@
 name: explore_data_lineage
 description: "Maps data flow from source to sink, including every transformation along the way"
 model: explorer
+skill: data_lineage
 tools: [trace_variable, find_references, get_callees, get_callers, get_dependencies, ast_search]
 limits:
   max_iterations: 20

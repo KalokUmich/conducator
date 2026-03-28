@@ -2,6 +2,7 @@
 name: code_explanation
 description: "Explains code purpose, mechanism, and design decisions with precision and context"
 model: explorer
+skill: code_explanation
 tools: [file_outline, module_summary, find_references, get_callers, get_callees, get_dependencies, trace_variable]
 limits:
   max_iterations: 20

@@ -2,6 +2,7 @@
 name: explore_entry_point
 description: "Finds exact entry points (file, function, line number) for endpoints, handlers, and features"
 model: explorer
+skill: entry_point
 tools: [find_references, get_callees, list_files]
 limits:
   max_iterations: 20

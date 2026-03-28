@@ -2,6 +2,7 @@
 name: explore_impact
 description: "Assesses blast radius of a code change — what breaks, what changes behavior, transitive dependents"
 model: explorer
+skill: impact
 tools: [find_references, get_dependents, get_dependencies, find_tests, test_outline, get_callers, detect_patterns]
 limits:
   max_iterations: 20

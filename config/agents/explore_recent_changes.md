@@ -2,6 +2,7 @@
 name: explore_recent_changes
 description: "Investigates git history — relevant commits, authors, diffs, and modification context"
 model: explorer
+skill: recent_changes
 tools: [git_log, git_diff, git_show, git_blame, find_references, list_files]
 limits:
   max_iterations: 20

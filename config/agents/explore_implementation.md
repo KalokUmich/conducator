@@ -2,6 +2,8 @@
 name: explore_implementation
 description: "Traces complete lifecycle from trigger through domain models, services, to final outcome"
 model: explorer
+skill: business_flow
+focus: "Focus on backend implementation: find domain model classes (Request/DTO/Record with boolean flags, enums for state machines), then trace through service *Impl classes, callback handlers, and async jobs. Your counterpart is investigating tests and API contracts — do NOT spend time on tests."
 tools: [module_summary, get_callees, get_callers, trace_variable, get_dependencies, find_references, detect_patterns, list_files]
 limits:
   max_iterations: 20

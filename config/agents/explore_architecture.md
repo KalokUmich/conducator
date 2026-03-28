@@ -2,6 +2,7 @@
 name: explore_architecture
 description: "Maps module structure, responsibilities, and dependency relationships"
 model: explorer
+skill: architecture
 tools: [module_summary, list_files, get_dependencies, get_dependents, detect_patterns]
 limits:
   max_iterations: 20
