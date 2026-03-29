@@ -22,8 +22,22 @@ from typing import Any, Dict, List, Optional
 
 from app.code_tools.executor import ToolExecutor
 from app.code_tools.schemas import ToolResult
+from .config import BrainExecutorConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+_SUMMARY_TRUNCATE_LEN = 120    # max chars per tool-call summary in condense_result
+_MAX_CONTEXT_CHUNKS = 10       # cap on context chunks returned to Brain (prevents bloat)
+_MAX_TOOLS_SUMMARY = 15        # cap on tool-call summary lines returned to Brain
+_MAX_BRAIN_RESERVE = 100_000   # upper bound on tokens Brain reserves for its own calls
+_MIN_AGENT_BUDGET = 50_000     # floor budget allocated to any sub-agent
+_MAX_AGENT_BUDGET = 500_000    # ceiling budget allocated to any sub-agent
+_DEFAULT_AGENT_BUDGET = 100_000  # minimum guaranteed budget even when pool is generous
 
 
 # ---------------------------------------------------------------------------
@@ -55,8 +69,18 @@ def condense_result(result) -> Dict[str, Any]:
 
     Extracts key information while discarding full tool outputs and
     intermediate reasoning that would pollute Brain's context.
+
+    Args:
+        result: An AgentResult (or duck-typed equivalent) with ``answer``,
+            ``thinking_steps``, ``context_chunks``, ``tool_calls_made``,
+            ``iterations``, ``duration_ms``, and ``error`` attributes.
+
+    Returns:
+        A dict with keys: answer, context_chunks, files_accessed,
+        tools_summary, gaps_identified, confidence, iterations,
+        tool_calls_made, duration_ms, error.
     """
-    from .service import AgentResult
+    from .service import AgentResult  # lazy: avoids circular import (brain ↔ service)
 
     # Build tools summary from thinking steps
     tools_summary = []
@@ -76,7 +100,7 @@ def condense_result(result) -> Dict[str, Any]:
 
             if kind == "tool_result" and tool:
                 # Truncate long summaries
-                short = summary[:120] + "..." if len(summary) > 120 else summary
+                short = summary[:_SUMMARY_TRUNCATE_LEN] + "..." if len(summary) > _SUMMARY_TRUNCATE_LEN else summary
                 tools_summary.append(f"{tool}: {short}")
 
     # Extract files from context chunks
@@ -111,9 +135,9 @@ def condense_result(result) -> Dict[str, Any]:
 
     return {
         "answer": answer,
-        "context_chunks": chunks_data[:10],  # cap to prevent context bloat
+        "context_chunks": chunks_data[:_MAX_CONTEXT_CHUNKS],  # cap to prevent context bloat
         "files_accessed": sorted(files_accessed),
-        "tools_summary": tools_summary[:15],  # cap
+        "tools_summary": tools_summary[:_MAX_TOOLS_SUMMARY],  # cap
         "gaps_identified": gaps,
         "confidence": confidence,
         "iterations": result.iterations,
@@ -137,7 +161,7 @@ class BrainBudgetManager:
 
     def __init__(self, total_tokens: int, brain_reserve_ratio: float = 0.15):
         self.total = total_tokens
-        self.brain_reserve = min(100_000, int(total_tokens * brain_reserve_ratio))
+        self.brain_reserve = min(_MAX_BRAIN_RESERVE, int(total_tokens * brain_reserve_ratio))
         self.used: Dict[str, int] = {}  # agent_name → tokens consumed
         self._lock = asyncio.Lock()
 
@@ -146,11 +170,22 @@ class BrainBudgetManager:
         return max(0, self.total - sum(self.used.values()) - self.brain_reserve)
 
     async def allocate(self, agent_name: str, weight: float = 1.0) -> int:
-        """Allocate tokens for a sub-agent. Returns allocated amount."""
+        """Allocate tokens for a sub-agent.
+
+        Guarantees at least 50 000 tokens even when the pool is nearly
+        exhausted, to prevent agents from starting with too small a budget.
+
+        Args:
+            agent_name: Name of the sub-agent requesting tokens (used for logging).
+            weight: Relative budget multiplier (e.g. 1.5 for a heavyweight agent).
+
+        Returns:
+            Number of input tokens allocated to the agent.
+        """
         async with self._lock:
             available = self.remaining
-            if available < 50_000:
-                allocated = 50_000
+            if available < _MIN_AGENT_BUDGET:
+                allocated = _MIN_AGENT_BUDGET
                 logger.warning(
                     "Budget low (%d remaining), allocating minimum %d to %s",
                     available, allocated, agent_name,
@@ -158,8 +193,8 @@ class BrainBudgetManager:
             else:
                 # Give sub-agents enough budget to work properly.
                 # Old system: ~460K per agent. Don't starve them.
-                allocated = min(int(available * 0.6 * weight), 500_000)
-                allocated = max(allocated, 100_000)
+                allocated = min(int(available * 0.6 * weight), _MAX_AGENT_BUDGET)
+                allocated = max(allocated, _DEFAULT_AGENT_BUDGET)
             logger.info(
                 "Budget allocated %d tokens to %s (remaining: %d)",
                 allocated, agent_name, available - allocated,
@@ -167,7 +202,15 @@ class BrainBudgetManager:
             return allocated
 
     async def report(self, agent_name: str, tokens_used: int) -> None:
-        """Report actual token usage after a sub-agent completes."""
+        """Record actual token usage after a sub-agent completes.
+
+        Cumulative per-agent — calling this multiple times for the same
+        agent name adds to the previously reported total.
+
+        Args:
+            agent_name: Name of the sub-agent that completed.
+            tokens_used: Number of input tokens consumed by that run.
+        """
         async with self._lock:
             self.used[agent_name] = self.used.get(agent_name, 0) + tokens_used
 
@@ -190,33 +233,50 @@ class AgentToolExecutor(ToolExecutor):
         agent_registry: Dict[str, Any],       # name → AgentConfig
         swarm_registry: Dict[str, Any],        # name → SwarmConfig
         agent_provider,                        # AIProvider for sub-agents
-        workspace_path: str,
+        config: Optional[BrainExecutorConfig] = None,
         brain_config: Optional[Any] = None,    # BrainConfig
         trace_writer=None,
         event_sink: Optional[asyncio.Queue] = None,
+        budget_manager: Optional[BrainBudgetManager] = None,
+        qa_cache: Optional[Dict[str, str]] = None,
+        llm_semaphore: Optional[asyncio.Semaphore] = None,
+        # Legacy individual params — kept for backward compatibility.
+        # When ``config`` is provided these are ignored.
+        workspace_path: str = "",
         current_depth: int = 0,
         max_depth: int = 2,
         max_concurrent: int = 3,
         sub_agent_timeout: float = 300.0,
-        budget_manager: Optional[BrainBudgetManager] = None,
-        qa_cache: Optional[Dict[str, str]] = None,
-        llm_semaphore: Optional[asyncio.Semaphore] = None,
     ):
         self._inner = inner_executor
         self._agent_registry = agent_registry
         self._swarm_registry = swarm_registry
         self._agent_provider = agent_provider
-        self._workspace_path = workspace_path
         self._brain_config = brain_config
         self._trace_writer = trace_writer
         self._event_sink = event_sink
-        self._current_depth = current_depth
-        self._max_depth = max_depth
-        self._max_concurrent = max_concurrent
-        self._sub_agent_timeout = sub_agent_timeout
         self._budget_manager = budget_manager
         self._qa_cache = qa_cache or {}
         self._llm_semaphore = llm_semaphore
+
+        # Build config from individual params when not supplied directly
+        if config is None:
+            config = BrainExecutorConfig(
+                workspace_path=workspace_path,
+                current_depth=current_depth,
+                max_depth=max_depth,
+                max_concurrent=max_concurrent,
+                sub_agent_timeout=sub_agent_timeout,
+            )
+        self._executor_config = config
+
+        # Convenience accessors (read from config)
+        self._workspace_path = config.workspace_path
+        self._current_depth = config.current_depth
+        self._max_depth = config.max_depth
+        self._max_concurrent = config.max_concurrent
+        self._sub_agent_timeout = config.sub_agent_timeout
+
         self._code_context: Optional[Dict[str, Any]] = None
 
     async def execute(self, tool_name: str, params: Dict[str, Any]) -> ToolResult:
@@ -310,7 +370,7 @@ class AgentToolExecutor(ToolExecutor):
             }))
 
         # Allocate budget — respect agent's own budget_tokens as cap
-        from .budget import BudgetConfig
+        from .budget import BudgetConfig  # lazy: avoids circular import (brain ↔ budget)
         if self._budget_manager:
             pool_tokens = await self._budget_manager.allocate(agent_name, weight)
             agent_cap = agent_config.limits.budget_tokens
@@ -324,13 +384,15 @@ class AgentToolExecutor(ToolExecutor):
             agent_registry=self._agent_registry,
             swarm_registry=self._swarm_registry,
             agent_provider=self._agent_provider,
-            workspace_path=self._workspace_path,
+            config=BrainExecutorConfig(
+                workspace_path=self._workspace_path,
+                current_depth=self._current_depth + 1,
+                max_depth=self._max_depth,
+                max_concurrent=self._max_concurrent,
+                sub_agent_timeout=self._sub_agent_timeout,
+            ),
             trace_writer=self._trace_writer,
             event_sink=self._event_sink,
-            current_depth=self._current_depth + 1,
-            max_depth=self._max_depth,
-            max_concurrent=self._max_concurrent,
-            sub_agent_timeout=self._sub_agent_timeout,
             budget_manager=self._budget_manager,
             qa_cache=self._qa_cache,
         )
@@ -348,35 +410,34 @@ class AgentToolExecutor(ToolExecutor):
         agent_tool_names.append("signal_blocker")
 
         # Build and run sub-agent (4-layer prompt architecture)
-        from .service import AgentLoopService
+        from .service import AgentLoopService  # lazy: avoids circular import (brain ↔ service)
+        from .config import AgentLoopConfig
         svc = AgentLoopService(
             provider=self._agent_provider,
+            config=AgentLoopConfig(
+                max_iterations=agent_config.limits.max_iterations,
+                max_evidence_retries=1,
+                budget_config=BudgetConfig(max_input_tokens=budget_tokens),
+                is_sub_agent=True,
+                perspective=agent_config.instructions,
+                forced_tools=agent_tool_names,
+                agent_identity={
+                    "name": agent_config.name,
+                    "description": getattr(agent_config, "description", "") or "",
+                    "instructions": agent_config.instructions,
+                    "skill": getattr(agent_config, "skill", "") or "",
+                },
+                forced_strategy=agent_config.strategy or "",
+                forced_skill=agent_config.skill or "",
+            ),
             tool_executor=sub_executor,
-            max_iterations=agent_config.limits.max_iterations,
-            budget_config=BudgetConfig(max_input_tokens=budget_tokens),
             trace_writer=self._trace_writer,
-            max_evidence_retries=1,
-            _is_sub_agent=True,
-            perspective=agent_config.instructions,
-            forced_tools=agent_tool_names,
             llm_semaphore=self._llm_semaphore,
-            agent_identity={
-                "name": agent_config.name,
-                "description": getattr(agent_config, "description", "") or "",
-                "instructions": agent_config.instructions,
-                "skill": getattr(agent_config, "skill", "") or "",
-            },
         )
         # Per-agent overrides from template
         if agent_config.limits.temperature is not None:
             svc._temperature = agent_config.limits.temperature
         svc._quality_config = agent_config.quality
-        # Layer 2 strategy override (e.g., PR review agents get "code_review" strategy)
-        if agent_config.strategy:
-            svc._forced_strategy = agent_config.strategy
-        # Layer 3 investigation skill (e.g., "business_flow", "root_cause")
-        if agent_config.skill:
-            svc._forced_skill = agent_config.skill
 
         # 4-layer: query stays clean — agent identity is in system prompt (Layer 1),
         # not in the user message (Layer 4).
@@ -386,7 +447,7 @@ class AgentToolExecutor(ToolExecutor):
             # Stream events to event_sink for real-time UI updates
             if self._event_sink:
                 result = None
-                from .service import AgentResult
+                from .service import AgentResult  # lazy: avoids circular import (brain ↔ service)
                 agent_result = AgentResult()
                 async for event in svc.run_stream(
                     query=query,

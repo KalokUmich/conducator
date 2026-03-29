@@ -61,6 +61,15 @@ from app.workflow.models import PRBrainConfig
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Tunable parameters are loaded from config/brains/pr_review.yaml via
+# PRBrainConfig.  Only true constants (regex, enum maps) stay here.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+
+
 class WorkflowEvent:
     """Lightweight event container compatible with WorkflowEngine's event queue."""
 
@@ -120,7 +129,16 @@ arbitrator found concrete counter-evidence, take it seriously.
 
 @dataclass
 class ArbitrationVerdict:
-    """Arbitrator's challenge result for one finding."""
+    """Arbitrator's challenge result for one finding.
+
+    Attributes:
+        index: Index into the findings list this verdict applies to.
+        counter_evidence: Reasons the finding might be wrong or overstated.
+        rebuttal_confidence: 0.0 means the finding is solid; 1.0 means it is
+            almost certainly wrong.
+        suggested_severity: Arbitrator's recommended severity after challenge.
+        reason: One-line rationale for the rebuttal assessment.
+    """
     index: int
     counter_evidence: List[str] = field(default_factory=list)
     rebuttal_confidence: float = 0.0    # 0.0 = cannot rebut, 1.0 = finding is wrong
@@ -163,7 +181,22 @@ class PRBrainOrchestrator:
         self._event_sink = event_sink
 
     async def run_stream(self) -> AsyncGenerator[WorkflowEvent, None]:
-        """Execute the full PR review pipeline, yielding events."""
+        """Execute the full PR review pipeline, yielding progress events.
+
+        Phases:
+          1. Parse diff and classify risk (deterministic, no LLM).
+          2. Dispatch review agents in parallel.
+          3. Post-process findings (filter, dedup, rank).
+          4. Arbitration agent challenges each finding.
+          5. Merge recommendation (deterministic).
+          6. Synthesis via the strong model (final judge).
+
+        Yields:
+            WorkflowEvent instances with kinds:
+            ``pr_brain_start``, ``pr_context``, ``agents_dispatching``,
+            ``agents_complete``, ``post_processing``, ``arbitration_complete``,
+            ``done`` (or an early ``done`` on empty diff / oversized PR).
+        """
         start_time = time.monotonic()
 
         logger.info(
@@ -281,7 +314,7 @@ class PRBrainOrchestrator:
             pr_context, risk_profile, findings, verdicts, merge_rec, file_diffs,
         )
 
-        duration_ms = (time.monotonic() - start_time) * 1000
+        duration_ms = (time.monotonic() - start_time) * 1000  # Convert seconds to milliseconds
         logger.info(
             "PR Brain complete: %d findings, rec=%s, %.0fms",
             len(findings), merge_rec, duration_ms,
@@ -315,7 +348,17 @@ class PRBrainOrchestrator:
     ) -> List[str]:
         """Select which review agents to run based on risk profile and PR size.
 
-        Small PRs (<200 lines) skip concurrency/reliability unless risk is HIGH+.
+        Always-run agents (``correctness``, ``test_coverage``) are included
+        regardless of risk.  For small PRs (below ``limits.small_pr_threshold``
+        lines), ``concurrency`` and ``reliability`` are skipped unless their
+        associated risk dimension is HIGH or CRITICAL.
+
+        Args:
+            risk_profile: Classified risk levels across five dimensions.
+            pr_context: Optional PR metadata used to determine PR size.
+
+        Returns:
+            Ordered list of agent names to dispatch.
         """
         agents = []
         risk_triggers = {
@@ -326,7 +369,8 @@ class PRBrainOrchestrator:
             "test_coverage": [],  # always runs
         }
 
-        is_small_pr = pr_context and pr_context.total_changed_lines < 200
+        small_pr_threshold = self._config.limits.small_pr_threshold
+        is_small_pr = pr_context and pr_context.total_changed_lines < small_pr_threshold
 
         for name in self._config.review_agents:
             triggers = risk_triggers.get(name, [])
@@ -365,6 +409,7 @@ class PRBrainOrchestrator:
         """Dispatch review agents in parallel via AgentToolExecutor."""
         from .brain import AgentToolExecutor, BrainBudgetManager
         from .budget import BudgetConfig
+        from .config import BrainExecutorConfig
         from .service import AgentLoopService
         from app.workflow.loader import load_brain_config, load_swarm_registry
 
@@ -375,23 +420,15 @@ class PRBrainOrchestrator:
 
         # Shared semaphore limits concurrent LLM API calls across all
         # parallel agents — prevents Bedrock throttling.
-        llm_semaphore = asyncio.Semaphore(2)
+        llm_semaphore = asyncio.Semaphore(self._config.limits.llm_concurrency_limit)
 
-        # Build executor kwargs (shared across all agents)
-        _executor_kw = dict(
-            inner_executor=self._tool_executor,
-            agent_registry=self._agent_registry,
-            swarm_registry=swarm_registry,
+        # Shared executor config (depth/concurrency/timeout) — provider varies per agent
+        _executor_cfg = BrainExecutorConfig(
             workspace_path=self._workspace_path,
-            brain_config=brain_config,
-            trace_writer=self._trace_writer,
-            event_sink=self._event_sink,
             current_depth=0,
             max_depth=self._config.limits.max_depth,
             max_concurrent=self._config.limits.max_concurrent_agents,
             sub_agent_timeout=self._config.limits.sub_agent_timeout,
-            budget_manager=budget_mgr,
-            llm_semaphore=llm_semaphore,
         )
 
         # Provider map: agents with model="strong" use the strong provider,
@@ -408,7 +445,16 @@ class PRBrainOrchestrator:
             async with semaphore:
                 provider = _get_provider_for(agent_name)
                 executor = AgentToolExecutor(
-                    agent_provider=provider, **_executor_kw,
+                    inner_executor=self._tool_executor,
+                    agent_registry=self._agent_registry,
+                    swarm_registry=swarm_registry,
+                    agent_provider=provider,
+                    config=_executor_cfg,
+                    brain_config=brain_config,
+                    trace_writer=self._trace_writer,
+                    event_sink=self._event_sink,
+                    budget_manager=budget_mgr,
+                    llm_semaphore=llm_semaphore,
                 )
                 query = self._build_agent_query(
                     agent_name, pr_context, risk_profile, file_diffs, impact_context,
@@ -455,9 +501,20 @@ class PRBrainOrchestrator:
         """Build the Layer 4 user message for a review sub-agent.
 
         Contains ONLY task-specific data: PR context, diffs, impact graph,
-        per-agent focus directive and strategy hint.
-        Identity (Layer 1) and provability framework (Layer 3) are handled
-        by the agent's .md file and the code_review_pr skill.
+        per-agent focus directive and strategy hint.  Agent identity (Layer 1)
+        and the provability framework (Layer 3) are handled by the agent's
+        ``.md`` file and the ``code_review_pr`` skill.
+
+        Args:
+            agent_name: Which review agent this message is for (determines
+                scoped file list and focus/strategy text).
+            pr_context: Parsed PR metadata (files, lines changed, diff spec).
+            risk_profile: Classified risk levels used in the prompt summary.
+            file_diffs: Pre-fetched per-file diff text (path → diff).
+            impact_context: Pre-computed dependency/caller graph for changed files.
+
+        Returns:
+            Formatted user-message string ready for injection as Layer 4.
         """
         # Scope files per agent type
         files = pr_context.business_logic_files()
@@ -530,7 +587,25 @@ risk: {risk_summary}
         agent_results: List[ToolResult],
         pr_context: PRContext,
     ) -> List[ReviewFinding]:
-        """Deterministic post-processing pipeline."""
+        """Run the deterministic post-processing pipeline on raw agent findings.
+
+        Steps (in order):
+          1. Parse JSON findings from each agent's answer text.
+          2. Apply evidence gate (downgrade under-evidenced criticals).
+          3. Cap each agent at its top 3 findings by confidence.
+          4. Post-filter (confidence floor + test-coverage severity cap).
+          5. Drop test-file-only test_coverage findings when source findings exist.
+          6. Dedup (merge overlapping findings from multiple agents).
+          7. Score and rank by impact.
+          8. Cap at ``max_findings`` from the pipeline config.
+
+        Args:
+            agent_results: Raw ToolResult list from dispatched review agents.
+            pr_context: PR metadata used during scoring and ranking.
+
+        Returns:
+            Ranked list of de-duplicated ReviewFinding objects.
+        """
         all_findings: List[ReviewFinding] = []
 
         for result in agent_results:
@@ -550,14 +625,14 @@ risk: {risk_summary}
             if findings:
                 findings = evidence_gate(findings, tool_calls_made)
 
-            # Per-agent cap: keep top 3 by confidence to reduce false positives
-            if len(findings) > 3:
+            # Per-agent cap: keep top findings by confidence to reduce false positives
+            if len(findings) > self._config.post_processing.max_findings_per_agent:
                 findings.sort(key=lambda f: f.confidence, reverse=True)
                 logger.info(
-                    "Agent '%s' produced %d findings, capping to top 3",
-                    agent_name, len(findings),
+                    "Agent '%s' produced %d findings, capping to top %d",
+                    agent_name, len(findings), self._config.post_processing.max_findings_per_agent,
                 )
-                findings = findings[:3]
+                findings = findings[:self._config.post_processing.max_findings_per_agent]
 
             all_findings.extend(findings)
 
@@ -612,14 +687,23 @@ risk: {risk_summary}
         findings: List[ReviewFinding],
         file_diffs: Dict[str, str],
     ) -> List[ArbitrationVerdict]:
-        """Dispatch the arbitration agent to challenge findings.
+        """Dispatch the arbitration agent to challenge each finding.
 
-        Returns a list of ArbitrationVerdict — one per finding. Does NOT
-        modify findings. The synthesis LLM receives both the sub-agent's
-        evidence (pro) and the arbitrator's counter-evidence (con).
+        The arbitrator acts as a defense attorney: it tries to REBUT each
+        finding and returns counter-evidence plus a suggested severity.  It
+        does NOT drop or modify findings — that is the synthesis LLM's job.
 
-        Fast-path: if no critical findings, use a lightweight single LLM
-        call instead of the full tool-based arbitrator agent.
+        Fast-path: if there are no Critical findings, a single lightweight
+        LLM call is used instead of the full tool-enabled arbitrator agent.
+
+        Args:
+            findings: Post-processed list of ReviewFinding to challenge.
+            file_diffs: Pre-fetched per-file diffs for the arbitrator context.
+
+        Returns:
+            One ArbitrationVerdict per finding, in the same order as
+            ``findings``.  Missing verdicts are filled with defaults
+            (rebuttal_confidence=0.0, reason="not challenged").
         """
         has_critical = any(f.severity == Severity.CRITICAL for f in findings)
 
@@ -628,23 +712,26 @@ risk: {risk_summary}
             return await self._arbitrate_lightweight(findings, file_diffs)
 
         from .brain import AgentToolExecutor, BrainBudgetManager
+        from .config import BrainExecutorConfig
         from app.workflow.loader import load_brain_config, load_swarm_registry
 
         brain_config = load_brain_config()
         swarm_registry = load_swarm_registry()
-        budget_mgr = BrainBudgetManager(200_000)
+        budget_mgr = BrainBudgetManager(self._config.arbitration.budget_tokens)
 
         executor = AgentToolExecutor(
             inner_executor=self._tool_executor,
             agent_registry=self._agent_registry,
             swarm_registry=swarm_registry,
             agent_provider=self._provider,
-            workspace_path=self._workspace_path,
+            config=BrainExecutorConfig(
+                workspace_path=self._workspace_path,
+                current_depth=0,
+                max_depth=2,
+            ),
             brain_config=brain_config,
             trace_writer=self._trace_writer,
             event_sink=self._event_sink,
-            current_depth=0,
-            max_depth=2,
             budget_manager=budget_mgr,
         )
 
@@ -696,7 +783,7 @@ risk: {risk_summary}
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 None,
-                lambda: self._provider.call_model(prompt=prompt, max_tokens=2048),
+                lambda: self._provider.call_model(prompt=prompt, max_tokens=self._config.arbitration.max_tokens),
             )
             return self._parse_verdicts(findings, response)
         except Exception as exc:
@@ -815,14 +902,25 @@ risk: {risk_summary}
         merge_rec: str,
         file_diffs: Dict[str, str],
     ) -> str:
-        """Call the strong model to produce a polished synthesis.
+        """Call the strong model to produce the final polished review.
 
-        Brain is the final judge. It receives:
-        - Sub-agent findings (pro case: evidence FOR the issue)
-        - Arbitrator verdicts (con case: counter-evidence AGAINST)
-        - Arbitrator's suggested severity adjustment
+        Brain acts as the final judge.  It receives sub-agent findings
+        (prosecution — evidence FOR each issue) alongside the arbitrator's
+        counter-evidence (defense — evidence AGAINST), then decides final
+        severity and whether to include each finding.
 
-        Brain decides the final severity and whether to include each finding.
+        Args:
+            pr_context: Parsed PR metadata (files, lines, diff spec).
+            risk_profile: Risk classification for the five review dimensions.
+            findings: Post-processed and ranked findings from review agents.
+            verdicts: Arbitration verdicts challenging each finding.
+            merge_rec: Deterministic merge recommendation (approve /
+                approve_with_followups / request_changes).
+            file_diffs: Pre-fetched per-file diffs injected as context.
+
+        Returns:
+            Markdown-formatted review string, or an empty string if the LLM
+            call fails (caller falls back to ``build_summary``).
         """
         # Build verdict lookup
         verdict_map = {v.index: v for v in verdicts}
@@ -863,10 +961,9 @@ risk: {risk_summary}
 
         diff_snippets = []
         total_diff_chars = 0
-        _MAX_SYNTHESIS_DIFF = 30_000
         for f in findings:
-            if f.file and f.file in file_diffs and total_diff_chars < _MAX_SYNTHESIS_DIFF:
-                snippet = file_diffs[f.file][:4000]
+            if f.file and f.file in file_diffs and total_diff_chars < self._config.synthesis.max_diff_chars:
+                snippet = file_diffs[f.file][:self._config.synthesis.max_diff_snippet_chars]
                 diff_snippets.append(f"### {f.file}\n```diff\n{snippet}\n```")
                 total_diff_chars += len(snippet)
 
@@ -903,7 +1000,7 @@ preliminary_recommendation: {merge_rec}
                 None,
                 lambda: self._provider.call_model(
                     prompt=prompt,
-                    max_tokens=4096,
+                    max_tokens=self._config.synthesis.max_tokens,
                     system=_SYNTHESIS_SYSTEM_PROMPT,
                 ),
             )

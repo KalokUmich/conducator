@@ -249,19 +249,22 @@ class WorkflowEngine:
         workspace_path = context.get("workspace_path", "")
         inner_executor = self._tool_executor or LocalToolExecutor(workspace_path)
 
+        from app.agent_loop.config import BrainExecutorConfig
         brain_executor = AgentToolExecutor(
             inner_executor=inner_executor,
             agent_registry=agent_registry,
             swarm_registry=swarm_registry,
             agent_provider=self._explorer_provider,
-            workspace_path=workspace_path,
+            config=BrainExecutorConfig(
+                workspace_path=workspace_path,
+                current_depth=0,
+                max_depth=brain_config.limits.max_depth,
+                max_concurrent=brain_config.limits.max_concurrent_agents,
+                sub_agent_timeout=brain_config.limits.sub_agent_timeout,
+            ),
             brain_config=brain_config,
             trace_writer=self._trace_writer,
             event_sink=self._event_queue,
-            current_depth=0,
-            max_depth=brain_config.limits.max_depth,
-            max_concurrent=brain_config.limits.max_concurrent_agents,
-            sub_agent_timeout=brain_config.limits.sub_agent_timeout,
             budget_manager=budget_mgr,
             qa_cache=qa_cache,
         )
@@ -273,15 +276,18 @@ class WorkflowEngine:
         brain_executor._code_context = code_context
 
         # Create Brain agent loop
+        from app.agent_loop.config import AgentLoopConfig
         brain = AgentLoopService(
             provider=self._provider,  # strong model for Brain
+            config=AgentLoopConfig(
+                max_iterations=brain_config.limits.max_iterations,
+                budget_config=BudgetConfig(max_input_tokens=brain_config.limits.budget_tokens),
+                interactive=True,
+                is_brain=True,
+                brain_system_prompt=brain_prompt,
+            ),
             tool_executor=brain_executor,
-            max_iterations=brain_config.limits.max_iterations,
-            budget_config=BudgetConfig(max_input_tokens=brain_config.limits.budget_tokens),
             trace_writer=self._trace_writer,
-            interactive=True,
-            _is_brain=True,
-            brain_system_prompt=brain_prompt,
         )
 
         # Run Brain in background task, drain events from queue
@@ -625,24 +631,27 @@ class WorkflowEngine:
         # workflow-driven classification. So we only set _is_sub_agent
         # when there's NO workflow route to use.
         use_workflow_classification = bool(route_name)
+        from app.agent_loop.config import AgentLoopConfig
         svc = AgentLoopService(
             provider=provider,
-            max_iterations=max_iterations,
-            budget_config=budget_config,
+            config=AgentLoopConfig(
+                max_iterations=max_iterations,
+                budget_config=budget_config,
+                is_sub_agent=not use_workflow_classification,
+                workflow_config=agent if use_workflow_classification else None,
+                workflow_route_name=route_name,
+                perspective=agent.instructions,     # agent role for scoped verification
+                interactive=context.get("_interactive", False),
+                agent_identity={
+                    "name": agent.name,
+                    "description": getattr(agent, "description", "") or "",
+                    "instructions": agent.instructions or "",
+                },
+            ),
             trace_writer=self._trace_writer,
-            _is_sub_agent=not use_workflow_classification,
             llm_semaphore=context.get("_llm_semaphore"),
             tool_executor=self._tool_executor,
-            workflow_config=agent if use_workflow_classification else None,
-            workflow_route_name=route_name,
             verifier_provider=self._provider,  # strong model for completeness check
-            perspective=agent.instructions,     # agent role for scoped verification
-            interactive=context.get("_interactive", False),
-            agent_identity={
-                "name": agent.name,
-                "description": getattr(agent, "description", "") or "",
-                "instructions": agent.instructions or "",
-            },
         )
 
         # Stream agent events to UI in real-time (required for ask_user)

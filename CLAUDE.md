@@ -146,21 +146,72 @@ config/
 └── prompt-library/          # prompts.chat CSV (1500+ role prompts, `make update-prompt-library`)
 
 tests/
-├── conftest.py              # Centralized stubs (cocoindex, litellm, etc.)
-├── test_code_tools.py       # 98 tests — 24 tools + dispatcher + multi-language
-├── test_agent_loop.py       # 47 tests — agent loop + 4-layer prompt + completeness
-├── test_query_classifier.py # 26 tests
-├── test_compressed_tools.py # 24 tests
-├── test_budget_controller.py # 20 tests
-├── test_session_trace.py    # 15 tests
-├── test_evidence.py         # 14 tests
-├── test_symbol_role.py      # 24 tests
-├── test_output_policy.py    # 19 tests
-├── test_langextract.py      # 57 tests
-├── test_repo_graph.py       # 72 tests
-├── test_config_new.py       # 27 tests
-├── test_chat_persistence.py # ChatPersistenceService — micro-batch Postgres writes
-└── test_browser_tools.py    # Browser tools (Playwright) — mocked service
+├── conftest.py                     # Centralized stubs + fixtures (cocoindex, litellm, etc.)
+│
+│   # Agent loop & Brain
+├── test_agent_loop.py              # 47 tests — AgentLoopService, 4-layer prompt, evidence check
+├── test_agent_loop_integration.py  # Integration tests — real Bedrock models (@integration marker)
+├── test_brain.py                   # 39 tests — Brain orchestrator, AgentToolExecutor, dispatch modes
+├── test_mock_agent.py              # 26 tests — MockProvider scripted responses + agent harness
+├── test_interactive.py             # 9 tests  — ask_user coordination (register/submit/cleanup)
+├── test_prompt_builder.py          # 64 tests — 4-layer prompt assembly, skill injection, tool hints
+│
+│   # Code review
+├── test_code_review.py             # 67 tests — CodeReviewService legacy pipeline
+│
+│   # Code tools
+├── test_code_tools.py              # 98 tests — 24 tools + dispatcher + multi-language
+├── test_compressed_tools.py        # 24 tests — compressed_view, trace_variable, detect_patterns
+├── test_detect_patterns.py         # 34 tests — detect_patterns tool (pattern extraction)
+│
+│   # Tool parity (Python ↔ TypeScript)
+├── test_tool_parity.py             # 68 tests — get_dependencies/get_dependents/test_outline parity
+├── test_tool_parity_ast.py         # 26 tests — AST tools parity (file_outline, find_symbol, etc.)
+├── test_tool_parity_deep.py        # 34 tests — deep parity (trace_variable, compressed_view, etc.)
+├── test_local_tools_parity.py      # 23 tests — local mode tool contract validation
+│
+│   # AI providers
+├── test_ai_provider.py             # 131 tests — AIProvider ABC, ClaudeDirectProvider, Bedrock, OpenAI
+├── test_bedrock_tool_repair.py     # 64 tests — Bedrock tool call repair + malformed response handling
+├── test_litellm_provider.py        # 42 tests — LiteLLM provider adapter
+│
+│   # Workflow + config
+├── test_config_new.py              # 27 tests — Settings + Secrets YAML loading
+├── test_config_paths.py            # 3 tests  — Path resolution for audit logs
+├── test_style_loader.py            # 22 tests — Agent .md frontmatter + body loader
+│
+│   # Infrastructure
+├── test_budget_controller.py       # 20 tests — BudgetController token accounting
+├── test_session_trace.py           # 15 tests — SessionTrace per-session JSON trace
+├── test_evidence.py                # 14 tests — EvidenceEvaluator rule-based quality check
+├── test_query_classifier.py        # 26 tests — QueryClassifier keyword + LLM classification
+├── test_output_policy.py           # 19 tests — Per-tool truncation policies (budget-adaptive)
+├── test_symbol_role.py             # 24 tests — Symbol role extraction (AST-based)
+├── test_auto_apply_policy.py       # 28 tests — Auto-apply policy enforcement
+│
+│   # Language processing
+├── test_langextract.py             # 57 tests — LangExtract + multi-vendor Bedrock integration
+├── test_repo_graph.py              # 72 tests — AST symbol extraction + dependency graph
+│
+│   # Chat
+├── test_chat.py                    # 29 tests — WebSocket chat, identity, lead transfer
+├── test_chat_persistence.py        # ChatPersistenceService — micro-batch Postgres writes
+│
+│   # Integrations
+├── test_jira_router.py             # 25 tests — Jira OAuth 3LO + REST API router
+├── test_jira_service.py            # 43 tests — JiraOAuthService token lifecycle + API calls
+├── test_auth.py                    # 38 tests — SSO ARN parsing, device auth flow
+├── test_audit.py                   # 11 tests — AuditLogService + changeset hash
+├── test_room_settings.py           # 18 tests — Room settings CRUD
+│
+│   # Git + workspace
+├── test_git_workspace.py           # 75 tests — GitWorkspaceManager, worktree lifecycle
+├── test_workspace_files.py         # 39 tests — workspace file browsing + filtering
+├── test_db.py                      # 5 tests  — SQLAlchemy engine + table creation (Postgres)
+│
+│   # Browser + misc
+├── test_browser_tools.py           # Browser tools (Playwright) — mocked service
+└── test_main.py                    # 1 test   — FastAPI app startup / lifespan smoke test
 ```
 
 ### Extension Structure

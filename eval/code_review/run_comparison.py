@@ -93,6 +93,12 @@ async def run_one_round(mode: str, round_num: int) -> dict:
 
 
 async def main():
+    """Run 3 rounds of Legacy vs Brain eval and print a comparison table.
+
+    Runs all 12 cases in both ``legacy`` (CodeReviewService) and ``brain``
+    (PRBrainOrchestrator) modes for each round, then prints a per-case and
+    aggregate comparison table with dimension-level averages.
+    """
     all_results = {"legacy": [], "brain": []}
 
     for round_num in range(1, ROUNDS + 1):

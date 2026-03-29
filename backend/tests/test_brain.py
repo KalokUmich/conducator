@@ -506,7 +506,7 @@ class TestQueryNotContaminatedByRole:
     async def test_dispatch_passes_agent_identity(
         self, agent_registry, swarm_registry, mock_inner_executor, mock_provider,
     ):
-        """dispatch_agent must pass agent_identity dict to AgentLoopService."""
+        """dispatch_agent must pass agent_identity dict to AgentLoopService via config."""
         captured_kwargs = {}
 
         original_init = __import__("app.agent_loop.service", fromlist=["AgentLoopService"]).AgentLoopService.__init__
@@ -539,8 +539,10 @@ class TestQueryNotContaminatedByRole:
                     "query": "How does auth work?",
                 })
 
-                # Verify agent_identity was passed
-                identity = captured_kwargs.get("agent_identity")
+                # Verify agent_identity was passed via AgentLoopConfig
+                loop_config = captured_kwargs.get("config")
+                assert loop_config is not None, "AgentLoopService must receive an AgentLoopConfig"
+                identity = loop_config.agent_identity
                 assert identity is not None
                 assert identity["name"] == "explore_architecture"
                 assert identity["description"] == "Maps module structure"

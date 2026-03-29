@@ -51,6 +51,11 @@ _GOLD_TRACES_DIR = Path(__file__).resolve().parent / "gold_traces"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the code review eval CLI.
+
+    Returns:
+        Parsed argparse namespace with all eval configuration options.
+    """
     parser = argparse.ArgumentParser(
         description="Run code review eval suite",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -121,7 +126,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def create_provider(provider_name: str, model: str = None):
-    """Create an AIProvider instance based on CLI args."""
+    """Create an AIProvider instance from CLI provider/model arguments.
+
+    Reads credentials from environment variables (ANTHROPIC_API_KEY,
+    AWS_ACCESS_KEY_ID, OPENAI_API_KEY, etc.) and exits with an error
+    message if required credentials are missing.
+
+    Args:
+        provider_name: One of ``"anthropic"``, ``"bedrock"``, or ``"openai"``.
+        model: Optional model ID override; falls back to a sensible default
+            for each provider.
+
+    Returns:
+        A configured AIProvider instance.
+
+    Raises:
+        SystemExit: If required API credentials are not set, or if
+            ``provider_name`` is unrecognised.
+    """
     _backend = str(Path(__file__).resolve().parent.parent / "backend")
     if _backend not in sys.path:
         sys.path.insert(0, _backend)
@@ -164,7 +186,17 @@ def create_provider(provider_name: str, model: str = None):
 
 
 def load_cases(eval_dir: Path, filter_str: str = None) -> list:
-    """Load all case configs from repos.yaml + per-repo cases.yaml."""
+    """Load all case configs from repos.yaml and per-repo cases.yaml files.
+
+    Args:
+        eval_dir: Path to the ``eval/code_review/`` directory.
+        filter_str: Optional substring filter applied to case IDs; only cases
+            whose ID contains this string are returned.
+
+    Returns:
+        List of ``(CaseConfig, source_dir, patch_dir)`` tuples for each
+        matching case across all configured repos.
+    """
     repos_path = eval_dir / "repos.yaml"
     with open(repos_path) as f:
         repos_config = yaml.safe_load(f)
@@ -379,7 +411,16 @@ async def run_single_gold_case(
 # ---------------------------------------------------------------------------
 
 async def run_all(args: argparse.Namespace) -> None:
-    """Main async entry point."""
+    """Run all eval cases and print the final report.
+
+    Dispatches to the appropriate mode (pipeline, brain, or gold-standard)
+    based on CLI args, then builds and prints the eval report.  Saves a
+    baseline file if ``--save-baseline`` is set and exits with a non-zero
+    status code if regressions are detected.
+
+    Args:
+        args: Parsed CLI arguments from ``parse_args()``.
+    """
     eval_dir = Path(__file__).resolve().parent
     cases = load_cases(eval_dir, args.filter)
 

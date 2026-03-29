@@ -147,9 +147,22 @@ async def run_case_brain(
     provider: AIProvider,
     explorer_provider: Optional[AIProvider] = None,
 ) -> RunResult:
-    """Set up workspace, run PR Brain review, and return results.
+    """Set up workspace, run PR Brain review via PRBrainOrchestrator, and return results.
 
-    Uses the new PRBrainOrchestrator instead of CodeReviewService.
+    This is the Brain-pipeline equivalent of ``run_case()``.  It uses
+    ``PRBrainOrchestrator`` instead of ``CodeReviewService`` so that the two
+    pipelines can be compared directly on the same eval cases.
+
+    Args:
+        case: Case configuration with patch path and expected findings.
+        source_dir: Path to the repo source directory.
+        patch_dir: Directory containing patch files.
+        provider: Strong AI provider used for synthesis (Brain's LLM).
+        explorer_provider: Optional lighter model for review sub-agents;
+            falls back to ``provider`` if not supplied.
+
+    Returns:
+        RunResult with the review output or error.
     """
     patch_path = os.path.join(patch_dir, case.patch)
     if not os.path.exists(patch_path):
@@ -236,7 +249,18 @@ async def run_case_brain(
 
 
 def _run_git(cwd: str, *args: str) -> str:
-    """Run a git command in the given directory."""
+    """Run a git command in the given directory.
+
+    Args:
+        cwd: Working directory for the git command.
+        *args: Git sub-command and arguments (e.g. ``"add"``, ``"-A"``).
+
+    Returns:
+        Captured stdout from the git process.
+
+    Raises:
+        RuntimeError: If the git command exits with a non-zero return code.
+    """
     result = subprocess.run(
         ["git"] + list(args),
         cwd=cwd,

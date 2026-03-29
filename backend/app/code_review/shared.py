@@ -32,8 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Minimum confidence to keep a finding (below this = too speculative).
-# Anthropic's code-review plugin uses 80/100; we use 0.75 to match.
-MIN_CONFIDENCE = 0.75
+MIN_CONFIDENCE = 0.75  # aligned with Anthropic's code-review plugin (80/100 ≈ 0.75)
 
 # Matches "diff --git a/path b/path" headers in unified diff output
 DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
@@ -47,6 +46,9 @@ MAX_TOTAL_DIFF_CHARS = 120_000
 CRITICAL_MIN_EVIDENCE = 2
 CRITICAL_REQUIRE_FILE = True
 CRITICAL_REQUIRE_LINE = True
+
+# Max chars of agent answer fed to the repair LLM call (keep the prompt short and cheap).
+_MAX_REPAIR_INPUT_CHARS = 3000
 
 # Regex patterns for JSON extraction (ordered by specificity)
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```")
@@ -175,6 +177,15 @@ def build_impact_context(
 
     Returns a structured text block that can be injected into agent prompts
     so they see cross-file impact without burning tool-call budget.
+
+    Args:
+        workspace_path: Absolute path to the repo root.
+        pr_context: Parsed PR metadata; only business-logic files are queried.
+
+    Returns:
+        Formatted markdown text describing caller (←) and dependency (→)
+        relationships for up to 15 changed business-logic files, or an
+        empty string if no dependency data is available.
     """
     try:
         from app.code_tools.tools import get_dependents, get_dependencies
@@ -228,9 +239,17 @@ def build_impact_context(
 def extract_relevant_diff(full_diff: str, start_line: int, window: int = 80) -> str:
     """Extract the diff hunk(s) most relevant to a finding's line range.
 
-    Instead of blindly truncating at N chars, this finds the hunk containing
-    *start_line* and returns a window around it.  Falls back to the first
-    *window* lines if no matching hunk is found.
+    Instead of blindly truncating at N chars, finds the hunk containing
+    ``start_line`` and returns a window around it.  Falls back to the first
+    ``window`` lines if no matching hunk is found.
+
+    Args:
+        full_diff: Raw unified diff text for a single file.
+        start_line: New-file line number that the finding references.
+        window: Number of diff lines to include around the matching hunk.
+
+    Returns:
+        Relevant diff slice as a string.
     """
     if not full_diff or not start_line:
         lines = full_diff.split("\n")
@@ -267,10 +286,17 @@ def is_multi_source(finding: ReviewFinding) -> bool:
 def compute_budget_multiplier(pr_context: PRContext) -> float:
     """Compute a budget multiplier based on PR size.
 
-    Small PRs (<500 lines): 0.5x budget (quick review)
-    Medium PRs (500-2000 lines): 1.0x budget (standard)
-    Large PRs (2000-5000 lines): 1.5x budget
-    Very large PRs (5000+ lines): 2.0x budget (if model supports it)
+    Tiers:
+      <500 lines: 0.5× (quick review)
+      500-2000 lines: 1.0× (standard)
+      2000-5000 lines: 1.5×
+      5000+ lines: 2.0×
+
+    Args:
+        pr_context: Parsed PR metadata; uses ``total_changed_lines``.
+
+    Returns:
+        A float multiplier to apply to each agent's base token budget.
     """
     lines = pr_context.total_changed_lines
     if lines < 500:
@@ -286,8 +312,14 @@ def compute_budget_multiplier(pr_context: PRContext) -> float:
 def should_reject_pr(pr_context: PRContext) -> Optional[str]:
     """Check if a PR is too large to review meaningfully.
 
-    Returns a rejection message or None if the PR is reviewable.
-    With dynamic budgets, we raise the threshold to 8000 lines.
+    With dynamic budgets the threshold is raised to 8 000 lines.
+
+    Args:
+        pr_context: Parsed PR metadata used to check ``total_changed_lines``.
+
+    Returns:
+        A human-readable rejection message when the PR exceeds the threshold,
+        or ``None`` if the PR is within reviewable limits.
     """
     if pr_context.total_changed_lines > 8000:
         return (
@@ -304,11 +336,19 @@ def should_reject_pr(pr_context: PRContext) -> Optional[str]:
 
 
 def prefetch_diffs(workspace_path: str, diff_spec: str) -> Dict[str, str]:
-    """Fetch all file diffs in a single git call and split by file.
+    """Fetch all file diffs in a single ``git diff`` call and split by file.
 
-    Returns a dict mapping ``file_path → diff_text`` so that each review
-    agent can receive only the diffs relevant to its scope, without making
+    Returns a mapping of ``file_path → diff_text`` so that each review
+    agent receives only the diffs relevant to its scope, without making
     redundant ``git_diff`` / ``git_diff_files`` tool calls.
+
+    Args:
+        workspace_path: Absolute path to the git repository root.
+        diff_spec: Git diff spec passed verbatim (e.g. ``"HEAD~1..HEAD"``).
+
+    Returns:
+        Dict mapping each changed file path to its unified-diff text.
+        Returns an empty dict on any git error.
     """
     try:
         result = subprocess.run(
@@ -351,10 +391,17 @@ def prefetch_diffs(workspace_path: str, diff_spec: str) -> Dict[str, str]:
 def post_filter(findings: list[ReviewFinding]) -> list[ReviewFinding]:
     """Apply quality rules to raw agent findings.
 
-    Rules:
-      1. Drop findings with confidence < MIN_CONFIDENCE.
-      2. Test-coverage findings can never be critical — downgrade to warning.
-      3. Findings whose title contains "missing test" are capped at warning.
+    Rules applied in order:
+      1. Drop findings with confidence < MIN_CONFIDENCE (0.75).
+      2. Test-coverage findings are capped at Warning — never Critical.
+      3. Findings whose title contains "missing test" are capped at Warning.
+
+    Args:
+        findings: Raw findings from one or more review agents.
+
+    Returns:
+        Filtered list with low-confidence findings removed and severity
+        caps applied.
     """
     result: list[ReviewFinding] = []
     dropped = 0
@@ -378,7 +425,18 @@ def post_filter(findings: list[ReviewFinding]) -> list[ReviewFinding]:
 
 
 def merge_recommendation(findings: list) -> str:
-    """Determine merge recommendation based on findings."""
+    """Determine the merge recommendation based on findings severity.
+
+    Logic: any Critical → request_changes; 3+ Warnings → request_changes;
+    1-2 Warnings → approve_with_followups; no issues → approve.
+
+    Args:
+        findings: List of ReviewFinding (typically post-processed and ranked).
+
+    Returns:
+        One of: ``"approve"``, ``"approve_with_followups"``,
+        ``"request_changes"``.
+    """
     critical = sum(1 for f in findings if f.severity == Severity.CRITICAL)
     warnings = sum(1 for f in findings if f.severity == Severity.WARNING)
 
@@ -397,7 +455,17 @@ def build_summary(
     findings: list,
     merge_rec: str,
 ) -> str:
-    """Build a human-readable review summary."""
+    """Build a human-readable review summary (fallback when LLM synthesis fails).
+
+    Args:
+        pr_context: Parsed PR metadata (diff spec, file count, line counts).
+        risk_profile: Risk classification used to show the max risk level.
+        findings: Post-processed ReviewFinding list; counts by severity.
+        merge_rec: Merge recommendation string from ``merge_recommendation()``.
+
+    Returns:
+        Markdown-formatted summary string.
+    """
     critical = sum(1 for f in findings if f.severity == Severity.CRITICAL)
     warnings = sum(1 for f in findings if f.severity == Severity.WARNING)
     nits = sum(1 for f in findings if f.severity == Severity.NIT)
@@ -441,10 +509,19 @@ def build_diffs_section(
     files: List[ChangedFile],
     file_diffs: Dict[str, str],
 ) -> str:
-    """Build the pre-fetched diffs section for the agent prompt.
+    """Build the pre-fetched diffs section for an agent prompt.
 
-    Includes diffs for the agent's scoped files, truncating large diffs
-    and capping total size to avoid blowing up the context window.
+    Includes diffs for the agent's scoped files, truncating per-file diffs
+    at MAX_FILE_DIFF_CHARS and capping the total at MAX_TOTAL_DIFF_CHARS to
+    avoid blowing up the context window.
+
+    Args:
+        files: Scoped list of changed files for the requesting agent.
+        file_diffs: Pre-fetched mapping of file path to diff text.
+
+    Returns:
+        Formatted string with fenced diff blocks, ready for prompt injection.
+        Returns a fallback message when no diffs are available.
     """
     if not file_diffs:
         return "(diffs not available — use git_diff to fetch as needed)"
@@ -487,7 +564,18 @@ def raw_to_finding(
     agent_name: str,
     category: FindingCategory,
 ) -> Optional[ReviewFinding]:
-    """Convert a raw dict to a ReviewFinding, or None if invalid."""
+    """Convert a raw LLM-output dict to a ReviewFinding, returning None if invalid.
+
+    Args:
+        raw: Parsed dict expected to contain title, severity, confidence,
+            file, start_line, end_line, evidence, risk, and suggested_fix.
+        agent_name: Name of the agent that produced this finding (for attribution).
+        category: Finding category to assign (e.g. CORRECTNESS, SECURITY).
+
+    Returns:
+        A ReviewFinding instance, or None if the dict is missing required
+        fields or cannot be coerced to the correct types.
+    """
     if not isinstance(raw, dict):
         return None
     if not raw.get("title") and not raw.get("file"):
@@ -532,10 +620,19 @@ def parse_findings(
 ) -> List[ReviewFinding]:
     """Extract structured findings from an agent's answer text.
 
-    Tries multiple extraction strategies (in order):
-    1. JSON array inside a ``json ... `` code block
-    2. Bare JSON array anywhere in the text
-    3. Individual JSON objects (for models that omit the array wrapper)
+    Tries multiple extraction strategies in priority order:
+      1. JSON array inside a fenced ``json`` code block.
+      2. Bare JSON array anywhere in the text.
+      3. Individual JSON objects (for models that omit the array wrapper).
+
+    Args:
+        answer: Raw text produced by the review agent.
+        agent_name: Agent name attributed to each parsed finding.
+        category: Finding category assigned to each parsed finding.
+        warn_on_empty: When True, logs a warning if no findings could be parsed.
+
+    Returns:
+        List of valid ReviewFinding objects; empty list on parse failure.
     """
     findings: List[ReviewFinding] = []
 
@@ -589,10 +686,20 @@ async def repair_output(
     """Attempt to recover findings by asking the model to reformat the answer.
 
     Called when the agent produced non-empty text but ``parse_findings``
-    could not extract valid JSON.  One extra LLM call (cheap — short prompt,
-    short response).
+    could not extract valid JSON.  Makes one additional LLM call with a
+    short, cheap prompt to extract and reformat the findings as JSON.
+
+    Args:
+        answer: Non-JSON text produced by the review agent.
+        agent_name: Agent name attributed to any recovered findings.
+        category: Finding category assigned to each recovered finding.
+        provider: LLM provider used for the repair call.
+
+    Returns:
+        List of recovered ReviewFinding objects, or an empty list if the
+        repair call fails or produces no parseable findings.
     """
-    prompt = _REPAIR_PROMPT.format(answer=answer[:3000])
+    prompt = _REPAIR_PROMPT.format(answer=answer[:_MAX_REPAIR_INPUT_CHARS])
     try:
         loop = asyncio.get_event_loop()
         repaired = await loop.run_in_executor(
@@ -622,7 +729,18 @@ def evidence_gate(findings: List[ReviewFinding], tool_calls_made: int = 0) -> Li
       3. Must reference a specific line number.
       4. Agent must have made ≥3 tool calls (i.e. actually investigated).
 
-    Findings that fail are downgraded to Warning with a note.
+    Findings that fail are downgraded to Warning with an explanatory note
+    appended to their evidence list.
+
+    Args:
+        findings: List of findings to validate (all severities accepted;
+            non-Critical findings pass through unchanged).
+        tool_calls_made: Number of tool calls made by the producing agent,
+            used to verify the agent actually investigated before reporting.
+
+    Returns:
+        The same list with under-evidenced Critical findings downgraded to
+        Warning severity.
     """
     gated: List[ReviewFinding] = []
     for f in findings:
