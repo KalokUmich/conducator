@@ -227,7 +227,9 @@ class PRBrainOrchestrator:
             })
             return
 
-        rejection = should_reject_pr(pr_context)
+        rejection = should_reject_pr(
+            pr_context, max_lines=self._config.limits.reject_above,
+        )
         if rejection:
             yield WorkflowEvent("done", {
                 "answer": rejection,

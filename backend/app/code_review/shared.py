@@ -309,19 +309,24 @@ def compute_budget_multiplier(pr_context: PRContext) -> float:
         return 2.0
 
 
-def should_reject_pr(pr_context: PRContext) -> Optional[str]:
-    """Check if a PR is too large to review meaningfully.
+_DEFAULT_REJECT_ABOVE = 6000
 
-    With dynamic budgets the threshold is raised to 8 000 lines.
+
+def should_reject_pr(
+    pr_context: PRContext,
+    max_lines: int = _DEFAULT_REJECT_ABOVE,
+) -> Optional[str]:
+    """Check if a PR is too large to review meaningfully.
 
     Args:
         pr_context: Parsed PR metadata used to check ``total_changed_lines``.
+        max_lines: Maximum allowed changed lines. Defaults to 6 000.
 
     Returns:
         A human-readable rejection message when the PR exceeds the threshold,
         or ``None`` if the PR is within reviewable limits.
     """
-    if pr_context.total_changed_lines > 8000:
+    if pr_context.total_changed_lines > max_lines:
         return (
             f"This PR has {pr_context.total_changed_lines:,} lines of changes "
             f"across {pr_context.file_count} files, which is too large for an "

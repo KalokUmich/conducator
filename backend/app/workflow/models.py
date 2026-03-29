@@ -165,6 +165,7 @@ class PRBrainLimits(BrainLimits):
     """Extended limits for PR Brain (adds PR-specific fields to BrainLimits)."""
     llm_concurrency_limit: int = 2   # Max parallel LLM calls (Bedrock throttle guard)
     small_pr_threshold: int = 100    # PRs under this skip concurrency/reliability
+    reject_above: int = 6000         # Max changed lines before rejecting PR
 
 
 class PRBrainConfig(BaseModel):
