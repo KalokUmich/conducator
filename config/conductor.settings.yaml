@@ -334,9 +334,8 @@ git_workspace:
 # Run for a few days, then analyze with AI to optimize prompts and tool usage.
 trace:
   enabled: true
-  backend: "local"                          # "local" (JSON files) or "database" (SQLite)
-  local_path: ".conductor/session_traces"   # gitignored by default
-  # database_url: "sqlite:///traces.db"     # uncomment to use SQLite DB instead
+  backend: "database"                       # "local" (JSON files) or "database" (Postgres)
+  local_path: ".conductor/session_traces"   # fallback when database is unavailable
 
 # =============================================================================
 # Langfuse Observability

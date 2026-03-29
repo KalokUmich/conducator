@@ -6,7 +6,7 @@
       "input_schema": {
         "properties": {
           "pattern": {
-            "description": "Regex pattern to search for.",
+            "description": "Python regex pattern. Use | for alternation (NOT \\|). Example: 'Foo|Bar' matches Foo or Bar.",
             "title": "Pattern",
             "type": "string"
           },

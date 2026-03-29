@@ -525,14 +525,38 @@ async def websocket_chat_endpoint(
                 )
                 sso_email = data.get("ssoEmail")
                 sso_provider = data.get("ssoProvider")
+                display_name = data.get("displayName", "")
+                identity_source = data.get("identitySource", "anonymous")
+
+                # Identity reconciliation: if this SSO user was in the room
+                # before, reuse their original user_id to avoid duplicates.
+                if sso_email:
+                    reclaimed_id = manager.reclaim_user_by_sso(
+                        room_id, assigned_user_id, sso_email,
+                    )
+                    if reclaimed_id:
+                        assigned_user_id = reclaimed_id
+                        # Restore role from room state
+                        if manager.room_hosts.get(room_id) == assigned_user_id:
+                            assigned_role = "host"
+                        # Send corrected identity to client
+                        await websocket.send_json({
+                            "type": "connected",
+                            "userId": assigned_user_id,
+                            "role": assigned_role,
+                            "leadId": manager.get_lead_id(room_id),
+                        })
+                        logger.info(
+                            f"[WS] Identity reclaimed via SSO for user {assigned_user_id} in room {room_id}"
+                        )
 
                 user = manager.register_user(
                     websocket=websocket,
                     room_id=room_id,
                     user_id=assigned_user_id,  # SECURITY: Use backend-assigned ID
-                    display_name=data.get("displayName", ""),
+                    display_name=display_name,
                     role=assigned_role,  # SECURITY: Use backend-assigned role
-                    identity_source=data.get("identitySource", "anonymous"),
+                    identity_source=identity_source,
                     sso_email=sso_email,
                     sso_provider=sso_provider,
                 )

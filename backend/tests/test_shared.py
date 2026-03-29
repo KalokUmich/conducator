@@ -487,18 +487,18 @@ class TestComputeBudgetMultiplier:
 
 class TestShouldRejectPr:
     def test_should_reject_pr_within_limit(self):
-        ctx = _make_pr_context(total_changed_lines=7999)
+        ctx = _make_pr_context(total_changed_lines=5999)
         assert should_reject_pr(ctx) is None
 
     def test_should_reject_pr_exact_limit(self):
-        ctx = _make_pr_context(total_changed_lines=8000)
+        ctx = _make_pr_context(total_changed_lines=6000)
         assert should_reject_pr(ctx) is None
 
     def test_should_reject_pr_over_limit(self):
-        ctx = _make_pr_context(total_changed_lines=8001)
+        ctx = _make_pr_context(total_changed_lines=6001)
         result = should_reject_pr(ctx)
         assert result is not None
-        assert "8,001" in result
+        assert "6,001" in result
 
     def test_should_reject_pr_message_content(self):
         ctx = _make_pr_context(total_changed_lines=10000, file_count=2)

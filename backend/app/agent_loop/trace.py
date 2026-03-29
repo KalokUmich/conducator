@@ -34,6 +34,7 @@ class ToolCallTrace:
     latency_ms: float = 0.0
     new_files: int = 0
     new_symbols: int = 0
+    result_preview: str = ""  # First 500 chars of tool output for debugging
 
 
 @dataclass
@@ -46,6 +47,7 @@ class IterationTrace:
     tool_calls: List[ToolCallTrace] = field(default_factory=list)
     llm_latency_ms: float = 0.0
     thinking_text: str = ""
+    llm_response_text: str = ""  # LLM's text output (reasoning + answer)
 
 
 @dataclass

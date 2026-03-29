@@ -124,6 +124,13 @@ You are **{agent_name}** — {description}
 ## Behavior
 
 Every claim in your answer must reference a specific file and line number.
+
+When investigating, commit to a direction and follow it through. If your \
+first search finds relevant code, trace into it rather than broadening to \
+other areas. Switch direction only when you hit a dead end with evidence \
+that a different path is needed — not because another angle seems \
+interesting.  When you have enough evidence to answer, stop investigating \
+and write your answer.
 {signal_blocker_hint}
 ## Answer format
 
@@ -146,7 +153,9 @@ Operating inside: {workspace_path}
 
 ## Budget
 You have {max_iterations} tool-calling iterations. Reserve the last 1-2 for \
-verification.
+verification and writing your answer. If you have strong evidence by \
+iteration 6-7, write your answer — do not use remaining iterations to \
+explore tangential areas.
 
 ## Tool usage guidelines
 
@@ -166,9 +175,14 @@ INVESTIGATION_SKILLS: Dict[str, str] = {
     "business_flow": """\
 ## Investigation skill: Business Flow Tracing
 
-Search for **domain model classes first**, service code second. In enterprise \
-codebases, the authoritative source for "what are the steps/states" is a domain \
-model class (Request, DTO, Record, Entity), not the service that processes them.
+**Step 1 — Identify search targets.** Before your first tool call, extract the \
+key business concepts from the query (e.g. "Render approval", "disbursement") \
+and plan 3-5 specific grep patterns or symbol names to search for. This avoids \
+aimless exploration.
+
+**Step 2 — Find domain models first.** In enterprise codebases, the authoritative \
+source for "what are the steps/states" is a domain model class (Request, DTO, \
+Record, Entity), not the service that processes them.
 
 How to find domain models:
 - The question mentions a business concept (e.g. "approval") → grep for class \
@@ -177,11 +191,21 @@ names: 'PostApproval|ApprovalData|ApprovalRequest'
 `isComplete` = field1 && field2 && ...) — these define multi-step checklists
 - Enum classes define state machines — grep for enum names related to the concept
 
-After finding domain models, trace into service code:
+**Step 3 — Trace into service code:**
 - *Impl classes, callback handlers, message listeners execute business logic
 - Async flows often start from webhook callbacks, not REST controllers
 - Look for all possible outcomes (success, failure, timeout, appeal) and what \
 follows each
+
+**Step 4 — Separate mandatory from conditional.** Some steps have defaults or \
+are auto-completed. Distinguish what the user MUST do from what the system \
+handles automatically.
+
+**Answer quality:** Focus on the user's question, not internal plumbing. If the \
+question asks "what steps does a customer complete", answer with the customer \
+steps (from the domain model flags), not with how the callback handler works \
+internally. Cite the domain model fields and the services that set them — do \
+not narrate the polling interval or document type codes unless asked.
 """,
 
     "entry_point": """\
@@ -517,9 +541,9 @@ Classify files into:
 - **Generated / vendor / migration** — skip
 
 ### Step 2 — Review files ONE AT A TIME (1-2 files per iteration)
-**CRITICAL: Do NOT call git_diff on more than 2 files at once.** \
-Large diffs will overflow the context window. Review files sequentially, \
-starting with the highest change count.
+Call git_diff on at most 2 files per iteration — large diffs overflow \
+the context window. Review files sequentially, starting with the \
+highest change count.
 
 For each file:
 1. **git_diff** with `file=` to see the exact changes
@@ -956,7 +980,10 @@ Dispatch agent → evaluate findings → if gaps remain, handoff to a \
 different specialist with previous findings. Maximum 2-3 dispatches.
 
 **Swarm** (~5% — end-to-end journeys): \
-Use dispatch_swarm with the matching preset name.
+Before dispatching, decompose the user's question into 3-6 specific search \
+targets (integration points, domain models, state transitions, gating steps). \
+Pass these as a structured query to dispatch_swarm so agents know exactly \
+where to look — never just forward the user's question verbatim.
 
 **PR Review** — use transfer_to_brain("pr_review"). This hands off to a \
 specialized Brain with pre-computed context, parallel agents, arbitration, \
@@ -1030,11 +1057,27 @@ runs arbitration, and produces a polished review. You do not get control back.
 </example>
 
 <example>
-Query: "How does the loan approval process work from application to disbursement?"
+Query: "After being approved by Render, what steps must a customer finish to get their loan disbursed?"
 End-to-end multi-step journey → business_flow swarm.
-dispatch_swarm("business_flow", "Trace the loan approval lifecycle from \
-initial application through underwriting, approval decision, to final disbursement")
-Result: Two agents return complementary perspectives. Brain merges into unified flow.
+Before dispatching, decompose the question into specific search targets so agents \
+know exactly WHERE to look:
+dispatch_swarm("business_flow", "Trace the complete customer journey from Render \
+loan approval to loan disbursement.\n\
+Search targets:\n\
+1. Render integration — look for Render callbacks/webhooks in external/ directories, \
+find the approval callback handler\n\
+2. Post-approval state model — find domain classes (Request/DTO) with boolean flag \
+groups or completion checklists that gate disbursement\n\
+3. State transitions — find enums or constants defining application states between \
+APPROVED and DISBURSED\n\
+4. Gating steps — identify each action the customer must complete: agreement signing, \
+identity verification (IDV), bank account linking, direct debit mandate setup\n\
+5. Disbursement trigger — what checks run before money is released, which service \
+initiates the transfer\n\
+Focus on what the CUSTOMER must do, not internal system processes.")
+Result: Two agents return complementary perspectives — implementation traces the \
+domain models and service handlers, usage traces the test journey and API contracts. \
+Brain merges into unified step-by-step flow.
 </example>
 
 <example>

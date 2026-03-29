@@ -310,9 +310,20 @@ class WorkflowEngine:
 
         task = asyncio.create_task(_execute())
 
-        # Drain and yield events
+        # Drain and yield events with keepalive heartbeat.
+        # During long LLM calls (Brain synthesis), the queue may be empty for
+        # 20-30s.  Proxies (ngrok, CDNs) can drop idle SSE connections before
+        # the response arrives.  A periodic SSE comment keeps the connection alive.
+        _HEARTBEAT_INTERVAL = 15  # seconds
         while True:
-            event = await self._event_queue.get()
+            try:
+                event = await asyncio.wait_for(
+                    self._event_queue.get(), timeout=_HEARTBEAT_INTERVAL,
+                )
+            except asyncio.TimeoutError:
+                # Yield an SSE comment as keepalive (invisible to EventSource clients)
+                yield WorkflowEvent("keepalive", {})
+                continue
             if event is None:
                 break
             yield event

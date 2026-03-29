@@ -75,7 +75,7 @@ const SUBPROCESS_SMOKE_PARAMS = {
     git_diff_files: { ref: 'HEAD~1' },
     find_tests: { name: 'test_', path: 'tests' },
     run_test: { test_file: 'tests/test_service.py', timeout: 10 },
-    ast_search: { pattern: 'class $NAME { $$$ }', language: 'python' },
+    ast_search: { pattern: 'class $NAME', language: 'python' },
 };
 
 // TS-implemented tools (complex + AST)

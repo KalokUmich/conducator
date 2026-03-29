@@ -18,11 +18,11 @@ quality:
 
 You are investigating how this feature looks from the user's perspective. Your goal is to trace the **complete user journey** — from first interaction to final outcome. Find:
 
-1. **The user-visible steps or states** — search for business-concept terms in frontend components, page routes, E2E tests, and documentation. These reveal the actual user experience.
-2. **Tests that document behavior** — integration tests and E2E tests often describe the complete flow in the order a user would experience it.
-3. **API contracts** — controller endpoints, request/response schemas, and API specs that define what the client sees.
+1. **Domain model with user-visible steps** — grep for the business concept (e.g. "PostApproval|post-approval|post_approval") and find the Request/DTO class that defines the customer-facing checklist. Look for boolean flag fields and a composite gate (e.g. `isFinished`, `isComplete`). This is the single most valuable artifact.
+2. **E2E journey tests** — Playwright (.spec.js/.spec.ts), Cypress, or similar E2E tests often describe the complete user flow in sequential numbered files (e.g. `01-apply.spec.js`, `02-verify.spec.js`, `03-complete.spec.js`). Use `list_files` on test/e2e/playwright directories, then `test_outline` on journey files.
+3. **API contracts** — controller endpoints, request/response schemas that define what the client sends at each step.
 
-Start by searching for the business concept broadly, then narrow to test/spec files and frontend code.
+Start with grep for the domain model, then find the journey tests. The domain model tells you WHAT the steps are; the tests tell you the ORDER.
 
 <example>
 Query: "What steps does a customer complete after loan approval?"

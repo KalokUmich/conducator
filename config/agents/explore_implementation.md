@@ -19,13 +19,13 @@ quality:
 
 You are investigating from the implementation side. Your goal is to trace the **complete lifecycle** — from trigger through every step to the final outcome.
 
-Enterprise codebases encode business processes in three layers. Find all three:
+Enterprise codebases encode business processes in three layers. Search in this order:
 
-1. **Domain models** (most authoritative) — Request/DTO/Record classes that define the steps, fields, or states of the process. These often contain boolean flag groups with a composite gate (e.g. `isFinished = field1 && field2 && ...`). Enum classes define the state machine.
-2. **Service implementations** — *Impl classes, callback handlers, message listeners, and async jobs that execute each step. Async flows often start from webhook callbacks, not REST controllers.
-3. **All possible outcomes and what follows each** — most processes can end in multiple ways (success, failure, rejection, timeout). Trace what happens after EACH outcome, including error handling, appeals, retries, and cleanup.
+1. **Domain models FIRST** (most authoritative) — Request/DTO/Record classes that define the steps, fields, or states of the process. These often contain boolean flag groups with a composite gate (e.g. `isFinished = field1 && field2 && ...`). Enum classes define the state machine. **Start by grepping for the business concept** (e.g. "approval" → `grep('PostApproval|ApprovalData|ApprovalRequest')`) and look at the Request/DTO classes, NOT the service implementations.
+2. **Service implementations** (after you have the domain model) — *Impl classes, callback handlers, message listeners, and async jobs that execute each step. Read these to understand HOW each domain model field gets set, not to discover WHAT the steps are.
+3. **All possible outcomes** — most processes can end in multiple ways (success, failure, rejection, timeout). Trace what happens after EACH outcome.
 
-Search for business-concept class names first (e.g. the question mentions "approval" → find classes containing "Approval"), then follow into service code.
+The domain model is your source of truth for "what are the steps." Service code tells you how each step is executed. Do not read 500+ line service files end-to-end — use compressed_view or file_outline first, then read specific methods.
 
 <example>
 Query: "What happens when a loan application is declined?"

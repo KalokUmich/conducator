@@ -407,7 +407,10 @@ async def context_query_stream(
             brain_context["code_context"] = code_ctx
 
         async for event in engine.run_brain_stream(brain_context):
-            yield f"event: {event.kind}\ndata: {json.dumps(event.data, default=str)}\n\n"
+            if event.kind == "keepalive":
+                yield ": keepalive\n\n"  # SSE comment — keeps proxy connections alive
+            else:
+                yield f"event: {event.kind}\ndata: {json.dumps(event.data, default=str)}\n\n"
 
     return StreamingResponse(
         event_generator(),

@@ -338,6 +338,11 @@ class AgentLoopService:
         _LLM_THROTTLE_RETRIES = 3
 
         for iteration in range(self._max_iterations):
+            # Clear old tool results to prevent context rot on long loops.
+            # Only for sub-agents — Brain's messages are already condensed.
+            if self._is_sub_agent and iteration >= 4:
+                _clear_old_tool_results(messages, keep_recent=4)
+
             # Call the LLM with throttle-retry logic
             response = None
             llm_elapsed_ms = 0.0
@@ -526,6 +531,7 @@ class AgentLoopService:
             accumulated_text=accumulated_text,
             start=start,
             system=system,
+            active_tools=active_tools,
             _sid=_sid,
             _LLM_TIMEOUT_SECONDS=_LLM_TIMEOUT_SECONDS,
         ):
@@ -803,7 +809,7 @@ class AgentLoopService:
                 logger.error("%s", exc)
                 answer = "\n\n".join(accumulated_text) if accumulated_text else ""
                 trace.finish(answer=answer, error=str(exc), budget_summary=budget.summary())
-                self._save_trace(trace)
+                await self._save_trace(trace)
                 yield AgentEvent(kind="error", data={
                     "error": str(exc),
                     "answer": answer,
@@ -842,7 +848,7 @@ class AgentLoopService:
                     error=str(exc),
                     budget_summary=budget.summary(),
                 )
-                self._save_trace(trace)
+                await self._save_trace(trace)
                 yield AgentEvent(kind="error", data={
                     "error": str(exc),
                     "answer": "\n\n".join(accumulated_text) if accumulated_text else "",
@@ -899,7 +905,7 @@ class AgentLoopService:
         if self._is_brain:
             duration = (time.monotonic() - start) * 1000
             trace.finish(answer=answer, budget_summary=budget.summary())
-            self._save_trace(trace)
+            await self._save_trace(trace)
             yield AgentEvent(kind="done", data={
                 "answer": answer,
                 "context_chunks": [],
@@ -974,7 +980,7 @@ class AgentLoopService:
         iter_trace.budget_signal = budget.get_signal().value
         trace.add_iteration(iter_trace)
         trace.finish(answer=answer, budget_summary=budget.summary())
-        self._save_trace(trace)
+        await self._save_trace(trace)
         yield AgentEvent(kind="done", data={
             "answer": answer,
             "tool_calls_made": total_tool_calls,
@@ -1295,28 +1301,33 @@ class AgentLoopService:
                 "params": tc.input,
                 "summary": result_summary,
             })
-            thinking_steps.append({
+            step_data = {
                 "kind": "tool_result",
                 "iteration": iteration + 1,
                 "tool": tc.name,
                 "success": tool_result.success,
                 "summary": result_summary,
-            })
-            yield AgentEvent(kind="tool_result", data={
-                "iteration": iteration + 1,
-                "tool": tc.name,
-                "success": tool_result.success,
-                "summary": result_summary,
-            })
+            }
+            # Enrich dispatch tool results with sub-agent metadata
+            if tc.name in ("dispatch_agent", "dispatch_swarm") and isinstance(tool_result.data, dict):
+                step_data["agent_name"] = tc.input.get("agent_name", "") or tc.input.get("swarm_name", "")
+                for key in ("confidence", "files_accessed", "tools_summary",
+                            "iterations", "tool_calls_made", "duration_ms", "error"):
+                    if key in tool_result.data:
+                        step_data[key] = tool_result.data[key]
+            thinking_steps.append(step_data)
+            yield AgentEvent(kind="tool_result", data=step_data)
 
             # Record tool call in the iteration trace
-            result_chars = len(json.dumps(tool_result.data, default=str)) if tool_result.data else 0
+            result_json = json.dumps(tool_result.data, default=str) if tool_result.data else ""
+            result_chars = len(result_json)
             tc_trace = ToolCallTrace(
                 tool_name=tc.name,
                 params=tc.input,
                 success=tool_result.success,
                 result_chars=result_chars,
                 latency_ms=tool_elapsed_ms,
+                result_preview=result_json[:500] if tool_result.success else (tool_result.error or "")[:500],
             )
 
             # Track files read and detect redundant reads
@@ -1423,6 +1434,8 @@ class AgentLoopService:
         iter_trace.budget_signal = budget_signal.value
         if response.text and response.tool_calls:
             iter_trace.thinking_text = response.text[:500]
+        if response.text:
+            iter_trace.llm_response_text = response.text[:1000]
         trace.add_iteration(iter_trace)
 
         # Budget-driven convergence
@@ -1442,7 +1455,7 @@ class AgentLoopService:
                 budget.cumulative_input, budget.config.max_input_tokens,
             )
             trace.finish(answer=answer, error=conclude_reason, budget_summary=budget.summary())
-            self._save_trace(trace)
+            await self._save_trace(trace)
             yield AgentEvent(kind="done", data={
                 "answer": answer,
                 "tool_calls_made": total_tool_calls,
@@ -1531,16 +1544,21 @@ class AgentLoopService:
         accumulated_text: List[str],
         start: float,
         system: str,
+        active_tools: List[Dict[str, Any]],
         _sid: str,
         _LLM_TIMEOUT_SECONDS: int,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Make one final LLM call without tools after iterations are exhausted.
+        """Make one final LLM call after iterations are exhausted.
 
         Forces a proper synthesized answer from everything the agent has
         collected so far, then yields a ``done`` event.
+
+        We must pass the tool definitions even though we don't want the
+        model to call tools — Bedrock requires ``toolConfig`` when the
+        conversation contains ``toolUse``/``toolResult`` content blocks.
         """
         logger.info(
-            "[%s] Iterations exhausted (%d). Making final judge call (no tools).",
+            "[%s] Iterations exhausted (%d). Making final judge call.",
             _sid, self._max_iterations,
         )
 
@@ -1548,12 +1566,11 @@ class AgentLoopService:
             "role": "user",
             "content": [{
                 "text": (
-                    "⚠ You have exhausted all tool-calling iterations. "
-                    "You MUST provide your final answer NOW based on everything "
+                    "You have used all tool-calling iterations. "
+                    "Provide your final answer now based on everything "
                     "you have learned so far. Synthesize your findings into a "
-                    "clear, complete explanation. Do NOT say you need more information "
-                    "or request additional tool calls — just give your best answer "
-                    "with what you have."
+                    "clear, complete explanation. Do not request additional "
+                    "tool calls — give your best answer with what you have."
                 ),
             }],
         })
@@ -1563,7 +1580,7 @@ class AgentLoopService:
                 asyncio.to_thread(
                     self._provider.chat_with_tools,
                     messages=messages,
-                    tools=[],  # no tools — force text-only response
+                    tools=active_tools,  # keep toolConfig for Bedrock compatibility
                     system=system,
                 ),
                 timeout=_LLM_TIMEOUT_SECONDS,
@@ -1588,7 +1605,7 @@ class AgentLoopService:
             )
 
         trace.finish(answer=answer, error=None, budget_summary=budget.summary())
-        self._save_trace(trace)
+        await self._save_trace(trace)
         yield AgentEvent(kind="done", data={
             "answer": answer,
             "tool_calls_made": total_tool_calls,
@@ -1598,10 +1615,10 @@ class AgentLoopService:
             "budget_summary": budget.summary(),
         })
 
-    def _save_trace(self, trace: SessionTrace) -> None:
+    async def _save_trace(self, trace: SessionTrace) -> None:
         """Persist the session trace if a writer is configured."""
         if self._trace_writer:
-            self._trace_writer.save(trace)
+            await self._trace_writer.save_async(trace)
 
     # ------------------------------------------------------------------
     # Message formatting — provider-agnostic (Bedrock Converse format)
@@ -1675,6 +1692,51 @@ class AgentLoopService:
 # ------------------------------------------------------------------
 
 
+def _clear_old_tool_results(
+    messages: List[Dict[str, Any]],
+    keep_recent: int = 4,
+) -> None:
+    """Replace old toolResult content with a one-line summary.
+
+    Preserves the message structure (role, toolResult with toolUseId) so the
+    LLM still sees the conversation flow, but replaces the full text body
+    with a short placeholder.  This prevents context rot on long agent loops
+    where early tool outputs are no longer relevant.
+
+    Only messages older than ``keep_recent`` user/assistant turn-pairs are
+    cleared.  The function mutates ``messages`` in place.
+
+    A "turn-pair" is one assistant message + the following user message
+    containing toolResults.  We count backward from the end of the list.
+    """
+    if len(messages) <= keep_recent * 2:
+        return  # too few messages to clear anything
+
+    cutoff = len(messages) - keep_recent * 2
+    for i in range(cutoff):
+        msg = messages[i]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            tr = block.get("toolResult")
+            if not tr:
+                continue
+            inner = tr.get("content")
+            if not isinstance(inner, list) or not inner:
+                continue
+            text = inner[0].get("text", "")
+            # Skip if already cleared (starts with our marker)
+            if text.startswith("[cleared]"):
+                continue
+            # Build a brief marker from first line or character count
+            first_line = text.split("\n", 1)[0][:80]
+            chars = len(text)
+            inner[0] = {"text": f"[cleared] {first_line}… ({chars} chars)"}
+
+
 def _top_directory(fpath: str, depth: int = 2) -> str:
     """Extract the top-level directory from a relative file path.
 
@@ -1693,18 +1755,127 @@ def _truncate_json(obj: Any, max_len: int = 200) -> str:
 
 
 def _summarize_result(tool_name: str, result) -> str:
-    """Create a brief human-readable summary of a tool result."""
+    """Create a brief human-readable summary of a tool result.
+
+    Summaries are shown in the frontend thinking-steps panel for debugging.
+    They should be specific enough to understand what was found at a glance.
+    """
     if not result.success:
         return f"Error: {result.error}"
     data = result.data
+
+    # --- List results: extract file paths and names for key tools ---
     if isinstance(data, list):
         n = len(data)
+        if n == 0:
+            return "0 results"
+
+        # grep: show matched files
+        if tool_name == "grep":
+            files = sorted({m.get("file_path", "") for m in data if isinstance(m, dict)})
+            preview = ", ".join(f.rsplit("/", 1)[-1] for f in files[:4])
+            suffix = f" +{len(files) - 4} more" if len(files) > 4 else ""
+            return f"{n} matches in {preview}{suffix}"
+
+        # find_symbol: show symbol locations
+        if tool_name == "find_symbol":
+            locs = [f"{m.get('file_path', '?').rsplit('/', 1)[-1]}:{m.get('start_line', '?')}"
+                    for m in data[:4] if isinstance(m, dict)]
+            suffix = f" +{n - 4} more" if n > 4 else ""
+            return ", ".join(locs) + suffix
+
+        # find_references: show referencing files
+        if tool_name == "find_references":
+            files = sorted({m.get("file_path", "") for m in data if isinstance(m, dict)})
+            preview = ", ".join(f.rsplit("/", 1)[-1] for f in files[:4])
+            suffix = f" +{len(files) - 4} more" if len(files) > 4 else ""
+            return f"{n} refs in {preview}{suffix}"
+
+        # get_callers / get_callees: show function names
+        if tool_name in ("get_callers", "get_callees"):
+            key = "caller_name" if tool_name == "get_callers" else "callee_name"
+            names = [m.get(key, "?") for m in data[:5] if isinstance(m, dict)]
+            suffix = f" +{n - 5} more" if n > 5 else ""
+            return ", ".join(names) + suffix
+
+        # file_outline: show symbol count
+        if tool_name == "file_outline":
+            kinds = {}
+            for m in data:
+                k = m.get("kind", "?") if isinstance(m, dict) else "?"
+                kinds[k] = kinds.get(k, 0) + 1
+            parts = [f"{v} {k}{'s' if v > 1 else ''}" for k, v in sorted(kinds.items())]
+            return ", ".join(parts) or f"{n} symbols"
+
+        # get_dependencies / get_dependents: show module names
+        if tool_name in ("get_dependencies", "get_dependents"):
+            paths = [m.get("path", m.get("module", "?")) for m in data[:5] if isinstance(m, dict)]
+            names = [p.rsplit("/", 1)[-1] for p in paths]
+            suffix = f" +{n - 5} more" if n > 5 else ""
+            return ", ".join(names) + suffix
+
+        # find_tests: show test files
+        if tool_name == "find_tests":
+            files = [m.get("file_path", "?").rsplit("/", 1)[-1] for m in data[:4] if isinstance(m, dict)]
+            suffix = f" +{n - 4} more" if n > 4 else ""
+            return ", ".join(files) + suffix
+
+        # git_log: show commit summaries
+        if tool_name == "git_log":
+            msgs = [m.get("message", "?")[:50] for m in data[:3] if isinstance(m, dict)]
+            suffix = f" +{n - 3} more" if n > 3 else ""
+            return "; ".join(msgs) + suffix
+
+        # git_blame: show authors
+        if tool_name == "git_blame":
+            authors = sorted({m.get("author", "?") for m in data if isinstance(m, dict)})
+            return f"{n} lines, authors: {', '.join(authors[:3])}"
+
+        # list_files: show file count
+        if tool_name == "list_files":
+            return f"{n} files"
+
+        # Default for list results
         return f"{n} result{'s' if n != 1 else ''}"
+
+    # --- Dict results ---
     if isinstance(data, dict):
+        # read_file
         if "content" in data:
-            return f"{data.get('total_lines', '?')} lines"
+            path = data.get("path", "")
+            name = path.rsplit("/", 1)[-1] if path else "?"
+            return f"{name} ({data.get('total_lines', '?')} lines)"
+
+        # git_diff / git_show
         if "diff" in data:
             return f"{len(data['diff'])} chars of diff"
+
+        # trace_variable
+        if "variable" in data and "direction" in data:
+            direction = data.get("direction", "?")
+            sinks = len(data.get("sinks", []))
+            sources = len(data.get("sources", []))
+            if direction == "forward":
+                return f"forward: {sinks} sink{'s' if sinks != 1 else ''}"
+            return f"backward: {sources} source{'s' if sources != 1 else ''}"
+
+        # compressed_view
+        if "signatures" in data:
+            n_sigs = len(data.get("signatures", []))
+            n_calls = len(data.get("calls", []))
+            return f"{n_sigs} signatures, {n_calls} calls"
+
+        # module_summary
+        if "classes" in data and "functions" in data:
+            nc = len(data.get("classes", []))
+            nf = len(data.get("functions", []))
+            return f"{nc} classes, {nf} functions"
+
+        # detect_patterns
+        if "matches" in data and "categories_scanned" in data:
+            n_matches = data.get("total_matches", len(data.get("matches", [])))
+            return f"{n_matches} pattern matches"
+
     return "ok"
 
 

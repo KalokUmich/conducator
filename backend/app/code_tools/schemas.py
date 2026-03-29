@@ -504,30 +504,40 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "description": (
             "Search for a Python regex pattern across files in the workspace. "
             "Returns matching lines with file paths and line numbers. "
-            "Use path to scope search to a subdirectory. "
+            "Use path to scope search to a subdirectory — this dramatically reduces "
+            "search time and noise on large repos. "
             "Only use include_glob if you know the exact file extension (e.g. '*.java', '*.py'). "
-            "Omit include_glob to search ALL file types. "
-            "IMPORTANT: Uses Python regex syntax — use | for alternation (e.g. 'Foo|Bar'), "
-            "NOT \\| which matches a literal pipe character. "
+            "Omit include_glob to search all file types. "
+            "Uses Python regex syntax — | for alternation (e.g. 'Foo|Bar'), "
+            "\\| matches a literal pipe. "
             "Pattern tips: class names 'class\\s+Approval', method calls 'approve\\(', "
-            "multiple terms 'APPROVED|REJECTED|PENDING', business concepts 'PostApproval|ApprovalData'."
+            "multiple terms 'APPROVED|REJECTED|PENDING', business concepts 'PostApproval|ApprovalData'. "
+            "If you get 0 results, try a simpler substring pattern or use find_symbol instead. "
+            "If you get 40+ results, narrow with path or include_glob."
         ),
         "input_schema": GrepParams.model_json_schema(),
     },
     {
         "name": "read_file",
         "description": (
-            "Read file contents. Supports line ranges for reading specific sections. "
-            "Use start_line/end_line to read a portion of a large file."
+            "Read file contents with optional line range. Returns the file text, "
+            "total line count, and the file path. Use start_line/end_line to read a "
+            "specific section of a large file — avoid reading 300+ line files in full. "
+            "Prefer file_outline or compressed_view first to discover method locations, "
+            "then read_file with a targeted range. Does not return AST structure or "
+            "symbol definitions — use file_outline for that."
         ),
         "input_schema": ReadFileParams.model_json_schema(),
     },
     {
         "name": "list_files",
         "description": (
-            "List files and directories in the workspace. "
-            "Use max_depth to control how deep to recurse. "
-            "Use include_glob to filter by pattern."
+            "List files and directories under a path, with recursive depth control. "
+            "Use this to understand project layout before diving into specific files — "
+            "e.g. list_files('src/services') reveals all service files. "
+            "Use include_glob to filter (e.g. '*.java'). Returns paths only, not file "
+            "contents. For understanding what a module does, prefer module_summary "
+            "which also shows classes, functions, and dependencies."
         ),
         "input_schema": ListFilesParams.model_json_schema(),
     },
@@ -546,9 +556,13 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "find_references",
         "description": (
             "Find all references (usages) of a symbol across the codebase. "
-            "Combines grep with AST validation for accurate results. "
-            "Use when you need to know everywhere a class, function, or constant is used — "
-            "e.g. find_references('affordability_score') shows every file that reads or writes it."
+            "Combines grep with AST validation for accurate results — filters out "
+            "comments, strings, and partial matches. Use when you need to know every "
+            "place a class, function, or constant is used — e.g. "
+            "find_references('affordability_score') shows every file that reads or "
+            "writes it. Different from find_symbol (which finds definitions) and "
+            "get_dependents (which works at file/module level). Use the file parameter "
+            "to scope results when the symbol has many references."
         ),
         "input_schema": FindReferencesParams.model_json_schema(),
     },
@@ -565,28 +579,37 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "get_dependencies",
         "description": (
-            "Find what files a given file depends on (imports/references). "
-            "Uses the dependency graph. Set max_depth=2 or 3 to find transitive "
-            "dependencies (A imports B imports C). Each result includes its depth."
+            "Find what files a given file imports or references (downstream dependencies). "
+            "Uses the static dependency graph built from import statements. Set max_depth=2 "
+            "or 3 to find transitive dependencies (A imports B imports C). Each result "
+            "includes the dependency path and depth. Use this to answer 'what does this "
+            "file rely on?' — e.g. get_dependencies('PaymentService.java') shows all "
+            "models, clients, and utilities it imports. Does not find runtime dependencies "
+            "or reflection-based usage — use grep for those."
         ),
         "input_schema": GetDependenciesParams.model_json_schema(),
     },
     {
         "name": "get_dependents",
         "description": (
-            "Find what files depend on a given file (reverse dependencies). "
-            "Set max_depth=2 or 3 to find transitive dependents (who depends on "
-            "files that depend on this file). Useful for blast radius analysis."
+            "Find what files depend on (import) a given file — the reverse of "
+            "get_dependencies. Use this for blast radius analysis: 'if I change this "
+            "file, what else is affected?' Set max_depth=2 or 3 for transitive dependents. "
+            "Different from find_references: get_dependents works at the file/module level "
+            "(import graph), while find_references finds individual symbol usages. "
+            "Use get_dependents for broad impact, find_references for specific symbol tracking."
         ),
         "input_schema": GetDependentsParams.model_json_schema(),
     },
     {
         "name": "git_log",
         "description": (
-            "Show recent git commits, optionally filtered to a specific file. "
+            "Show recent git commits with hash, author, date, and message. "
+            "Optionally filter to a specific file path or search commit messages. "
             "Use search= to find commits mentioning specific terms (e.g. 'CVE', "
-            "'timeout', 'fix'). Useful for understanding what changed recently "
-            "and finding security-related or bug-fix commits."
+            "'timeout', 'fix'). Returns commit metadata only — does not include "
+            "diffs. Follow up with git_show on specific commits to see the actual "
+            "changes and full commit message."
         ),
         "input_schema": GitLogParams.model_json_schema(),
     },
@@ -594,9 +617,11 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "git_diff",
         "description": (
             "Show the full unified diff between two git refs (commits, branches). "
-            "Use file parameter to limit diff to a single file. "
-            "For large PRs, prefer git_diff_files first to see what changed, "
-            "then git_diff with file= for each file you want to review."
+            "Use the file parameter to limit to a single file — reviewing one file "
+            "at a time prevents context overflow. For large PRs, use git_diff_files "
+            "first to see the list of changed files, then git_diff with file= for "
+            "each file you want to review. Returns raw diff text, not parsed "
+            "structures. Use context_lines to control surrounding context (default 10)."
         ),
         "input_schema": GitDiffParams.model_json_schema(),
     },
@@ -614,10 +639,13 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "ast_search",
         "description": (
-            "Structural AST search using ast-grep patterns. "
-            "More precise than regex grep — matches code structure, not text. "
+            "Structural AST search using ast-grep patterns — matches code structure, "
+            "not text. More precise than grep for finding specific code patterns: "
+            "catches all variations regardless of whitespace, comments, or formatting. "
             "Use $VAR for single nodes, $$$VAR for multiple nodes. "
-            "Examples: 'def $F($$$ARGS)', 'if $COND: $$$BODY', '$OBJ.$METHOD($$$ARGS)'."
+            "Examples: 'def $F($$$ARGS)', 'if $COND: $$$BODY', '$OBJ.$METHOD($$$ARGS)'. "
+            "Requires ast-grep-cli. Prefer grep for simple text/name searches — "
+            "ast_search is for structural patterns only."
         ),
         "input_schema": AstSearchParams.model_json_schema(),
     },
@@ -657,19 +685,23 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "git_show",
         "description": (
-            "Show full details of a specific git commit: author, date, full commit message "
-            "(including body/PR description), and the diff. "
-            "Use after git_log or git_blame to understand the motivation behind a change."
+            "Show full details of a specific git commit: author, date, full commit "
+            "message (including body/PR description), and the diff. Use after git_log "
+            "or git_blame to understand the motivation behind a change. Use the file "
+            "parameter to limit the diff to a single file when the commit touches many "
+            "files. Returns the complete diff — for commit metadata only, use git_log."
         ),
         "input_schema": GitShowParams.model_json_schema(),
     },
     {
         "name": "find_tests",
         "description": (
-            "Find test functions that test a given function or class. "
-            "Searches test files (test_*.py, *_test.py, *.test.ts, *.spec.ts, *_test.go, *Test.java, *_test.rs) "
+            "Find test functions that test a given function or class. Searches test files "
+            "(test_*.py, *_test.py, *.test.ts, *.spec.ts, *_test.go, *Test.java, *_test.rs) "
             "for references to the target and returns the enclosing test function with context. "
-            "Useful for understanding test coverage and finding relevant test examples."
+            "Use to check if a function has tests, or to find test examples that document "
+            "expected behavior. Returns test file paths and function names — follow up with "
+            "test_outline for details about what each test mocks and asserts."
         ),
         "input_schema": FindTestsParams.model_json_schema(),
     },
@@ -677,8 +709,10 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "test_outline",
         "description": (
             "Get the detailed structure of a test file: test classes/suites, test functions, "
-            "what they mock (patch/MagicMock/jest.fn/vi.mock), what they assert, and fixtures used. "
-            "Richer than file_outline — understands test semantics for pytest, jest, mocha, vitest, and Go."
+            "what they mock (patch/MagicMock/jest.fn/vi.mock), what they assert, and fixtures "
+            "used. Richer than file_outline — understands test semantics for pytest, jest, "
+            "mocha, vitest, and Go. Use to understand what a test file covers without reading "
+            "every line. Does not execute tests — use run_test for that."
         ),
         "input_schema": TestOutlineParams.model_json_schema(),
     },
@@ -698,29 +732,39 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "compressed_view",
         "description": (
-            "Return a compressed view of a file showing function/class signatures, "
-            "call relationships, side effects, and exceptions. Saves ~80% tokens vs "
-            "read_file. Use this FIRST to understand a file's structure, then use "
-            "expand_symbol only for specific symbols you need in detail."
+            "Return a compressed view of a file: function/class signatures with line "
+            "numbers, call relationships between functions, side effects (DB writes, "
+            "HTTP calls, file I/O), and exceptions raised. Saves ~80% tokens vs "
+            "read_file while showing the same structural information. Use this as "
+            "the default way to understand a file before deciding what to read in "
+            "detail. Does not show function bodies or logic — use read_file with a "
+            "line range or expand_symbol when you need the actual implementation. "
+            "Use the focus parameter to filter to a specific class or function."
         ),
         "input_schema": CompressedViewParams.model_json_schema(),
     },
     {
         "name": "module_summary",
         "description": (
-            "Return a high-level summary of a module/directory: key services, models, "
-            "classes, functions, dependencies, and file list. Saves ~95% tokens vs "
-            "reading all files. Use this when deciding which part of the codebase to "
-            "explore, or when answering architecture questions."
+            "Return a high-level summary of a module/directory: classes, functions, "
+            "imports, dependencies, and file list. Saves ~95% tokens vs reading all "
+            "files. Use this as your first step when exploring an unfamiliar directory — "
+            "it reveals the major components and their relationships so you can target "
+            "specific files. Does not show function bodies, line-level detail, or test "
+            "coverage. Follow up with compressed_view on specific files of interest."
         ),
         "input_schema": ModuleSummaryParams.model_json_schema(),
     },
     {
         "name": "expand_symbol",
         "description": (
-            "Expand a symbol to its full source code. Use after compressed_view when "
-            "you need the complete implementation of a specific function or class. "
-            "Provide file_path for faster lookup, or omit to search the workspace."
+            "Expand a symbol to its full source code with line numbers. Use after "
+            "compressed_view or file_outline when you need the complete implementation "
+            "of a specific function or class — avoids reading the entire file. "
+            "Provide file_path for faster lookup, or omit to search the workspace. "
+            "Returns only the symbol body, not the surrounding file. Prefer read_file "
+            "with start_line/end_line when you need surrounding context (e.g. nearby "
+            "comments, adjacent methods, or class-level fields)."
         ),
         "input_schema": ExpandSymbolParams.model_json_schema(),
     },
@@ -732,7 +776,10 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "check-then-act anti-patterns, transaction boundaries, token lifecycle, "
             "and side-effect chains. Returns structured matches with file, line, "
             "pattern category, and a snippet. Use this to quickly identify risky "
-            "code patterns before diving into detailed review."
+            "code patterns before diving into detailed review. Use the categories "
+            "parameter to focus on specific patterns (e.g. 'retry,transaction') "
+            "rather than scanning everything. Does not verify correctness — it "
+            "finds pattern instances that warrant deeper investigation."
         ),
         "input_schema": DetectPatternsParams.model_json_schema(),
     },

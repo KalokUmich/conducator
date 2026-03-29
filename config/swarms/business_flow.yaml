@@ -19,6 +19,8 @@ synthesis_guide: |
   4. Resolve conflicts: cite the stronger evidence.
   5. Cite sources: reference specific file:line locations.
   6. Preserve specifics: exact field names (e.g. setPassword, commissionConsent), method names, enum values verbatim. Do NOT paraphrase technical terms.
+  7. Answer from the user's perspective. If the question asks about customer steps, list the customer-facing steps (from the domain model), not internal system mechanics like polling intervals or callback routing.
+  8. Prefer the domain model (Request/DTO with boolean checklist) as the authoritative step list. Use service implementations only to explain HOW each step is executed.
 
   Required output format:
 
@@ -26,10 +28,10 @@ synthesis_guide: |
   3-5 sentences summarising the end-to-end flow in plain English.
 
   ### Step-by-Step Breakdown
-  Numbered list. Each step: what happens, which class/function (file:line), side-effects (DB, events, async).
+  Numbered list anchored to the domain model fields. Each step: the domain model field, what the customer does, which service handles it (file:line).
 
   ### Key Files
-  Bulleted list of the most important files with one-line descriptions.
+  Bulleted list of the most important files with one-line descriptions. Lead with the domain model.
 
   ### Gaps & Uncertainties
   Anything the evidence did not conclusively show. If everything confirmed, write "None."

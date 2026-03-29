@@ -40,7 +40,7 @@ import {
     WorkspaceConfig,
 } from './services/workspaceStorage';
 // ConductorDb removed — repo graph and symbol index managed by treeSitterService + repoGraphBuilder
-import { runExplainPipeline } from './services/explainWithContextPipeline';
+// explainWithContextPipeline removed — code explanations now route through _handleAskAI with codeContext
 // workspaceIndexer removed — symbol extraction handled by treeSitterService
 import { RagClient, RagFileChange } from './services/ragClient';
 import { ConductorFileSystemProvider } from './services/conductorFileSystemProvider';
@@ -1215,7 +1215,18 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     this._handleOpenConductorWorkspace(message.roomId);
                     return;
                 case 'explainCodeFromSnippet':
-                    await this._handleExplainCodeFromSnippet(message);
+                    // Legacy: redirect to unified @AI path
+                    await this._handleAskAI({
+                        roomId: message.roomId,
+                        query: message.question || `Explain this ${message.language || 'code'}: what it does, its inputs and outputs, and any key dependencies or side-effects.`,
+                        codeContext: {
+                            code: message.code,
+                            relativePath: message.relativePath,
+                            startLine: message.startLine,
+                            endLine: message.endLine,
+                            language: message.language,
+                        },
+                    });
                     return;
                 case 'askAI':
                     await this._handleAskAI(message);
@@ -3801,129 +3812,21 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         roomId: string;
         question?: string;
     }): Promise<void> {
-        const backendUrl = getBackendUrl();
+        const language = message.language || '';
+        const query = message.question ||
+            `Explain this ${language || 'code'}: what it does, its inputs and outputs, and any key dependencies or side-effects.`;
 
-        console.log('[Conductor][ExplainCode] === Starting explain code ===');
-        console.log('[Conductor][ExplainCode] file:', message.relativePath,
-            'lines:', message.startLine, '-', message.endLine,
-            'lang:', message.language);
-        console.log('[Conductor][ExplainCode] code length:', message.code.length, 'chars');
-        console.log('[Conductor][ExplainCode] workspaceConfig:', workspaceConfig ? JSON.stringify(workspaceConfig) : 'NULL');
-        console.log('[Conductor][ExplainCode] backendUrl:', backendUrl);
-
-        // Resolve the active editor URI and cursor position for LSP queries.
-        // If there is no active editor we synthesise a position from the
-        // 1-based line numbers in the message so the pipeline degrades gracefully.
-        const editor   = vscode.window.activeTextEditor;
-        const position = editor?.selection.active
-            ?? new vscode.Position(Math.max(0, message.startLine - 1), 0);
-
-        console.log('[Conductor][ExplainCode] activeEditor:', editor ? editor.document.uri.fsPath : 'NONE');
-        console.log('[Conductor][ExplainCode] position:', position.line, ':', position.character);
-
-        let fileUri: vscode.Uri | undefined = editor?.document.uri;
-        if (!fileUri) {
-            console.log('[Conductor][ExplainCode] No active editor, resolving via workspace folders...');
-            // Fall back to resolving via workspace folders.
-            for (const folder of vscode.workspace.workspaceFolders ?? []) {
-                const candidate = vscode.Uri.joinPath(folder.uri, message.relativePath);
-                console.log('[Conductor][ExplainCode] Trying:', candidate.fsPath);
-                try {
-                    await vscode.workspace.fs.stat(candidate);
-                    fileUri = candidate;
-                    break;
-                } catch { /* try next */ }
-            }
-        }
-
-        if (!fileUri) {
-            console.warn('[Conductor][ExplainCode] Cannot locate file in workspace — aborting');
-            this._view?.webview.postMessage({
-                command: 'codeExplanationReady',
-                error: 'Cannot locate file in workspace.',
-            });
-            return;
-        }
-
-        console.log('[Conductor][ExplainCode] Resolved fileUri:', fileUri.fsPath);
-
-        try {
-            // ---- Run the 8-stage pipeline --------------------------------
-            console.log('[Conductor][ExplainCode] Launching 8-stage pipeline...');
-            const result = await runExplainPipeline({
-                uri:               fileUri,
-                selectionPosition: position,
-                relativePath:      message.relativePath,
-                language:          message.language,
-                code:              message.code,
-                startLine:         message.startLine,
-                endLine:           message.endLine,
-                question:          message.question,
-                backendUrl,
-                workspaceId:       message.roomId,
-                workspaceFolders:  [...(vscode.workspace.workspaceFolders ?? [])],
-                workspaceConfig:   workspaceConfig  ?? undefined,
-                onProgress:        (evt) => this._view?.webview.postMessage({ command: 'explainProgress', ...evt }),
-            });
-
-            console.log('[Conductor][ExplainCode] Pipeline returned:',
-                'model=', result.model,
-                'explanation=', result.explanation.length, 'chars',
-                'xmlPrompt=', result.xmlPrompt.length, 'chars',
-                'timings=', JSON.stringify(result.timings));
-
-            // ---- Stage 8: render ----------------------------------------
-            // Guard: if the pipeline returned an empty explanation, do NOT post
-            // an empty message to chat — show an error instead.
-            if (!result.explanation?.trim()) {
-                console.warn('[Conductor][ExplainCode] Pipeline returned empty explanation — not posting');
-                this._view?.webview.postMessage({
-                    command: 'codeExplanationReady',
-                    error: 'AI returned an empty explanation. Please try again.',
-                });
-                return;
-            }
-
-            // Post the explanation to the chat room via REST so all participants
-            // receive it via the WebSocket broadcast.  The WebView MUST NOT
-            // call fetch() directly — the VS Code CSP blocks external URLs.
-            const aiData = JSON.stringify({
+        await this._handleAskAI({
+            roomId: message.roomId,
+            query,
+            codeContext: {
                 code:         message.code,
                 relativePath: message.relativePath,
                 startLine:    message.startLine,
                 endLine:      message.endLine,
-                structured:   result.structured,
-                thinking_steps: result.thinking_steps,
-            });
-            const postParams = new URLSearchParams({
-                message_type: 'ai_explanation',
-                model_name:   result.model || 'ai',
-                content:      result.explanation,
-                ai_data:      aiData,
-            });
-            const postUrl = `${backendUrl}/chat/${encodeURIComponent(message.roomId)}/ai-message?${postParams.toString()}`;
-            console.log('[Conductor][ExplainCode] POSTing explanation to chat, url length:', postUrl.length);
-            const postResponse = await fetch(postUrl, { method: 'POST' });
-            if (!postResponse.ok) {
-                console.warn('[Conductor][ExplainCode] POST to chat failed:', postResponse.status, await postResponse.text().catch(() => ''));
-            } else {
-                console.log('[Conductor][ExplainCode] POST to chat succeeded');
-            }
-
-            // Dismiss any loading indicator in the WebView.
-            this._view?.webview.postMessage({ command: 'codeExplanationReady' });
-
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            console.error('[Conductor][ExplainCode] Pipeline FAILED:', msg);
-            if (error instanceof Error && error.stack) {
-                console.error('[Conductor][ExplainCode] Stack:', error.stack);
-            }
-            this._view?.webview.postMessage({
-                command: 'codeExplanationReady',
-                error: msg,
-            });
-        }
+                language,
+            },
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -4243,113 +4146,21 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
      * so we don't need to ask the editor for a selection.  The user's optional
      * question becomes the pipeline question.
      */
-    private async _handleExplainCodeFromSnippet(message: {
-        code:          string;
-        relativePath:  string;
-        startLine:     number;
-        endLine:       number;
-        language?:     string;
-        roomId:        string;
-        question?:     string;
+    // -------------------------------------------------------------------
+    // Ask AI (@AI in chat, also handles code explanations with codeContext)
+    // -------------------------------------------------------------------
+
+    private async _handleAskAI(message: {
+        roomId: string;
+        query: string;
+        codeContext?: {
+            code: string;
+            relativePath: string;
+            startLine: number;
+            endLine: number;
+            language?: string;
+        };
     }): Promise<void> {
-        const folders = vscode.workspace.workspaceFolders;
-        if (!folders || folders.length === 0) {
-            this._view?.webview.postMessage({
-                command: 'explainCodeFromSnippetDone',
-                success: false,
-                error: 'No workspace folder open',
-            });
-            return;
-        }
-
-        const language = message.language || _langFromPath(message.relativePath);
-
-        // Reconstruct the file URI (best-effort — falls back to first folder if file is absent)
-        let fileUri = vscode.Uri.joinPath(folders[0].uri, message.relativePath);
-        for (const folder of folders) {
-            const candidate = vscode.Uri.joinPath(folder.uri, message.relativePath);
-            try {
-                await vscode.workspace.fs.stat(candidate);
-                fileUri = candidate;
-                break;
-            } catch { /* try next folder */ }
-        }
-
-        const position = new vscode.Position(Math.max(0, message.startLine - 1), 0);
-        const backendUrl = getBackendUrl();
-
-        try {
-            const result = await runExplainPipeline({
-                uri:               fileUri,
-                selectionPosition: position,
-                relativePath:      message.relativePath,
-                language,
-                code:              message.code,
-                startLine:         message.startLine,
-                endLine:           message.endLine,
-                question:          message.question ||
-                    `Describe this ${language} code: what it does, its inputs and outputs, ` +
-                    `the business scenario it serves, and any key dependencies or side-effects.`,
-                backendUrl,
-                workspaceId:       message.roomId,
-                workspaceFolders:  [...folders],
-                workspaceConfig:   workspaceConfig  ?? undefined,
-                onProgress:        (evt) => this._view?.webview.postMessage({ command: 'explainProgress', ...evt }),
-            });
-
-            // Guard: if the pipeline returned an empty explanation, do NOT post
-            // an empty message to chat — show an error instead.
-            if (!result.explanation?.trim()) {
-                console.warn('[Conductor][ExplainFromSnippet] Pipeline returned empty explanation — not posting');
-                this._view?.webview.postMessage({
-                    command: 'explainCodeFromSnippetDone',
-                    success: false,
-                    error: 'AI returned an empty explanation. Please try again.',
-                });
-                return;
-            }
-
-            // Broadcast the explanation as an AI message in the room.
-            // The endpoint uses Query params (same contract as _handleExplainCode).
-            const aiData = JSON.stringify({
-                code:         message.code,
-                relativePath: message.relativePath,
-                startLine:    message.startLine,
-                endLine:      message.endLine,
-                language,
-                model:        result.model,
-                structured:   result.structured,
-                thinking_steps: result.thinking_steps,
-            });
-            const postParams = new URLSearchParams({
-                message_type: 'ai_explanation',
-                model_name:   result.model || 'ai',
-                content:      result.explanation,
-                ai_data:      aiData,
-            });
-            const aiMsgUrl = `${backendUrl}/chat/${encodeURIComponent(message.roomId)}/ai-message?${postParams.toString()}`;
-            const postResponse = await fetch(aiMsgUrl, { method: 'POST' });
-            if (!postResponse.ok) {
-                console.warn('[Conductor][ExplainFromSnippet] POST to chat failed:', postResponse.status);
-            }
-
-            this._view?.webview.postMessage({ command: 'explainCodeFromSnippetDone', success: true });
-        } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            console.error('[Conductor][ExplainFromSnippet] Failed:', msg);
-            this._view?.webview.postMessage({
-                command: 'explainCodeFromSnippetDone',
-                success: false,
-                error:   msg,
-            });
-        }
-    }
-
-    // -------------------------------------------------------------------
-    // Ask AI (@AI in chat)
-    // -------------------------------------------------------------------
-
-    private async _handleAskAI(message: { roomId: string; query: string }): Promise<void> {
         const backendUrl = getBackendUrl();
         const roomId = message.roomId;
         const query = message.query;
@@ -4371,6 +4182,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     room_id: roomId,
                     query: query,
                     max_iterations: 15,
+                    ...(message.codeContext ? {
+                        code_context: {
+                            code:       message.codeContext.code,
+                            file_path:  message.codeContext.relativePath,
+                            language:   message.codeContext.language || '',
+                            start_line: message.codeContext.startLine,
+                            end_line:   message.codeContext.endLine,
+                        },
+                    } : {}),
                 }),
                 signal: abortController.signal,
             });
@@ -4526,6 +4346,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             if (!finalAnswer.trim()) {
                 console.warn('[Conductor][AskAI] Agent returned empty answer — not posting');
                 this._view?.webview.postMessage({ command: 'askAIDone', error: 'AI returned an empty answer. Please try again.' });
+                if (message.codeContext) {
+                    this._view?.webview.postMessage({ command: 'explainCodeFromSnippetDone', success: false });
+                }
                 return;
             }
 
@@ -4539,9 +4362,19 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 }
             } catch { /* ignore */ }
 
-            const aiData = JSON.stringify({ query, thinking_steps: thinkingSteps });
+            const hasCodeContext = !!message.codeContext;
+            const aiData = hasCodeContext
+                ? JSON.stringify({
+                      code:         message.codeContext!.code,
+                      relativePath: message.codeContext!.relativePath,
+                      startLine:    message.codeContext!.startLine,
+                      endLine:      message.codeContext!.endLine,
+                      language:     message.codeContext!.language || '',
+                      thinking_steps: thinkingSteps,
+                  })
+                : JSON.stringify({ query, thinking_steps: thinkingSteps });
             const postParams = new URLSearchParams({
-                message_type: 'ai_answer',
+                message_type: hasCodeContext ? 'ai_explanation' : 'ai_answer',
                 model_name: modelName,
                 content: finalAnswer,
                 ai_data: aiData,
@@ -4553,6 +4386,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             }
 
             this._view?.webview.postMessage({ command: 'askAIDone' });
+            if (hasCodeContext) {
+                this._view?.webview.postMessage({ command: 'explainCodeFromSnippetDone', success: true });
+            }
 
         } catch (error) {
             const isAbort = error instanceof DOMException && error.name === 'AbortError';
@@ -4571,6 +4407,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     error: msg,
                     thinkingSteps: thinkingSteps,
                 });
+            }
+            if (message.codeContext) {
+                this._view?.webview.postMessage({ command: 'explainCodeFromSnippetDone', success: false });
             }
         } finally {
             this._askAIAbortController = null;
@@ -5049,12 +4888,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 }
                 const content = fs.readFileSync(filePath, 'utf-8');
                 const lines = content.split('\n');
-                const start = (params.start_line || 1) - 1;
-                const end = params.end_line || lines.length;
-                const slice = lines.slice(start, end).join('\n');
+                const startLine = params.start_line || 1;
+                const endLine = params.end_line || lines.length;
+                const slice = lines.slice(startLine - 1, endLine)
+                    .map((l: string, i: number) => `${String(startLine + i).padStart(5)} | ${l}`)
+                    .join('\n');
                 return {
                     success: true,
-                    data: { content: slice, total_lines: lines.length, path: params.path || params.file_path },
+                    data: { path: params.path || params.file_path, total_lines: lines.length, content: slice },
                     truncated: slice.length > maxOutput,
                 };
             }
@@ -5063,19 +4904,34 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 const target = params.directory || params.path || '.';
                 const depth = params.max_depth || 3;
                 const includeGlob = params.include_glob || '';
+                // Validate path exists
+                const resolvedListPath = path.resolve(workspace, target);
+                if (!fs.existsSync(resolvedListPath)) {
+                    return { success: false, data: null, error: `Directory not found: ${target}` };
+                }
+                // Use find with -printf to get type and size
                 const findArgs = [
                     target, '-maxdepth', String(depth),
-                    '-type', 'f',
                     '-not', '-path', '*/.git/*',
                     '-not', '-path', '*/node_modules/*',
                     '-not', '-path', '*/__pycache__/*',
                 ];
                 if (includeGlob) {
-                    findArgs.push('-name', includeGlob);
+                    findArgs.push('-name', includeGlob, '-type', 'f');
                 }
+                // Use -printf for structured output: type\tsize\tpath
+                findArgs.push('-printf', '%y\\t%s\\t%p\\n');
                 const { stdout } = await run('find', findArgs);
-                const files = stdout.trim().split('\n').filter(Boolean);
-                return { success: true, data: { files, count: files.length } };
+                const entries = stdout.trim().split('\n').filter(Boolean).map(line => {
+                    const [type, sizeStr, ...pathParts] = line.split('\t');
+                    const entryPath = pathParts.join('\t');
+                    return {
+                        path: entryPath,
+                        is_dir: type === 'd',
+                        size: type === 'f' ? parseInt(sizeStr) || null : null,
+                    };
+                });
+                return { success: true, data: entries, truncated: entries.length >= 500 };
             }
 
             case 'grep': {
@@ -5085,11 +4941,30 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 const maxResults = String(params.max_results || 50);
                 const includeGlob = params.include_glob || params.include || '';
 
-                // Prefer ripgrep (rg) — same as the Python backend
+                // Validate path exists — match Python behavior
+                const resolvedGrepPath = path.resolve(workspace, grepPath);
+                if (!fs.existsSync(resolvedGrepPath)) {
+                    return { success: false, data: null, error: `Path not found: ${grepPath}` };
+                }
+
+                // Prefer ripgrep (rg) — same as the Python backend.
+                // --no-ignore: Python grep walks files manually and ignores .gitignore.
+                // Without this, rg skips files that .gitignore excludes, causing 0 results
+                // for valid patterns in workspaces with aggressive gitignore rules.
                 let stdout: string;
                 try {
                     const rgArgs = [
                         '-n', '--no-heading', '--with-filename',
+                        '--no-ignore',        // don't skip files via .gitignore
+                        '--no-messages',      // suppress error messages (prevents exit code 2 on permission/binary issues)
+                        '--glob', '!.git',
+                        '--glob', '!node_modules',
+                        '--glob', '!__pycache__',
+                        '--glob', '!*.min.js',
+                        '--glob', '!*.min.css',
+                        '--glob', '!target',
+                        '--glob', '!build',
+                        '--glob', '!dist',
                         '-m', maxResults,
                     ];
                     if (includeGlob) {
@@ -5098,9 +4973,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     rgArgs.push('--', pattern, grepPath);
                     const result = await run('rg', rgArgs);
                     stdout = result.stdout;
-                } catch {
-                    // Fallback to system grep if rg is not installed
-                    const grepArgs = ['-rn'];
+                } catch (rgError: any) {
+                    // Fallback to system grep if rg is not installed or fails.
+                    // -E enables extended regex (|, +, ?, etc.) to match rg behavior.
+                    console.warn('[Conductor][grep] rg failed, falling back to system grep:', rgError?.message || rgError);
+                    const grepArgs = ['-rn', '-E'];
                     if (includeGlob) {
                         grepArgs.push('--include', includeGlob);
                     }
@@ -5112,15 +4989,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 const matches = stdout.trim().split('\n').filter(Boolean).map(line => {
                     const parts = line.split(':');
                     return {
-                        file: parts[0],
-                        line: parseInt(parts[1]) || 0,
+                        file_path: parts[0],
+                        line_number: parseInt(parts[1]) || 0,
                         content: parts.slice(2).join(':'),
                     };
                 });
                 return {
                     success: true,
-                    data: { matches, count: matches.length, pattern },
-                    truncated: stdout.length > maxOutput,
+                    data: matches,
+                    truncated: matches.length >= parseInt(maxResults),
                 };
             }
 
@@ -5146,7 +5023,16 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         }
                         matches = matches.slice(0, 50);
                         if (matches.length > 0) {
-                            return { success: true, data: { matches, count: matches.length, symbol, source: 'lsp' } };
+                            // Normalize LSP results to match Python schema
+                            const normalized = matches.map(m => ({
+                                name: m.content.split(' ').pop() || symbol,
+                                kind: m.kind,
+                                file_path: m.file,
+                                start_line: m.line,
+                                end_line: m.line,
+                                signature: m.content,
+                            }));
+                            return { success: true, data: normalized };
                         }
                     }
                 } catch {}
@@ -5158,11 +5044,19 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     '.',
                 ];
                 const { stdout } = await run('grep', args);
-                const matches = stdout.trim().split('\n').filter(Boolean).map(line => {
+                const grepMatches = stdout.trim().split('\n').filter(Boolean).map(line => {
                     const parts = line.split(':');
-                    return { file: parts[0], line: parseInt(parts[1]) || 0, content: parts.slice(2).join(':').trim() };
+                    const content = parts.slice(2).join(':').trim();
+                    return {
+                        name: symbol,
+                        kind: content.startsWith('class ') ? 'class' : content.startsWith('def ') ? 'function' : 'function',
+                        file_path: parts[0],
+                        start_line: parseInt(parts[1]) || 0,
+                        end_line: parseInt(parts[1]) || 0,
+                        signature: content,
+                    };
                 });
-                return { success: true, data: { matches, count: matches.length, symbol, source: 'grep' } };
+                return { success: true, data: grepMatches };
             }
 
             case 'file_outline': {
@@ -5172,14 +5066,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 const docSymbols = await getDocumentSymbols(filePath);
                 if (docSymbols) {
                     const flat = flattenSymbols(docSymbols);
-                    const symbols = flat.map(s => ({
-                        line: s.line,
-                        text: `${s.kind} ${s.name}${s.parent ? ` (in ${s.parent})` : ''}`,
-                        kind: s.kind,
+                    const normalized = flat.map(s => ({
                         name: s.name,
+                        kind: s.kind.toLowerCase(),
+                        file_path: filePath,
+                        start_line: s.line,
                         end_line: s.endLine,
+                        signature: `${s.kind} ${s.name}${s.parent ? ` (in ${s.parent})` : ''}`,
                     }));
-                    return { success: true, data: { path: filePath, symbols, count: symbols.length, source: 'lsp' } };
+                    return { success: true, data: normalized };
                 }
                 // Fallback to grep
                 const args = [
@@ -5188,11 +5083,19 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     path.resolve(workspace, filePath),
                 ];
                 const { stdout } = await run('grep', args);
-                const symbols = stdout.trim().split('\n').filter(Boolean).map(line => {
+                const grepSymbols = stdout.trim().split('\n').filter(Boolean).map(line => {
                     const parts = line.split(':');
-                    return { line: parseInt(parts[0]) || 0, text: parts.slice(1).join(':').trim() };
+                    const content = parts.slice(1).join(':').trim();
+                    return {
+                        name: content.split(/[\s(]/)[1] || content,
+                        kind: content.startsWith('class ') ? 'class' : 'function',
+                        file_path: filePath,
+                        start_line: parseInt(parts[0]) || 0,
+                        end_line: parseInt(parts[0]) || 0,
+                        signature: content,
+                    };
                 });
-                return { success: true, data: { path: filePath, symbols, count: symbols.length, source: 'grep' } };
+                return { success: true, data: grepSymbols };
             }
 
             // ---- Git operations ----
@@ -5222,7 +5125,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 if (current) { commits.push(current); }
                 // Cap stat lines per commit
                 for (const c of commits) { c.stat = c.stat.slice(0, 10); }
-                return { success: true, data: { commits, count: commits.length } };
+                return { success: true, data: commits };
             }
 
             case 'git_diff': {
@@ -5236,31 +5139,66 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 const { stdout } = await run('git', args);
                 return {
                     success: true,
-                    data: { diff: stdout, ref: ref1 },
+                    data: { diff: stdout },
                     truncated: stdout.length > maxOutput,
                 };
             }
 
             case 'git_blame': {
                 const filePath = params.file || params.path || params.file_path;
-                if (!filePath) { return { success: false, data: null, error: 'git_blame requires a file path (file, path, or file_path param)' }; }
+                if (!filePath) { return { success: false, data: null, error: 'git_blame requires a file path' }; }
                 const args = ['blame', '--line-porcelain'];
                 if (params.start_line && params.end_line) {
                     args.push(`-L${params.start_line},${params.end_line}`);
                 }
                 args.push(filePath);
                 const { stdout } = await run('git', args);
-                return { success: true, data: { blame: stdout, path: filePath }, truncated: stdout.length > maxOutput };
+                // Parse porcelain format into structured entries
+                const entries: Array<{commit_hash: string; author: string; date: string; line_number: number; content: string}> = [];
+                let currentHash = '', currentAuthor = '', currentDate = '', currentLine = 0;
+                for (const line of stdout.split('\n')) {
+                    if (/^[0-9a-f]{40} /.test(line)) {
+                        const parts = line.split(' ');
+                        currentHash = parts[0].slice(0, 8);
+                        currentLine = parseInt(parts[2]) || 0;
+                    } else if (line.startsWith('author ')) {
+                        currentAuthor = line.slice(7);
+                    } else if (line.startsWith('author-time ')) {
+                        const ts = parseInt(line.slice(12)) || 0;
+                        const d = new Date(ts * 1000);
+                        currentDate = d.toISOString().replace('T', ' ').slice(0, 16);
+                    } else if (line.startsWith('\t')) {
+                        entries.push({
+                            commit_hash: currentHash,
+                            author: currentAuthor,
+                            date: currentDate,
+                            line_number: currentLine,
+                            content: line.slice(1),
+                        });
+                    }
+                }
+                return { success: true, data: entries, truncated: entries.length > 200 };
             }
 
             case 'git_show': {
                 const ref = params.commit || params.ref || 'HEAD';
-                const showArgs = ['show', ref];
                 const showFile = params.file || params.path;
-                if (showFile) { showArgs.push('--', showFile); }
-                const { stdout } = await run('git', showArgs);
-                const lineCount = stdout.split('\n').length;
-                return { success: true, data: { content: stdout, ref, lines: lineCount }, truncated: stdout.length > maxOutput };
+                // Get structured metadata
+                const { stdout: meta } = await run('git', ['show', '-s', '--format=%H|%an|%ad|%B', '--date=iso', ref]);
+                const metaParts = meta.split('|');
+                const commitHash = (metaParts[0] || '').trim().slice(0, 8);
+                const author = (metaParts[1] || '').trim();
+                const date = (metaParts[2] || '').trim();
+                const message = (metaParts.slice(3).join('|') || '').trim();
+                // Get diff
+                const diffArgs = ['show', '--format=', ref];
+                if (showFile) { diffArgs.push('--', showFile); }
+                const { stdout: diff } = await run('git', diffArgs);
+                return {
+                    success: true,
+                    data: { commit_hash: commitHash, author, date, message, diff },
+                    truncated: diff.length > maxOutput,
+                };
             }
 
             // ---- Test operations ----
@@ -5280,14 +5218,27 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 ]);
                 const allTestFiles = testFiles.trim().split('\n').filter(Boolean);
                 if (allTestFiles.length === 0) {
-                    return { success: true, data: { matches: [], count: 0 } };
+                    return { success: true, data: [] };
                 }
-                // Grep for the name in test files
+                // Grep for the name in test files with line numbers
                 const { stdout: grepOut } = await run('grep', [
-                    '-ln', name, ...allTestFiles,
+                    '-n', name, ...allTestFiles,
                 ]);
-                const matchingFiles = grepOut.trim().split('\n').filter(Boolean);
-                return { success: true, data: { matches: matchingFiles, count: matchingFiles.length, name } };
+                const results = grepOut.trim().split('\n').filter(Boolean).map(line => {
+                    const parts = line.split(':');
+                    const testFile = parts[0];
+                    const lineNum = parseInt(parts[1]) || 0;
+                    const content = parts.slice(2).join(':').trim();
+                    // Extract test function name from content
+                    const fnMatch = content.match(/(?:def |function |it\(|test\()(\w+)/);
+                    return {
+                        test_file: testFile,
+                        test_function: fnMatch ? fnMatch[1] : name,
+                        line_number: lineNum,
+                        context: content.slice(0, 200),
+                    };
+                });
+                return { success: true, data: results, truncated: results.length >= 50 };
             }
 
             case 'run_test': {
@@ -5308,8 +5259,29 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     // Fallback: try pytest
                     cmd = ['python', '-m', 'pytest', testFile, '-v'];
                 }
-                const { stdout, stderr } = await run(cmd[0], cmd.slice(1), workspace, timeout);
-                return { success: true, data: { stdout, stderr, command: cmd.join(' ') } };
+                let testStdout = '', testStderr = '', exitCode = 0;
+                try {
+                    const result = await run(cmd[0], cmd.slice(1), workspace, timeout);
+                    testStdout = result.stdout;
+                    testStderr = result.stderr;
+                } catch (e: any) {
+                    testStdout = e.stdout || '';
+                    testStderr = e.stderr || '';
+                    exitCode = e.code || 1;
+                }
+                const runnerMap: Record<string, string> = { '.py': 'pytest', '.ts': 'jest', '.js': 'jest', '.go': 'go test', '.java': 'maven' };
+                return {
+                    success: true,
+                    data: {
+                        passed: exitCode === 0,
+                        return_code: exitCode,
+                        runner: runnerMap[ext] || 'unknown',
+                        test_file: testFile,
+                        test_name: testName || null,
+                        output: testStdout.slice(-3000),
+                        stderr: exitCode === 0 ? '' : testStderr.slice(-1000),
+                    },
+                };
             }
 
             case 'git_diff_files': {
@@ -5330,9 +5302,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     const status = parts[0];
                     const filePath = parts[parts.length - 1];
                     const nums = numMap[filePath] || { added: 0, deleted: 0 };
-                    files.push({ file: filePath, status: status[0], added: nums.added, deleted: nums.deleted });
+                    const statusMap: Record<string, string> = { 'M': 'modified', 'A': 'added', 'D': 'deleted', 'R': 'renamed', 'C': 'copied' };
+                    files.push({
+                        path: filePath,
+                        status: statusMap[status[0]] || status[0],
+                        additions: nums.added,
+                        deletions: nums.deleted,
+                    });
                 }
-                return { success: true, data: { files, count: files.length, ref } };
+                return { success: true, data: files };
             }
 
             case 'ast_search': {
@@ -5372,11 +5350,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                             const lspRefs = await findReferencesLsp(searchFile, pos.line, pos.character);
                             if (lspRefs) {
                                 const references = lspRefs.map(r => ({
-                                    file: toRelative(r.uri.fsPath),
-                                    line: r.range.start.line + 1,
-                                    content: '', // LSP doesn't return line content
+                                    file_path: toRelative(r.uri.fsPath),
+                                    line_number: r.range.start.line + 1,
+                                    content: '',
                                 }));
-                                return { success: true, data: { references, count: references.length, symbol, source: 'lsp' } };
+                                return { success: true, data: references };
                             }
                         }
                     }
@@ -5388,11 +5366,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     '--include', '*.java', '--include', '*.go', '--include', '*.rs',
                     '-m', '100', searchFile || '.',
                 ]);
-                const matches = stdout.trim().split('\n').filter(Boolean).map(line => {
+                const refMatches = stdout.trim().split('\n').filter(Boolean).map(line => {
                     const parts = line.split(':');
-                    return { file: parts[0], line: parseInt(parts[1]) || 0, content: parts.slice(2).join(':').trim() };
+                    return { file_path: parts[0], line_number: parseInt(parts[1]) || 0, content: parts.slice(2).join(':').trim() };
                 });
-                return { success: true, data: { references: matches, count: matches.length, symbol, source: 'grep' } };
+                return { success: true, data: refMatches };
             }
 
             case 'test_outline': {
@@ -5404,11 +5382,26 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     '(def test_|it\\(|describe\\(|test\\(|@Test|func Test|#\\[test\\])',
                     resolved,
                 ]);
-                const tests = stdout.trim().split('\n').filter(Boolean).map(line => {
+                const entries = stdout.trim().split('\n').filter(Boolean).map(line => {
                     const parts = line.split(':');
-                    return { line: parseInt(parts[0]) || 0, text: parts.slice(1).join(':').trim() };
+                    const lineNum = parseInt(parts[0]) || 0;
+                    const text = parts.slice(1).join(':').trim();
+                    // Determine kind from content
+                    const kind = text.match(/describe\(|class\s/) ? 'suite' : 'test';
+                    // Extract name from content
+                    const nameMatch = text.match(/def (test_\w+)|it\(['"](.+?)['"]|test\(['"](.+?)['"]|func (Test\w+)|void (test\w+)/);
+                    const name = nameMatch ? (nameMatch[1] || nameMatch[2] || nameMatch[3] || nameMatch[4] || nameMatch[5]) : text.slice(0, 60);
+                    return {
+                        name,
+                        kind,
+                        line_number: lineNum,
+                        end_line: 0,
+                        mocks: [] as string[],
+                        assertions: [] as string[],
+                        fixtures: [] as string[],
+                    };
                 });
-                return { success: true, data: { path: filePath, tests, count: tests.length } };
+                return { success: true, data: entries };
             }
 
             case 'trace_variable': {
@@ -5442,8 +5435,8 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 if (!resolved.startsWith(workspace)) {
                     return { success: false, data: null, error: 'Path traversal blocked' };
                 }
-                const content = fs.readFileSync(resolved, 'utf-8');
-                const lines = content.split('\n');
+                const rawContent = fs.readFileSync(resolved, 'utf-8');
+                const lines = rawContent.split('\n');
                 const totalLines = lines.length;
 
                 // Try VS Code Document Symbols for precise signatures
@@ -5460,11 +5453,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         const sig = lines[s.line - 1]?.trimEnd() || s.name;
                         viewLines.push(`${indent}L${s.line}: ${s.kind} ${s.name} — ${sig}`);
                     }
-                    const view = viewLines.join('\n');
+                    const cvContent = viewLines.join('\n');
                     return {
                         success: true,
-                        data: { path: filePath, total_lines: totalLines, symbols_count: flat.length, view, source: 'lsp' },
-                        truncated: view.length > maxOutput,
+                        data: { content: cvContent, path: filePath, total_lines: totalLines, symbol_count: flat.length },
+                        truncated: cvContent.length > maxOutput,
                     };
                 }
                 // Fallback to regex
@@ -5478,11 +5471,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 if (focus) {
                     filteredSymbols = symbols.filter(s => s.text.toLowerCase().includes(focus));
                 }
-                const view = filteredSymbols.map(s => `L${s.line}: ${s.text}`).join('\n');
+                const cvFallback = filteredSymbols.map(s => `L${s.line}: ${s.text}`).join('\n');
                 return {
                     success: true,
-                    data: { path: filePath, total_lines: totalLines, symbols_count: symbols.length, view, source: 'grep' },
-                    truncated: view.length > maxOutput,
+                    data: { content: cvFallback, path: filePath, total_lines: totalLines, symbol_count: symbols.length },
+                    truncated: cvFallback.length > maxOutput,
                 };
             }
 
@@ -5499,66 +5492,49 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     return { success: false, data: null, error: `Path not found: ${filePath}` };
                 }
                 if (stat.isDirectory()) {
-                    const entries = fs.readdirSync(resolved, { withFileTypes: true });
-                    const files: string[] = [];
+                    const dirEntries = fs.readdirSync(resolved, { withFileTypes: true });
+                    const sourceFiles: string[] = [];
                     const allDefs: string[] = [];
-                    const allImports: string[] = [];
-                    for (const entry of entries) {
+                    let totalLoc = 0;
+                    for (const entry of dirEntries) {
                         if (entry.isFile() && /\.(py|ts|tsx|js|jsx|java|go|rs|c|cpp|h)$/.test(entry.name)) {
-                            files.push(entry.name);
+                            sourceFiles.push(entry.name);
                             try {
                                 const fileContent = fs.readFileSync(path.join(resolved, entry.name), 'utf-8');
-                                for (const line of fileContent.split('\n')) {
+                                const fileLines = fileContent.split('\n');
+                                totalLoc += fileLines.length;
+                                for (const line of fileLines) {
                                     const t = line.trim();
-                                    if (/^(import |from |require\(|const .* = require|use |#include)/.test(t)) {
-                                        allImports.push(t);
-                                    }
                                     if (/^(def |async def |function |class |interface |type |export (default )?(function|class|const|interface|type)|pub (fn|struct|enum|trait))/.test(t)) {
                                         allDefs.push(`${entry.name}: ${t}`);
                                     }
                                 }
                             } catch { /* skip unreadable files */ }
                         } else if (entry.isDirectory()) {
-                            files.push(entry.name + '/');
+                            sourceFiles.push(entry.name + '/');
                         }
                     }
+                    // Build markdown content matching Python format
+                    const mdContent = `## ${filePath}\n\n**Files:** ${sourceFiles.length}\n**LOC:** ${totalLoc}\n\n### Definitions\n${allDefs.map(d => `- ${d}`).join('\n')}`;
                     return {
                         success: true,
-                        data: { path: filePath, files, definitions: allDefs, imports_count: allImports.length, definitions_count: allDefs.length, source: 'directory_scan' },
+                        data: { content: mdContent, file_count: sourceFiles.length, loc: totalLoc },
                     };
                 }
 
-                const content = fs.readFileSync(resolved, 'utf-8');
-                const lines = content.split('\n');
-                // Extract imports (always regex — LSP doesn't expose imports as symbols)
-                const imports: string[] = [];
-                for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (/^(import |from |require\(|const .* = require|use )/.test(trimmed)) {
-                        imports.push(trimmed);
-                    }
-                }
-                // Try VS Code Document Symbols for definitions
-                const docSymbols = await getDocumentSymbols(filePath);
-                if (docSymbols) {
-                    const flat = flattenSymbols(docSymbols).filter(s => !s.parent); // top-level only
-                    const definitions = flat.map(s => `${s.kind} ${s.name}`);
-                    return {
-                        success: true,
-                        data: { path: filePath, total_lines: lines.length, imports, definitions, imports_count: imports.length, definitions_count: definitions.length, source: 'lsp' },
-                    };
-                }
-                // Fallback to regex
+                const fileContent = fs.readFileSync(resolved, 'utf-8');
+                const fileLines = fileContent.split('\n');
                 const definitions: string[] = [];
-                for (const line of lines) {
+                for (const line of fileLines) {
                     const trimmed = line.trim();
                     if (/^(def |async def |function |class |interface |type |export (default )?(function|class|const|interface|type))/.test(trimmed)) {
                         definitions.push(trimmed);
                     }
                 }
+                const mdContent = `## ${filePath}\n\n**LOC:** ${fileLines.length}\n\n### Definitions\n${definitions.map(d => `- ${d}`).join('\n')}`;
                 return {
                     success: true,
-                    data: { path: filePath, total_lines: lines.length, imports, definitions, imports_count: imports.length, definitions_count: definitions.length, source: 'grep' },
+                    data: { content: mdContent, file_count: 1, loc: fileLines.length },
                 };
             }
 

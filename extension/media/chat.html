@@ -75,8 +75,10 @@
         .unread-badge { animation: pulse 2s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 
-        /* === Code snippets — hljs overrides for dark bg === */
+        /* === Code blocks — VS Code-like styling === */
         pre code.hljs { background: transparent !important; padding: 0 !important; }
+        .code-block-wrapper pre { margin: 0; }
+        .code-block-wrapper code { color: #d4d4d4; }  /* VS Code default text color */
 
         /* === Unified error banner === */
         .error-banner {
@@ -363,19 +365,6 @@
         .ai-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
         .ai-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
 
-        /* --- Explain progress indicator --- */
-        @keyframes explainProgressPulse {
-            0%, 100% { opacity: 0.7; }
-            50% { opacity: 1; }
-        }
-        #explain-thinking-indicator {
-            animation: explainProgressPulse 2s ease-in-out infinite;
-        }
-        #explain-thinking-indicator .step-list {
-            max-height: 120px;
-            overflow-y: auto;
-        }
-
         /* --- Collapsible AI explanation --- */
         .explain-collapse-toggle {
             transition: transform 0.2s ease;
@@ -401,6 +390,12 @@
             cursor: pointer;
         }
         .thinking-collapse-toggle.collapsed {
+            transform: rotate(-90deg);
+        }
+        .dispatch-chevron {
+            transition: transform 0.2s ease;
+        }
+        .dispatch-chevron.collapsed {
             transform: rotate(-90deg);
         }
 
@@ -2952,6 +2947,21 @@
         btnModeLocal?.addEventListener('click', () => selectMode('local'));
         btnModeOnline?.addEventListener('click', () => selectMode('online'));
 
+        // Delegated click handler for file:line references in AI answers
+        messagesContainer?.addEventListener('click', (e) => {
+            const ref = e.target.closest('.code-ref');
+            if (ref && ref.dataset.path) {
+                e.preventDefault();
+                e.stopPropagation();
+                vscode.postMessage({
+                    command: 'navigateToCode',
+                    relativePath: ref.dataset.path,
+                    startLine: parseInt(ref.dataset.start) || 1,
+                    endLine: parseInt(ref.dataset.end) || parseInt(ref.dataset.start) || 1,
+                });
+            }
+        });
+
         // Refresh buttons
         document.getElementById('btn-refresh-local-rooms')?.addEventListener('click', () => loadRoomList());
         document.getElementById('btn-refresh-online-rooms')?.addEventListener('click', () => loadOnlineRooms());
@@ -3792,9 +3802,6 @@
                 case 'setupAndIndexComplete':
                     handleSetupAndIndexComplete(message);
                     break;
-                case 'explainProgress':
-                    _updateExplainThinking(message);
-                    break;
                 case 'askAIProgress':
                     _updateAskAIThinking(message);
                     break;
@@ -3813,11 +3820,8 @@
                         }
                     }
                     break;
-                case 'codeExplanationReady':
-                    _removeExplainThinking();
-                    break;
                 case 'explainCodeFromSnippetDone':
-                    _removeExplainThinking();
+                    _removeAskAIThinking();
                     // Reset all in-flight snippet explain buttons
                     document.querySelectorAll('.snippet-explain-btn[data-loading="true"]').forEach(btn => {
                         btn.removeAttribute('data-loading');
@@ -4389,9 +4393,14 @@
             return map[ext] || ext || '';
         }
 
-        /** Apply highlight.js to all code blocks in a container. (disabled — plain code blocks) */
-        function highlightCodeBlocks(_container) {
-            // Syntax highlighting disabled per user preference.
+        /** Apply highlight.js to all code blocks in a container. */
+        function highlightCodeBlocks(container) {
+            if (typeof hljs === 'undefined') return;
+            const blocks = (container || document).querySelectorAll('pre code[class*="language-"], .code-block-wrapper pre code');
+            blocks.forEach(block => {
+                if (block.classList.contains('hljs')) return; // already highlighted
+                try { hljs.highlightElement(block); } catch (_) {}
+            });
         }
 
         function renderMermaidDiagrams(container) {
@@ -5015,7 +5024,7 @@
                                 </button>
                             </div>
                         </div>
-                        <pre class="p-3 text-xs font-mono text-gray-300 whitespace-pre-wrap break-words max-h-80 overflow-y-auto max-w-full" style="background:rgba(0,0,0,0.3)"><code class="language-${langFromFilename(snippet.filename)}">${escapeHtml(snippet.code || '')}</code></pre>
+                        <pre class="p-3 text-xs font-mono whitespace-pre-wrap break-words max-h-80 overflow-y-auto max-w-full" style="background:#1e1e1e;"><code class="language-${langFromFilename(snippet.filename)}">${escapeHtml(snippet.code || '')}</code></pre>
                         <!-- Inline question input (hidden until Explain button is clicked) -->
                         <div id="${explainAreaId}" class="hidden border-t border-gray-700/50">
                             <div class="px-3 py-2 flex flex-col gap-1.5" style="background:rgba(5,20,15,0.6);">
@@ -5075,6 +5084,8 @@
 
             const _doExplain = () => {
                 const question = (questionInp)?.value?.trim() || undefined;
+                const lang = snippet.language || '';
+                const defaultQ = `Explain this ${lang || 'code'}: what it does, its inputs and outputs, and any key dependencies or side-effects.`;
                 // Show spinner in explain button while working
                 if (explainBtn) {
                     explainBtn.setAttribute('disabled', 'true');
@@ -5083,14 +5094,16 @@
                 }
                 _closeExplainArea();
                 vscode.postMessage({
-                    command: 'explainCodeFromSnippet',
-                    code:         snippet.code,
-                    relativePath: snippet.relativePath || snippet.filename,
-                    startLine:    snippet.startLine,
-                    endLine:      snippet.endLine,
-                    language:     snippet.language,
-                    roomId:       session.roomId,
-                    question,
+                    command: 'askAI',
+                    roomId:  session.roomId,
+                    query:   question || defaultQ,
+                    codeContext: {
+                        code:         snippet.code,
+                        relativePath: snippet.relativePath || snippet.filename,
+                        startLine:    snippet.startLine,
+                        endLine:      snippet.endLine,
+                        language:     lang,
+                    },
                 });
             };
 
@@ -5293,93 +5306,8 @@
         }
 
         // ============================================================
-        // Explain progress (thinking indicator)
-        // ============================================================
-
-        const _explainSteps = [];
-        let _explainCurrentAction = '';
-
-        function _updateExplainThinking(event) {
-            if (event.phase === 'complete') {
-                _removeExplainThinking();
-                return;
-            }
-
-            // Track completed steps for the step list
-            if (event.kind === 'tool_result' && event.detail) {
-                _explainSteps.push({
-                    tool: event.detail.tool || '',
-                    summary: event.message || 'done',
-                    success: event.detail.success !== false,
-                });
-            }
-
-            // Determine current action text
-            if (event.kind === 'tool_call') {
-                _explainCurrentAction = event.message || 'Working...';
-            } else if (event.kind === 'thinking') {
-                _explainCurrentAction = event.message || 'Thinking...';
-            } else if (event.phase === 'pipeline') {
-                _explainCurrentAction = event.message || 'Preparing...';
-            } else if (event.kind === 'start') {
-                _explainCurrentAction = event.message || 'Starting...';
-            }
-
-            let el = document.getElementById('explain-thinking-indicator');
-            if (!el) {
-                el = document.createElement('div');
-                el.id = 'explain-thinking-indicator';
-                el.className = 'flex justify-start gap-2 mt-2';
-                messagesContainer.appendChild(el);
-            }
-
-            // Build completed steps HTML (show last 4)
-            const recentSteps = _explainSteps.slice(-4);
-            const stepsHtml = recentSteps.map(s => {
-                const icon = s.success ? '\u2713' : '\u2717';
-                const cls = s.success ? 'text-emerald-500' : 'text-red-400';
-                return `<div class="flex items-center gap-1.5 text-[0.6rem] text-gray-500"><span class="${cls}">${icon}</span><span class="truncate">${escapeHtml(s.summary)}</span></div>`;
-            }).join('');
-
-            const iterInfo = (event.detail && event.detail.iteration)
-                ? `<span class="text-[0.55rem] text-gray-600 ml-auto">step ${event.detail.iteration}</span>`
-                : '';
-
-            el.innerHTML = `
-                <div class="w-7 h-7 bg-emerald-700 rounded-full flex items-center justify-center text-white text-xs font-medium flex-shrink-0 mt-1">
-                    <svg class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-                    </svg>
-                </div>
-                <div class="max-w-[85%] min-w-0">
-                    <div class="bg-emerald-950/20 rounded-lg border border-emerald-800/30 px-3 py-2">
-                        <div class="flex items-center gap-2">
-                            <span class="text-xs text-emerald-300 font-medium">AI is analyzing...</span>
-                            ${iterInfo}
-                        </div>
-                        <div class="text-[0.65rem] text-emerald-400/80 mt-1 truncate">${escapeHtml(_explainCurrentAction)}</div>
-                        ${stepsHtml ? `<div class="step-list mt-1.5 pt-1.5 border-t border-emerald-900/30">${stepsHtml}</div>` : ''}
-                    </div>
-                </div>`;
-
-            smartScroll(false);
-        }
-
-        function _removeExplainThinking() {
-            const el = document.getElementById('explain-thinking-indicator');
-            if (el) {
-                // Fade out then remove
-                el.style.transition = 'opacity 0.3s ease';
-                el.style.opacity = '0';
-                setTimeout(() => el.remove(), 300);
-            }
-            _explainSteps.length = 0;
-            _explainCurrentAction = '';
-        }
-
-        // ============================================================
         // Ask AI thinking indicator + answer renderer
+        // (also used for code explanations via the unified @AI path)
         // ============================================================
 
         let _askAISteps = [];
@@ -5669,37 +5597,188 @@
 
         function _buildThinkingStepsHtml(steps) {
             if (!steps || !steps.length) return '';
-            const stepsHtml = steps.map(s => {
-                if (s.kind === 'thinking') {
-                    const text = (s.text || '').length > 150 ? s.text.slice(0, 150) + '...' : (s.text || '');
-                    return '<div class="flex items-start gap-1.5 text-[0.65rem] text-gray-400 py-0.5">'
-                        + '<span class="text-purple-400 flex-shrink-0 mt-0.5">💭</span>'
-                        + '<span class="break-words">' + escapeHtml(text) + '</span>'
-                        + '</div>';
-                } else if (s.kind === 'tool_call') {
-                    const params = s.params || {};
-                    let detail = '';
-                    if (params.pattern) detail = params.pattern;
-                    else if (params.path || params.file) detail = params.path || params.file;
-                    else if (params.name || params.symbol) detail = params.name || params.symbol;
-                    if (detail && detail.length > 60) detail = detail.slice(0, 60) + '...';
-                    return '<div class="flex items-center gap-1.5 text-[0.65rem] text-gray-400 py-0.5">'
-                        + '<span class="text-blue-400 flex-shrink-0">▶</span>'
-                        + '<span class="font-mono text-blue-300">' + escapeHtml(s.tool || '') + '</span>'
-                        + (detail ? '<span class="text-gray-500 truncate">(' + escapeHtml(detail) + ')</span>' : '')
-                        + '</div>';
-                } else if (s.kind === 'tool_result') {
-                    const icon = s.success !== false ? '✓' : '✗';
-                    const cls = s.success !== false ? 'text-emerald-400' : 'text-red-400';
-                    return '<div class="flex items-center gap-1.5 text-[0.65rem] text-gray-400 py-0.5">'
-                        + '<span class="' + cls + ' flex-shrink-0">' + icon + '</span>'
-                        + '<span class="font-mono text-gray-500">' + escapeHtml(s.tool || '') + '</span>'
-                        + '<span class="text-gray-600">→ ' + escapeHtml(s.summary || 'ok') + '</span>'
-                        + '</div>';
+
+            // Group steps into logical blocks:
+            // - Brain thinking text
+            // - Agent dispatch (tool_call + tool_result pair) → rendered as card
+            // - Regular tool calls (non-dispatch)
+            // - ask_user / signal_blocker interactions
+            const blocks = [];
+            const dispatchTools = new Set(['dispatch_agent', 'dispatch_swarm', 'transfer_to_brain']);
+            let i = 0;
+            while (i < steps.length) {
+                const s = steps[i];
+                // Pair dispatch tool_call with its tool_result
+                if (s.kind === 'tool_call' && dispatchTools.has(s.tool)) {
+                    const callStep = s;
+                    let resultStep = null;
+                    if (i + 1 < steps.length && steps[i + 1].kind === 'tool_result' && steps[i + 1].tool === s.tool) {
+                        resultStep = steps[i + 1];
+                        i += 2;
+                    } else { i++; }
+                    blocks.push({ type: 'dispatch', call: callStep, result: resultStep });
+                } else {
+                    blocks.push({ type: 'step', step: s });
+                    i++;
                 }
-                return '';
+            }
+
+            return blocks.map(block => {
+                if (block.type === 'dispatch') return _renderDispatchBlock(block.call, block.result);
+                return _renderStepLine(block.step);
             }).join('');
-            return stepsHtml;
+        }
+
+        /** Render a single non-dispatch thinking step */
+        function _renderStepLine(s) {
+            if (s.kind === 'thinking') {
+                const text = s.text || '';
+                if (!text) return '';
+                const uid = 'think-' + Math.random().toString(36).slice(2, 8);
+                const short = text.length > 120 ? text.slice(0, 120) + '...' : text;
+                const needsExpand = text.length > 120;
+                return '<div class="flex items-start gap-1.5 text-[0.65rem] py-0.5">'
+                    + '<span class="text-purple-400/70 flex-shrink-0 mt-px">&#9671;</span>'
+                    + '<span class="text-gray-400 break-words">'
+                    + escapeHtml(short)
+                    + (needsExpand ? ' <span class="text-purple-400/60 cursor-pointer hover:text-purple-300" onclick="const el=document.getElementById(\'' + uid + '\');if(el){el.classList.toggle(\'hidden\');this.textContent=el.classList.contains(\'hidden\')?\' [show more]\':\'[less]\';}">[show more]</span><span id="' + uid + '" class="hidden block mt-0.5 text-gray-500">' + escapeHtml(text.slice(120)) + '</span>' : '')
+                    + '</span></div>';
+            }
+            if (s.kind === 'tool_call') {
+                const params = s.params || {};
+                let detail = params.pattern || params.path || params.file || params.name || params.symbol || params.query || '';
+                if (typeof detail === 'object') detail = JSON.stringify(detail);
+                if (detail.length > 80) detail = detail.slice(0, 80) + '...';
+                return '<div class="flex items-center gap-1.5 text-[0.65rem] py-0.5">'
+                    + '<span class="text-blue-400/70 flex-shrink-0">&#9656;</span>'
+                    + '<span class="font-mono text-blue-300/80">' + escapeHtml(s.tool) + '</span>'
+                    + (detail ? '<span class="text-gray-600 truncate max-w-[250px]">' + escapeHtml(detail) + '</span>' : '')
+                    + '</div>';
+            }
+            if (s.kind === 'tool_result') {
+                const ok = s.success !== false;
+                return '<div class="flex items-center gap-1.5 text-[0.65rem] py-0.5">'
+                    + '<span class="' + (ok ? 'text-emerald-500/70' : 'text-red-400/70') + ' flex-shrink-0">' + (ok ? '&#10003;' : '&#10007;') + '</span>'
+                    + '<span class="font-mono text-gray-500">' + escapeHtml(s.tool) + '</span>'
+                    + '<span class="text-gray-600 truncate max-w-[250px]">' + escapeHtml(s.summary || 'ok') + '</span>'
+                    + '</div>';
+            }
+            if (s.kind === 'ask_user') {
+                return '<div class="flex items-start gap-1.5 text-[0.65rem] py-0.5">'
+                    + '<span class="text-amber-400/70 flex-shrink-0 mt-px">?</span>'
+                    + '<span class="text-amber-300/80 break-words">' + escapeHtml(s.text || '') + '</span>'
+                    + '</div>';
+            }
+            if (s.kind === 'signal_blocker') {
+                return '<div class="flex items-start gap-1.5 text-[0.65rem] py-0.5">'
+                    + '<span class="text-orange-400/70 flex-shrink-0 mt-px">&#9888;</span>'
+                    + '<span class="text-orange-300/80 break-words">' + escapeHtml(s.text || '') + '</span>'
+                    + '</div>';
+            }
+            return '';
+        }
+
+        /** Render a dispatch_agent / dispatch_swarm block as a card */
+        function _renderDispatchBlock(call, result) {
+            const params = call.params || {};
+            const agentName = (result && result.agent_name) || params.agent_name || params.swarm_name || call.tool;
+            const query = params.query || '';
+            const isSwarm = call.tool === 'dispatch_swarm';
+            const isTransfer = call.tool === 'transfer_to_brain';
+            const uid = 'dispatch-' + Math.random().toString(36).slice(2, 8);
+            const detailId = uid + '-detail';
+
+            // Status from result
+            const done = result && result.success !== false;
+            const failed = result && result.success === false;
+            const confidence = (result && result.confidence) || '';
+            const iterations = (result && result.iterations) || 0;
+            const toolCalls = (result && result.tool_calls_made) || 0;
+            const durationMs = (result && result.duration_ms) || 0;
+            const durationSec = (durationMs / 1000).toFixed(1);
+            const files = (result && result.files_accessed) || [];
+            const toolsSummary = (result && result.tools_summary) || [];
+            const error = (result && result.error) || '';
+
+            // Icon and color based on type
+            let typeIcon, typeColor, typeBg;
+            if (isTransfer) { typeIcon = '&#8618;'; typeColor = 'text-violet-400'; typeBg = 'bg-violet-500/8 border-violet-500/20'; }
+            else if (isSwarm) { typeIcon = '&#9881;'; typeColor = 'text-cyan-400'; typeBg = 'bg-cyan-500/8 border-cyan-500/20'; }
+            else { typeIcon = '&#9670;'; typeColor = 'text-blue-400'; typeBg = 'bg-blue-500/8 border-blue-500/20'; }
+
+            // Confidence badge
+            const confBadge = confidence
+                ? ('<span class="px-1.5 py-0.5 rounded text-[0.55rem] font-medium '
+                    + (confidence === 'high' ? 'bg-emerald-500/15 text-emerald-400' : confidence === 'medium' ? 'bg-amber-500/15 text-amber-400' : 'bg-red-500/15 text-red-400')
+                    + '">' + confidence + '</span>')
+                : '';
+
+            // Status indicator
+            let statusHtml;
+            if (!result) {
+                statusHtml = '<span class="text-gray-500 text-[0.6rem]">pending...</span>';
+            } else if (failed) {
+                statusHtml = '<span class="text-red-400 text-[0.6rem]">&#10007; failed</span>';
+            } else {
+                statusHtml = '<span class="text-emerald-400/70 text-[0.6rem]">&#10003; done</span>';
+            }
+
+            // Metrics line
+            const metrics = [];
+            if (durationMs > 0) metrics.push(durationSec + 's');
+            if (iterations > 0) metrics.push(iterations + ' iter');
+            if (toolCalls > 0) metrics.push(toolCalls + ' tools');
+            const metricsHtml = metrics.length
+                ? '<span class="text-gray-600 text-[0.55rem]">' + metrics.join(' · ') + '</span>'
+                : '';
+
+            // Files list (collapsible detail)
+            let filesHtml = '';
+            if (files.length > 0) {
+                filesHtml = '<div class="mt-1.5"><div class="text-[0.55rem] text-gray-500 mb-0.5">Files examined:</div>'
+                    + files.slice(0, 10).map(f => '<div class="text-[0.6rem] font-mono text-gray-500 pl-2 truncate">' + escapeHtml(f) + '</div>').join('')
+                    + (files.length > 10 ? '<div class="text-[0.55rem] text-gray-600 pl-2">+' + (files.length - 10) + ' more</div>' : '')
+                    + '</div>';
+            }
+
+            // Tools summary (collapsible detail)
+            let toolsHtml = '';
+            if (toolsSummary.length > 0) {
+                toolsHtml = '<div class="mt-1.5"><div class="text-[0.55rem] text-gray-500 mb-0.5">Tool execution:</div>'
+                    + toolsSummary.slice(0, 12).map(t => {
+                        const parts = t.split(': ');
+                        const tName = parts[0] || '';
+                        const tSummary = parts.slice(1).join(': ') || '';
+                        return '<div class="flex items-center gap-1 text-[0.6rem] pl-2">'
+                            + '<span class="font-mono text-blue-400/60">' + escapeHtml(tName) + '</span>'
+                            + '<span class="text-gray-600">' + escapeHtml(tSummary) + '</span>'
+                            + '</div>';
+                    }).join('')
+                    + (toolsSummary.length > 12 ? '<div class="text-[0.55rem] text-gray-600 pl-2">+' + (toolsSummary.length - 12) + ' more</div>' : '')
+                    + '</div>';
+            }
+
+            // Error display
+            const errorHtml = error ? '<div class="mt-1 text-[0.6rem] text-red-400/80 break-words">' + escapeHtml(error) + '</div>' : '';
+
+            const hasDetail = filesHtml || toolsHtml || errorHtml || query;
+
+            return '<div class="my-1 rounded-lg border ' + typeBg + ' overflow-hidden">'
+                // Header
+                + '<div class="flex items-center gap-1.5 px-2.5 py-1.5' + (hasDetail ? ' cursor-pointer select-none' : '') + '"'
+                + (hasDetail ? ' onclick="const d=document.getElementById(\'' + detailId + '\');if(d){d.classList.toggle(\'hidden\');this.querySelector(\'.dispatch-chevron\')?.classList.toggle(\'collapsed\');}"' : '')
+                + '>'
+                + (hasDetail ? '<svg class="dispatch-chevron h-2.5 w-2.5 text-gray-600 flex-shrink-0 transition-transform collapsed" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>' : '')
+                + '<span class="' + typeColor + ' text-[0.7rem] flex-shrink-0">' + typeIcon + '</span>'
+                + '<span class="text-[0.7rem] font-medium text-gray-300">' + escapeHtml(agentName) + '</span>'
+                + statusHtml + confBadge + metricsHtml
+                + '</div>'
+                // Collapsible detail
+                + (hasDetail ? '<div id="' + detailId + '" class="hidden px-2.5 pb-2 border-t border-gray-700/20">'
+                    + (query ? '<div class="mt-1.5 text-[0.6rem] text-gray-500 break-words"><span class="text-gray-600">Query:</span> ' + escapeHtml(query.length > 200 ? query.slice(0, 200) + '...' : query) + '</div>' : '')
+                    + toolsHtml + filesHtml + errorHtml
+                    + '</div>' : '')
+                + '</div>';
         }
 
         function renderAiAnswerMessage(msg) {
@@ -5722,6 +5801,11 @@
 
             // Build thinking steps section (collapsed by default)
             const stepsHtml = _buildThinkingStepsHtml(thinkingSteps);
+            const _agentDispatches = thinkingSteps.filter(s => s.kind === 'tool_call' && ['dispatch_agent','dispatch_swarm','transfer_to_brain'].includes(s.tool)).length;
+            const _toolCalls = thinkingSteps.filter(s => s.kind === 'tool_call').length;
+            const _thinkingSummary = _agentDispatches > 0
+                ? `${_agentDispatches} agent${_agentDispatches > 1 ? 's' : ''} dispatched, ${thinkingSteps.length} steps`
+                : `${_toolCalls} tool calls, ${thinkingSteps.length} steps`;
             const thinkingSection = stepsHtml ? `
                 <div class="border-b border-blue-900/30">
                     <div class="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer select-none hover:bg-blue-900/10" id="${thinkingBtnId}">
@@ -5729,9 +5813,9 @@
                             <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
                         </svg>
                         <span class="text-[0.65rem] text-gray-500">Thinking process</span>
-                        <span class="text-[0.55rem] text-gray-600">(${thinkingSteps.length} steps)</span>
+                        <span class="text-[0.55rem] text-gray-600">(${_thinkingSummary})</span>
                     </div>
-                    <div id="${thinkingBodyId}" class="px-3 pb-2 max-h-64 overflow-y-auto collapsed" style="display:none;">
+                    <div id="${thinkingBodyId}" class="px-3 pb-2 max-h-80 overflow-y-auto collapsed" style="display:none;">
                         ${stepsHtml}
                     </div>
                 </div>` : '';
@@ -5811,7 +5895,7 @@
 
         function renderAiExplanationMessage(msg) {
             // Remove thinking indicator when the explanation arrives
-            _removeExplainThinking();
+            _removeAskAIThinking();
             const aiData = msg.aiData || {};
             const isOwnMessage = msg.userId === session.userId;
             const isGrouped = shouldGroupMessage(msg);
@@ -5838,6 +5922,11 @@
 
             // Build thinking steps section (collapsed by default)
             const stepsHtml = _buildThinkingStepsHtml(thinkingSteps);
+            const _expAgentDispatches = thinkingSteps.filter(s => s.kind === 'tool_call' && ['dispatch_agent','dispatch_swarm','transfer_to_brain'].includes(s.tool)).length;
+            const _expToolCalls = thinkingSteps.filter(s => s.kind === 'tool_call').length;
+            const _expSummary = _expAgentDispatches > 0
+                ? `${_expAgentDispatches} agent${_expAgentDispatches > 1 ? 's' : ''} dispatched, ${thinkingSteps.length} steps`
+                : `${_expToolCalls} tool calls, ${thinkingSteps.length} steps`;
             const thinkingSection = stepsHtml ? `
                 <div class="border-b border-emerald-900/30">
                     <div class="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer select-none hover:bg-emerald-900/10" id="${thinkingBtnId}">
@@ -5845,9 +5934,9 @@
                             <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
                         </svg>
                         <span class="text-[0.65rem] text-gray-500">Thinking process</span>
-                        <span class="text-[0.55rem] text-gray-600">(${thinkingSteps.length} steps)</span>
+                        <span class="text-[0.55rem] text-gray-600">(${_expSummary})</span>
                     </div>
-                    <div id="${thinkingBodyId}" class="px-3 pb-2 max-h-64 overflow-y-auto collapsed" style="display:none;">
+                    <div id="${thinkingBodyId}" class="px-3 pb-2 max-h-80 overflow-y-auto collapsed" style="display:none;">
                         ${stepsHtml}
                     </div>
                 </div>` : '';
@@ -7233,6 +7322,8 @@
 
             // Detect @AI prefix — trigger Ask AI flow
             const aiMatch = content.match(/^@AI\s+(.+)/is);
+            // Capture snippet before clearCodeSnippet() clears it
+            const snippetForAI = (aiMatch && hasSnippet) ? { ...pendingCodeSnippet } : null;
 
             // Build message with optional code snippet
             // SECURITY: userId and role are assigned by backend, we only send content
@@ -7291,11 +7382,22 @@
                 }
 
                 console.log('[WebView] @AI detected, sending askAI command:', query);
-                vscode.postMessage({
+                const askMsg = {
                     command: 'askAI',
                     roomId: session.roomId,
                     query: query,
-                });
+                };
+                // If a code snippet was attached, forward it as codeContext
+                if (snippetForAI) {
+                    askMsg.codeContext = {
+                        code:         snippetForAI.code,
+                        relativePath: snippetForAI.relativePath || snippetForAI.filename,
+                        startLine:    snippetForAI.startLine,
+                        endLine:      snippetForAI.endLine,
+                        language:     snippetForAI.language || '',
+                    };
+                }
+                vscode.postMessage(askMsg);
             }
 
             // Clean up hint state after sending
@@ -9656,6 +9758,20 @@
             // Italic *text* (not **bold**) and _text_
             text = text.replace(/(?<!\*)\*(?!\*)([^*]+?)(?<!\*)\*(?!\*)/g, '<em class="italic text-gray-300">$1</em>');
             text = text.replace(/(?<![a-zA-Z0-9])_([^_]+?)_(?![a-zA-Z0-9])/g, '<em class="italic text-gray-300">$1</em>');
+            // Linkify file:line references (e.g. src/foo.py:42 or Foo.java:100-200)
+            // Must come after inline-code so refs inside <code> tags also get linked.
+            const _codeExts = 'py|ts|tsx|js|jsx|java|go|rs|rb|c|cpp|cc|h|hpp|cs|kt|swift|scala|vue|svelte|sh|bash|yaml|yml|json|xml|html|css|sql|md|toml';
+            const _fileLineRe = new RegExp(
+                '((?:[a-zA-Z0-9_\\-\\.]+\\/)*[a-zA-Z0-9_\\-\\.]+\\.(?:' + _codeExts + ')):(\\d+)(?:\\u2013(\\d+)|-(\\d+))?',
+                'g'
+            );
+            text = text.replace(_fileLineRe, function(match, filePath, startLine, endDash1, endDash2) {
+                const endLine = endDash1 || endDash2 || startLine;
+                return '<span class="code-ref cursor-pointer text-blue-400 hover:text-blue-300 hover:underline" '
+                    + 'data-path="' + filePath + '" data-start="' + startLine + '" data-end="' + endLine + '" '
+                    + 'title="Go to ' + filePath + ':' + startLine + '">'
+                    + match + '</span>';
+            });
             return text;
         }
 
@@ -9721,12 +9837,12 @@
                 }
                 const codeContent = codeBlockLines.map(l => escapeHtml(l)).join('\n');
                 const langClass = codeBlockLang ? `language-${codeBlockLang}` : '';
-                const langLabel = codeBlockLang
-                    ? `<span class="text-[0.6rem] text-emerald-400/80 font-mono uppercase tracking-wide">${escapeHtml(codeBlockLang)}</span>`
+                const langBadge = codeBlockLang
+                    ? `<span class="absolute top-1.5 right-2.5 text-[0.55rem] text-gray-500 font-mono uppercase select-none">${escapeHtml(codeBlockLang)}</span>`
                     : '';
-                html += `<div class="my-2 rounded overflow-hidden border border-gray-700/50 text-left">` +
-                        `<div class="flex items-center px-2 py-1 bg-gray-800/70 border-b border-gray-700/50 min-h-[1.5rem]">${langLabel}</div>` +
-                        `<pre class="px-3 py-2 text-xs font-mono text-gray-200 overflow-x-auto bg-black/30 whitespace-pre leading-relaxed"><code class="${langClass}">${codeContent}</code></pre>` +
+                html += `<div class="code-block-wrapper my-2 rounded-md text-left relative" style="background:#1e1e1e;">` +
+                        langBadge +
+                        `<pre class="px-3.5 py-3 text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed" style="background:transparent;"><code class="${langClass}">${codeContent}</code></pre>` +
                         `</div>`;
                 inCodeBlock = false;
                 codeBlockLang = '';
