@@ -125,11 +125,9 @@
       },
       "output_type": "dict",
       "output_item_fields": [
-        "content",
-        "total_lines",
         "path",
-        "start_line",
-        "end_line"
+        "total_lines",
+        "content"
       ]
     },
     "list_files": {
@@ -175,8 +173,7 @@
       "output_type": "list",
       "output_item_fields": [
         "path",
-        "is_dir",
-        "size"
+        "is_dir"
       ],
       "output_item_schema": {
         "properties": {
@@ -647,7 +644,10 @@
         "title": "GitDiffParams",
         "type": "object"
       },
-      "output_type": "string"
+      "output_type": "dict",
+      "output_item_fields": [
+        "diff"
+      ]
     },
     "git_diff_files": {
       "input_schema": {
@@ -669,8 +669,7 @@
         "path",
         "status",
         "additions",
-        "deletions",
-        "old_path"
+        "deletions"
       ],
       "output_item_schema": {
         "properties": {
@@ -1041,10 +1040,10 @@
       },
       "output_type": "dict",
       "output_item_fields": [
-        "hash",
-        "message",
+        "commit_hash",
         "author",
         "date",
+        "message",
         "diff"
       ]
     },
@@ -1229,8 +1228,10 @@
       },
       "output_type": "dict",
       "output_item_fields": [
-        "forward",
-        "backward"
+        "variable",
+        "file",
+        "function",
+        "direction"
       ]
     },
     "compressed_view": {
@@ -1373,13 +1374,13 @@
         "title": "DetectPatternsParams",
         "type": "object"
       },
-      "output_type": "list",
+      "output_type": "dict",
       "output_item_fields": [
-        "file_path",
-        "line",
-        "category",
-        "pattern",
-        "snippet"
+        "summary",
+        "total_matches",
+        "categories_scanned",
+        "files_scanned",
+        "matches"
       ]
     },
     "run_test": {
@@ -1421,8 +1422,12 @@
       "output_type": "dict",
       "output_item_fields": [
         "passed",
+        "return_code",
+        "runner",
+        "test_file",
+        "test_name",
         "output",
-        "failures"
+        "stderr"
       ]
     }
   }

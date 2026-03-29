@@ -101,11 +101,9 @@ class _DictSpec:
 TOOL_RESULT_MAP: Dict[str, tuple] = {
     "grep": ("list", GrepMatch),
     "read_file": ("dict", _DictSpec({
-        "content": "File contents (string)",
-        "total_lines": "Total line count of the file",
         "path": "File path",
-        "start_line": "First line returned (if ranged read)",
-        "end_line": "Last line returned (if ranged read)",
+        "total_lines": "Total line count of the file",
+        "content": "File contents with line numbers",
     })),
     "list_files": ("list", FileEntry),
     "find_symbol": ("list", SymbolLocation),
@@ -114,24 +112,28 @@ TOOL_RESULT_MAP: Dict[str, tuple] = {
     "get_dependencies": ("list", DependencyInfo),
     "get_dependents": ("list", DependencyInfo),
     "git_log": ("list", GitCommit),
-    "git_diff": ("string", None),
+    "git_diff": ("dict", _DictSpec({
+        "diff": "Unified diff text",
+    })),
     "git_diff_files": ("list", DiffFileEntry),
     "ast_search": ("list", AstMatch),
     "get_callees": ("list", CalleeInfo),
     "get_callers": ("list", CallerInfo),
     "git_blame": ("list", BlameEntry),
     "git_show": ("dict", _DictSpec({
-        "hash": "Commit hash",
-        "message": "Commit message",
+        "commit_hash": "Commit hash (8 chars)",
         "author": "Author name",
         "date": "Commit date",
+        "message": "Full commit message including body",
         "diff": "Unified diff text",
     })),
     "find_tests": ("list", TestMatch),
     "test_outline": ("list", TestOutlineEntry),
     "trace_variable": ("dict", _DictSpec({
-        "forward": "Forward trace results",
-        "backward": "Backward trace results",
+        "variable": "Name of the traced variable",
+        "file": "File path",
+        "function": "Function containing the variable",
+        "direction": "Trace direction (forward or backward)",
     })),
     "compressed_view": ("dict", _DictSpec({
         "content": "Compressed file view",
@@ -153,17 +155,21 @@ TOOL_RESULT_MAP: Dict[str, tuple] = {
         "signature": "Symbol signature",
         "source": "Full source code of the symbol",
     })),
-    "detect_patterns": ("list", _DictSpec({
-        "file_path": "File where pattern was found",
-        "line": "Line number",
-        "category": "Pattern category",
-        "pattern": "Pattern name",
-        "snippet": "Code snippet",
+    "detect_patterns": ("dict", _DictSpec({
+        "summary": "Category → match count mapping",
+        "total_matches": "Total number of pattern matches",
+        "categories_scanned": "List of categories that were scanned",
+        "files_scanned": "Number of files scanned",
+        "matches": "Category → list of match objects mapping",
     })),
     "run_test": ("dict", _DictSpec({
-        "passed": "Whether the test passed",
-        "output": "Test runner output",
-        "failures": "Failure details (if any)",
+        "passed": "Whether the test passed (boolean)",
+        "return_code": "Process exit code",
+        "runner": "Test runner used (pytest, jest, etc.)",
+        "test_file": "Test file that was run",
+        "test_name": "Specific test function (if specified)",
+        "output": "Test runner stdout (last 3000 chars)",
+        "stderr": "Stderr output (empty if passed)",
     })),
 }
 
@@ -218,9 +224,17 @@ RESULT_MODELS: List[Type[BaseModel]] = [
 
 
 def _output_item_fields(spec) -> Optional[List[str]]:
-    """Extract field names from a Pydantic model or _DictSpec."""
+    """Extract required field names from a Pydantic model or _DictSpec."""
     if isinstance(spec, type) and issubclass(spec, BaseModel):
-        return list(spec.model_fields.keys())
+        # Only include required fields (not Optional with default None)
+        required = []
+        for name, field in spec.model_fields.items():
+            if field.is_required():
+                required.append(name)
+            elif field.default is not None:
+                # Fields with non-None defaults are effectively required
+                required.append(name)
+        return required if required else list(spec.model_fields.keys())
     if isinstance(spec, _DictSpec):
         return list(spec.fields.keys())
     return None

@@ -101,24 +101,28 @@ export interface TestOutlineEntry {
 // ---- Dict-shaped tool outputs ----
 
 export interface ReadFileResult {
-    content: string;
-    total_lines: number;
     path: string;
-    start_line: number;
-    end_line: number;
+    total_lines: number;
+    content: string;
+}
+
+export interface GitDiffResult {
+    diff: string;
 }
 
 export interface GitShowResult {
-    hash: string;
-    message: string;
+    commit_hash: string;
     author: string;
     date: string;
+    message: string;
     diff: string;
 }
 
 export interface TraceVariableResult {
-    forward: any;
-    backward: any;
+    variable: string;
+    file: string;
+    function: string;
+    direction: string;
 }
 
 export interface CompressedViewResult {
@@ -144,18 +148,22 @@ export interface ExpandSymbolResult {
     source: string;
 }
 
-export interface DetectPatternsItem {
-    file_path: string;
-    line: number;
-    category: string;
-    pattern: string;
-    snippet: string;
+export interface DetectPatternsResult {
+    summary: string;
+    total_matches: string;
+    categories_scanned: string;
+    files_scanned: string;
+    matches: string;
 }
 
 export interface RunTestResult {
     passed: boolean;
+    return_code: string;
+    runner: string;
+    test_file: string;
+    test_name: string;
     output: string;
-    failures: any;
+    stderr: string;
 }
 
 // ---- Param models ----
@@ -302,7 +310,7 @@ export interface ToolOutputMap {
     get_dependencies: DependencyInfo[];
     get_dependents: DependencyInfo[];
     git_log: GitCommit[];
-    git_diff: string;
+    git_diff: GitDiffResult;
     git_diff_files: DiffFileEntry[];
     ast_search: AstMatch[];
     get_callees: CalleeInfo[];
@@ -315,6 +323,6 @@ export interface ToolOutputMap {
     compressed_view: CompressedViewResult;
     module_summary: ModuleSummaryResult;
     expand_symbol: ExpandSymbolResult;
-    detect_patterns: DetectPatternsItem[];
+    detect_patterns: DetectPatternsResult;
     run_test: RunTestResult;
 }
