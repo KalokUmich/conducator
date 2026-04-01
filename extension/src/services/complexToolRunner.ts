@@ -36,6 +36,7 @@ const EXCLUDED_DIRS = new Set([
     '.git', '.hg', '.svn', '__pycache__', 'node_modules', 'target',
     'dist', 'vendor', '.venv', 'venv', '.mypy_cache', '.pytest_cache',
     '.tox', 'build', '.next', '.nuxt', '.yarn', '.pnp',
+    '.conductor',
 ]);
 
 const SOURCE_EXTS = new Set([
