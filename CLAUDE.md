@@ -109,9 +109,9 @@ backend/app/
 │   ├── ranking.py           # Score and rank findings
 │   ├── dedup.py             # Merge and deduplicate findings
 │   └── router.py            # /api/code-review/ endpoints (+ SSE stream)
-├── code_tools/              # 24 code intelligence tools
-│   ├── schemas.py           # Pydantic models + TOOL_DEFINITIONS for LLM
-│   ├── tools.py             # Tool implementations
+├── code_tools/              # 29 code intelligence tools + ToolMetadata
+│   ├── schemas.py           # Pydantic models + TOOL_DEFINITIONS + ToolMetadata (35 entries)
+│   ├── tools.py             # Tool implementations (including glob, enhanced grep)
 │   ├── output_policy.py     # Per-tool truncation policies (budget-adaptive)
 │   ├── __main__.py          # Python CLI: python -m app.code_tools <tool> <ws> '<params>'
 │   └── router.py            # /api/code-tools/ endpoints
@@ -146,10 +146,10 @@ config/
 └── prompt-library/          # prompts.chat CSV (1500+ role prompts, `make update-prompt-library`)
 
 tests/
-├── conftest.py                     # Centralized stubs + fixtures (cocoindex, litellm, etc.)
+├── conftest.py                     # Centralized stubs + fixtures (cocoindex, etc.)
 │
 │   # Agent loop & Brain
-├── test_agent_loop.py              # 47 tests — AgentLoopService, 4-layer prompt, evidence check
+├── test_agent_loop.py              # 53 tests — AgentLoopService, 4-layer prompt, evidence check, context clearing
 ├── test_agent_loop_integration.py  # Integration tests — real Bedrock models (@integration marker)
 ├── test_brain.py                   # 39 tests — Brain orchestrator, AgentToolExecutor, dispatch modes
 ├── test_mock_agent.py              # 26 tests — MockProvider scripted responses + agent harness
@@ -160,7 +160,7 @@ tests/
 ├── test_code_review.py             # 67 tests — CodeReviewService legacy pipeline
 │
 │   # Code tools
-├── test_code_tools.py              # 98 tests — 24 tools + dispatcher + multi-language
+├── test_code_tools.py              # 140 tests — 29 tools + dispatcher + multi-language + grep enhancements + glob + ToolMetadata
 ├── test_compressed_tools.py        # 24 tests — compressed_view, trace_variable, detect_patterns
 ├── test_detect_patterns.py         # 34 tests — detect_patterns tool (pattern extraction)
 │
@@ -173,7 +173,6 @@ tests/
 │   # AI providers
 ├── test_ai_provider.py             # 131 tests — AIProvider ABC, ClaudeDirectProvider, Bedrock, OpenAI
 ├── test_bedrock_tool_repair.py     # 64 tests — Bedrock tool call repair + malformed response handling
-├── test_litellm_provider.py        # 42 tests — LiteLLM provider adapter
 │
 │   # Workflow + config
 ├── test_config_new.py              # 27 tests — Settings + Secrets YAML loading
@@ -185,7 +184,7 @@ tests/
 ├── test_session_trace.py           # 15 tests — SessionTrace (Postgres + local fallback)
 ├── test_evidence.py                # 14 tests — EvidenceEvaluator rule-based quality check
 ├── test_query_classifier.py        # 26 tests — QueryClassifier keyword + LLM classification
-├── test_output_policy.py           # 19 tests — Per-tool truncation policies (budget-adaptive)
+├── test_output_policy.py           # 20 tests — Per-tool truncation policies (budget-adaptive, glob)
 ├── test_symbol_role.py             # 24 tests — Symbol role extraction (AST-based)
 ├── test_auto_apply_policy.py       # 28 tests — Auto-apply policy enforcement
 │
@@ -260,7 +259,7 @@ When the agent runs in local workspace mode, tools are proxied via WebSocket to 
 ```
 RemoteToolExecutor → WebSocket → extension._handleLocalToolRequest
   → localToolDispatcher.ts
-    ├── SUBPROCESS (12): grep, read_file, list_files, git_log, git_diff, git_diff_files,
+    ├── SUBPROCESS (13): grep, read_file, list_files, glob, git_log, git_diff, git_diff_files,
     │                    git_blame, git_show, find_tests, run_test, ast_search, get_repo_graph
     ├── AST (6):         file_outline, find_symbol, find_references, get_callees, get_callers, expand_symbol
     │                    → web-tree-sitter WASM (treeSitterService + astToolRunner)
@@ -294,7 +293,7 @@ Query → Brain (Sonnet, meta-tools: dispatch_agent, dispatch_swarm, transfer_to
 - **Layer 3 (skills)**: Workspace layout, project docs, investigation patterns, risk signals, budget — shared across agents. PR review agents get `code_review_pr` skill. Business flow agents get 4-step investigation skill (identify targets → domain models → service code → separate mandatory vs conditional). Includes convergence guidance ("stop at iteration 6-7 if you have strong evidence").
 - **Layer 4 (user message)**: The query from Brain + optional code_context — no role injection
 
-**Context management:** Sub-agents clear old tool results after 3 turns to prevent context rot. Only the most recent 4 turn-pairs keep full tool output; older results are replaced with a one-line summary.
+**Context management:** Sub-agents clear old tool results after 3 turns to prevent context rot. Only the most recent 4 turn-pairs keep full tool output; older results are replaced with metadata-driven summaries (e.g., `grep 'auth' in src/: 12 matches`) via `ToolMetadata.summary_template` — falls back to first-line truncation if no template is available.
 
 **Four dispatch modes:**
 - **SIMPLE** (~80%): one agent, trust result, done
@@ -324,7 +323,9 @@ Key design: The arbitrator is a **defense attorney** — it tries to rebut findi
 
 **Interactive AI:** Brain can `ask_user` for clarification when queries have multiple valid directions. Q&A answers are cached in session and injected into Brain's prompt for reuse across sub-agents.
 
-**24 code tools** (`code_tools/tools.py`): `grep`, `read_file`, `list_files`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`, `run_test`.
+**29 code tools** (`code_tools/tools.py`): `grep` (with output_mode, context_lines, case_insensitive, multiline, file_type), `read_file`, `list_files`, `glob`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `git_diff_files`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `git_hotspots`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`, `detect_patterns`, `run_test`, `list_endpoints`, `extract_docstrings`, `db_schema`.
+
+**Tool metadata** (`code_tools/schemas.py`): `ToolMetadata` dataclass with `is_read_only`, `is_concurrent_safe`, `summary_template`, `category` for all 35 tools (code + browser). Used by `_clear_old_tool_results()` for readable context compaction summaries.
 
 Tools also accessible via `python -m app.code_tools <tool> <workspace> '<json_params>'` (used by extension local mode).
 
@@ -397,7 +398,7 @@ result = execute_tool("grep", workspace="/path/to/ws", params={"pattern": "authe
 ## Testing Notes
 
 - Backend: `pytest` with mocked external dependencies
-- `conftest.py`: stubs for cocoindex, litellm, sentence_transformers, sqlite_vec
+- `conftest.py`: stubs for cocoindex, sentence_transformers, sqlite_vec
 - Code tools tests: real filesystem operations (`tmp_path` fixtures)
 - Agent loop tests: `MockProvider` subclass with scripted responses
 - Workflow tests: real config files from `config/`; `MockProvider` for agent execution
@@ -426,12 +427,15 @@ When modifying or adding a code tool:
 
 1. **Python first**: implement/modify in `backend/app/code_tools/tools.py`
 2. **Update schema**: if params/result shape changed, update `schemas.py`
-3. **Regenerate contracts**: `make update-contracts`
-4. **Port to TS**: update the appropriate module:
+3. **Update metadata**: add/update entry in `TOOL_METADATA` dict in `schemas.py` (is_read_only, is_concurrent_safe, summary_template, category)
+4. **Update classifier**: add to `_ALL_TOOLS` and relevant `QUERY_TYPES` tool sets in `query_classifier.py`
+5. **Regenerate contracts**: `make update-contracts`
+6. **Port to TS**: update the appropriate module:
    - Complex: `extension/src/services/complexToolRunner.ts`
    - AST: `extension/src/services/astToolRunner.ts`
-5. **Add parity tests**: `test_tool_parity_ast.py` or `test_tool_parity_deep.py`
-6. **Validate**: `make test-parity`
+7. **Update dispatcher**: add to appropriate set in `localToolDispatcher.ts` (SUBPROCESS/AST/COMPLEX)
+8. **Add parity tests**: `test_tool_parity_ast.py` or `test_tool_parity_deep.py`
+9. **Validate**: `make test-parity`
 
 ## Configuration
 

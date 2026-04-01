@@ -814,8 +814,8 @@ Learn from `StreamingToolExecutor.ts` — execute tools concurrently during mode
 - Abort handling: synthetic `tool_result` for every orphaned `tool_use` on interrupt
 
 **What to adopt in Conductor**:
-- [ ] Add `is_concurrent_safe` flag to tool definitions in `schemas.py`
-- [ ] Parallel tool execution in `AgentLoopService` for read-only tools (grep, read_file, list_files, find_symbol, etc.)
+- [x] Add `is_concurrent_safe` flag to tool definitions in `schemas.py` — done via `ToolMetadata` (Phase 9.8)
+- [ ] Parallel tool execution in `AgentLoopService` for read-only tools (partition by `is_concurrent_safe`)
 - [ ] Result ordering guarantee (buffer + yield in call order)
 - [ ] Abort handling: generate synthetic tool results on timeout/interrupt
 
@@ -910,24 +910,31 @@ Learn from `services/mcp/` — Model Context Protocol for ecosystem tool plugins
 - [ ] MCP server config in conductor.settings.yaml (stdio + HTTP transports initially)
 - [ ] Enables integration with external tools (databases, APIs, custom analyzers) without modifying core
 
-### 9.8 Advanced Tool Metadata (PLANNED)
+### 9.8 Advanced Tool Metadata (COMPLETE)
 Learn from `Tool.ts` — richer tool definitions for better agent behavior.
 
 **Reference files**: `Tool.ts` (792 lines), `tools.ts` (tool registry)
 
-**What Claude Code does**:
-- `shouldDefer` — tool search defers loading until explicitly selected (reduces prompt size)
-- `maxResultSizeChars` — persist large results to disk, inject summary to LLM
-- `interruptBehavior` — 'cancel' vs 'block' on user interrupt
-- `isOpenWorld` — flags tools whose output contains unsanitized user input
-- `getToolUseSummary()` — one-line summary for compact transcript display
-- `inputsEquivalent()` — detect cache-equivalent calls (avoid redundant execution)
+**Completed**:
+- [x] `ToolMetadata` dataclass: `is_read_only`, `is_concurrent_safe`, `summary_template`, `category` for all 35 tools
+- [x] Summary generation for context compaction — `_clear_old_tool_results()` uses `summary_template` for readable one-line summaries (e.g., `grep 'auth' in src/: 12 matches`)
+- [x] `format_tool_summary()` utility function with fallback for unknown tools
+- [x] 42 new tests covering grep enhancements, glob tool, ToolMetadata, and context clearing
 
-**What to adopt in Conductor**:
-- [ ] Tool deferred loading: only include tool definitions when classifier suggests relevance (extends current `filter_tools()`)
-- [ ] Large result persistence: write grep/read_file results to temp file when >100KB, inject summary
-- [ ] Tool call dedup: detect equivalent consecutive calls (common in agent loops)
-- [ ] Summary generation for context compaction (replaces current 3-turn clearing)
+**Also completed (tool enhancement, not in original plan)**:
+- [x] Rewrite all 28 tool descriptions to behavior-oriented style (cross-tool steering, examples, error recovery)
+- [x] Soften 5 unnecessary ALWAYS/DO NOT directives per Anthropic three-layer language rule
+- [x] Grep: 5 new parameters (output_mode, context_lines, case_insensitive, multiline, file_type)
+- [x] New `glob` tool (file pattern matching, mtime-sorted results)
+- [x] Fix 6 orphaned tools missing from query_classifier
+- [x] Brain prompt: "never delegate understanding" + verification QA gate + code minimalism rules
+- [x] Remove LiteLLM (security concern, never used)
+
+**Remaining (future)**:
+- [ ] Tool deferred loading via ToolSearch (depends on `should_defer` flag in metadata)
+- [ ] Large result persistence: write grep/read_file results to temp file when >100KB
+- [ ] Tool call dedup: detect equivalent consecutive calls
+- [ ] Use `is_concurrent_safe` to partition `asyncio.gather()` in service.py
 
 ### Dependency Graph
 ```
