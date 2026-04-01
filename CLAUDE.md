@@ -520,7 +520,10 @@ Every agent prompt — Brain or sub-agent — MUST follow this 4-layer structure
 3. **Explain why, not just what** — Claude generalizes from motivation. "Output will be read by TTS, so avoid ellipses" beats "never use ellipses."
 4. **Positive framing** — Say what to do, not what not to do.
 5. **Context over instructions** — Provide workspace layout, project docs, detected project roots (Layer 3). Let the model decide the investigation path.
-6. **Dial back aggressive language** — "Use this tool when..." not "CRITICAL: You MUST use this tool." Newer models overtrigger on forceful language.
+6. **Three-layer language rule** — Not all forceful language is bad. Apply different tones depending on the context:
+   - **Layer 1 (tool frequency/eagerness)**: Dial back. Newer models overtrigger on `CRITICAL: You MUST use this tool`. Use `Use this tool when...` instead.
+   - **Layer 2 (efficiency/style preferences)**: Give reasons, not bare commands. `Avoid reading 300+ line files — use start_line/end_line to save tokens` beats `Do NOT read large files`. The word "avoid"/"prefer" is fine; bare `NEVER` without context is less effective.
+   - **Layer 3 (safety/irreversible constraints)**: Forceful language is still appropriate. `ALWAYS use file= to limit diffs` (prevents truncation) and `NEVER skip hooks` (prevents data loss) are valid hard constraints. Anthropic's own docs use MUST/NEVER for safety guardrails.
 7. **Minimal tool guidance** — If a human can't definitively say which tool to use, don't prescribe it. Let tool descriptions (Layer 2) guide the model.
 
 ### Multi-Agent Workflow Rules
