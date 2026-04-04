@@ -213,10 +213,6 @@ export function activate(context: vscode.ExtensionContext): void {
         fsm,
         checkBackendHealth,
         () => getSessionService().getBackendUrl(),
-        () => {
-            getSessionService().resetSession();
-            return getSessionService().getRoomId();
-        },
     );
 
     // Persist FSM state to globalState on every transition
@@ -1162,13 +1158,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                                 await getSessionService().detectNgrokUrl();
                             }
 
-                            // 3. Set the old roomId BEFORE transitioning
+                            // 3. Set old roomId, then transition FSM (same startHosting, no new ID)
                             getSessionService().setRoomId(message.roomId);
+                            this._controller.startHosting();
 
-                            // 4. Resume hosting — FSM transition only, NO new roomId
-                            this._controller.resumeHosting();
-
-                            // 5. Register workspace + send state to WebView
+                            // 4. Register workspace + send state to WebView
                             await this._handleSetupLocalWorkspace();
                             this._sendConductorState(this._controller.getState());
                         } else {
@@ -1483,7 +1477,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 await getSessionService().detectNgrokUrl();
             }
 
-            const roomId = this._controller.startHosting();
+            // Generate new roomId, then transition FSM
+            getSessionService().resetSession();
+            this._controller.startHosting();
+            const roomId = getSessionService().getRoomId();
             console.log(`[Conductor] Hosting started, roomId=${roomId}`);
 
             // Initialize .conductor/ workspace storage directory and load config.
