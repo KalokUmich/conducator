@@ -147,6 +147,23 @@ export class ConductorController {
     }
 
     /**
+     * Resume hosting an existing session WITHOUT generating a new roomId.
+     * Used for rejoining a previously left local session.
+     *
+     * The caller must set the roomId via SessionService.setRoomId() BEFORE calling this.
+     *
+     * @throws {Error} When the FSM is not in ReadyToHost.
+     */
+    resumeHosting(): void {
+        const current = this._fsm.getState();
+        if (current !== ConductorState.ReadyToHost) {
+            throw new Error(`Cannot resume hosting from state: ${current}`);
+        }
+        // Only transition FSM — no session reset, no new roomId
+        this._fsm.transition(ConductorEvent.START_HOSTING);
+    }
+
+    /**
      * Transition from Hosting → ReadyToHost.
      *
      * @throws {Error} When the FSM is not in Hosting.

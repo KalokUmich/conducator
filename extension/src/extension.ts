@@ -1007,11 +1007,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     // Delete local session + chat cache (end = permanent close)
                     {
                         const endedRoomId = getSessionService().getRoomId();
+                        console.log(`[Conductor] sessionEnded: deleting roomId=${endedRoomId}`);
                         if (localSessionManager && endedRoomId) {
                             localSessionManager.deleteSession(endedRoomId);
+                            console.log(`[Conductor] Deleted session from sessions.json`);
                         }
                         if (chatLocalStore && endedRoomId) {
-                            await chatLocalStore.clearRoom(endedRoomId).catch(() => {});
+                            await chatLocalStore.clearRoom(endedRoomId);
+                            console.log(`[Conductor] Cleared chat history for ${endedRoomId}`);
                         }
                         // Push updated session list immediately so login page is correct
                         if (localSessionManager) {
@@ -1145,13 +1148,28 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
                         getSessionService().removeQuitRoom(message.roomId);
 
-                        // Local sessions: rejoin as HOST (set roomId, start hosting, register workspace)
+                        // Local sessions: rejoin as HOST with the SAME roomId
                         if (targetSession?.mode === 'local') {
-                            await this._handleStartSession();
-                            // Override the new roomId with the old one AFTER startHosting
+                            // 1. Health check if needed
+                            const curState = this._controller.getState();
+                            if (curState === ConductorState.Idle || curState === ConductorState.BackendDisconnected) {
+                                const afterHealth = await this._controller.start();
+                                if (afterHealth !== ConductorState.ReadyToHost) return;
+                            }
+
+                            // 2. Detect ngrok if needed
+                            if (!getSessionService().getNgrokUrl()) {
+                                await getSessionService().detectNgrokUrl();
+                            }
+
+                            // 3. Set the old roomId BEFORE transitioning
                             getSessionService().setRoomId(message.roomId);
+
+                            // 4. Resume hosting — FSM transition only, NO new roomId
+                            this._controller.resumeHosting();
+
+                            // 5. Register workspace + send state to WebView
                             await this._handleSetupLocalWorkspace();
-                            // Notify WebView of the corrected session state
                             this._sendConductorState(this._controller.getState());
                         } else {
                             // Online sessions: rejoin as guest via invite URL
@@ -1700,8 +1718,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             if (localSessionManager) {
                 try {
                     const cache = chatLocalStore ? await chatLocalStore.loadMessages(roomId) : null;
-                    localSessionManager.touch(roomId, cache?.messageCount ?? 0);
-                } catch {
+                    const count = cache?.messageCount ?? 0;
+                    console.log(`[Conductor] quitChat: roomId=${roomId}, cached msgs=${count}`);
+                    localSessionManager.touch(roomId, count);
+                } catch (e) {
+                    console.warn(`[Conductor] quitChat: failed to read cache for ${roomId}:`, e);
                     localSessionManager.touch(roomId);
                 }
             }
