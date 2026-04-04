@@ -3003,7 +3003,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         return; // Keep polling
                     }
 
-                    // Stop polling for any terminal status
+                    // "error" from concurrent poll (e.g. "device code already redeemed")
+                    // means another poll already succeeded — don't cancel, just ignore.
+                    if (pollData.status === 'error') {
+                        console.warn(`[Conductor] SSO poll error (ignoring, may be race): ${pollData.error}`);
+                        return;
+                    }
+
+                    // Stop polling for definitive terminal status (complete or expired)
                     this._handleSSOCancel();
 
                     if (pollData.status === 'complete' && pollData.identity) {
