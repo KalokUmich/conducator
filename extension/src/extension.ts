@@ -58,6 +58,7 @@ import { JiraTicketProvider, type ITicketProvider, type TicketStatus } from './s
 import { ChatLocalStore } from './services/chatLocalStore';
 import { LocalSessionManager } from './services/localSessionManager';
 import { getConductorRoot } from './services/conductorPaths';
+import { saveSSO, loadSSO, clearSSO } from './services/credentialStore';
 
 /** Output channel for logging invite links to the user. */
 let outputChannel: vscode.OutputChannel;
@@ -1235,6 +1236,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     });
                     return;
                 case 'ssoClearCache':
+                    clearSSO();
                     this._context.globalState.update('conductor.ssoIdentity', undefined);
                     this._view?.webview.postMessage({ command: 'ssoCacheCleared' });
                     console.log('[Conductor] SSO identity cache cleared');
@@ -1573,9 +1575,15 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * Extract valid (non-expired) SSO identity from globalState, or null.
+     * Extract valid (non-expired) SSO identity from ~/.conductor/credentials/sso.json, or null.
      */
     private _getValidSSOIdentity(): Record<string, unknown> | null {
+        // Try new file-based store first
+        const fileBased = loadSSO();
+        if (fileBased) {
+            return fileBased as unknown as Record<string, unknown>;
+        }
+        // Fallback to legacy globalState (migration path)
         const stored = this._context.globalState.get('conductor.ssoIdentity');
         return getValidIdentity(stored);
     }
@@ -1584,6 +1592,10 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
      * Extract the SSO provider from the stored identity wrapper, or undefined.
      */
     private _getStoredSSOProvider(): SSOProvider | undefined {
+        const fileBased = loadSSO();
+        if (fileBased) {
+            return fileBased.provider as SSOProvider;
+        }
         const stored = this._context.globalState.get('conductor.ssoIdentity');
         return getStoredProvider(stored);
     }
@@ -2977,7 +2989,9 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     this._handleSSOCancel();
 
                     if (pollData.status === 'complete' && pollData.identity) {
-                        // Store identity in globalState with timestamp and provider for 24h expiry
+                        // Store identity in ~/.conductor/credentials/sso.json
+                        saveSSO(pollData.identity, provider);
+                        // Also keep in globalState for backward compat during migration
                         this._context.globalState.update(
                             'conductor.ssoIdentity',
                             wrapIdentity(pollData.identity, provider)
