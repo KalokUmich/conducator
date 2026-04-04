@@ -1146,9 +1146,12 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
 
                         // Local sessions: rejoin as HOST (set roomId, start hosting, register workspace)
                         if (targetSession?.mode === 'local') {
-                            getSessionService().setRoomId(message.roomId);
                             await this._handleStartSession();
+                            // Override the new roomId with the old one AFTER startHosting
+                            getSessionService().setRoomId(message.roomId);
                             await this._handleSetupLocalWorkspace();
+                            // Notify WebView of the corrected session state
+                            this._sendConductorState(this._controller.getState());
                         } else {
                             // Online sessions: rejoin as guest via invite URL
                             this._handleJoinSession(
