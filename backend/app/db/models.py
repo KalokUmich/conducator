@@ -42,7 +42,7 @@ class User(Base):
 
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)  # UUID
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # UUID as VARCHAR
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     auth_provider: Mapped[str] = mapped_column(String(50), nullable=False)

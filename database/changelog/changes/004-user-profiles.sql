@@ -4,7 +4,7 @@
 --comment: Add persistent user profiles for cross-session identity
 
 CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY,
+    id VARCHAR(36) PRIMARY KEY,
     email VARCHAR(255) UNIQUE NOT NULL,
     display_name VARCHAR(255),
     auth_provider VARCHAR(50) NOT NULL,
