@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSession } from "../../contexts/SessionContext";
 import { useVSCode, useCommand } from "../../contexts/VSCodeContext";
 
 // ============================================================
@@ -24,6 +25,10 @@ interface PendingState {
 
 export function PendingChangesCard() {
   const { send } = useVSCode();
+  const { state: sessionState } = useSession();
+  const autoApplyRef = useRef(sessionState.autoApplyEnabled);
+  autoApplyRef.current = sessionState.autoApplyEnabled;
+
   const [state, setState] = useState<PendingState>({
     visible: false,
     currentChange: null,
@@ -37,12 +42,20 @@ export function PendingChangesCard() {
     if (msg.command !== "showCurrentChange") return;
     const change = msg.currentChange as PCChange;
     const policy = msg.policyResult as { approved?: boolean; reason?: string } | undefined;
+    const approved = policy?.approved !== false;
+
+    // Auto-apply: if enabled and policy allows, apply immediately
+    if (autoApplyRef.current && approved && change) {
+      send({ command: "applyChanges", changeSet: { changes: [change as never] } });
+      return;
+    }
+
     setState({
       visible: true,
       currentChange: change,
       currentIndex: msg.currentIndex,
       totalChanges: msg.totalChanges,
-      policyApproved: policy?.approved !== false,
+      policyApproved: approved,
       policyReason: policy?.reason || "",
     });
   });

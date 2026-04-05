@@ -102,10 +102,15 @@
     "watch:webview": "node webview-ui/esbuild.mjs --watch",
     "pretest": "npm run compile:ts",
     "test": "node --test out/tests/*.test.js",
+    "test:webview": "npx vitest run --config webview-ui/vitest.config.ts",
+    "test:all": "npm test && npm run test:webview",
     "lint": "eslint src --ext ts",
     "build:css": "tailwindcss -i ./media/input.css -o ./media/tailwind.css --minify"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/jest": "^30.0.0",
     "@types/node": "^20.x",
@@ -117,8 +122,10 @@
     "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.28.0",
     "eslint": "^8.56.0",
+    "jsdom": "^29.0.1",
     "tailwindcss": "^3.4.19",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.2"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.23",

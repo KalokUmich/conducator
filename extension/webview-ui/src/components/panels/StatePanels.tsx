@@ -5,7 +5,7 @@ import type { Room } from "../../types/messages";
 
 // ============================================================
 // StatePanels — shown when not in active session
-// Matches the original chat.html premium landing pages
+// Shown when not in active session — premium landing pages
 // ============================================================
 
 export function StatePanels() {
@@ -23,7 +23,7 @@ export function StatePanels() {
 
 // ── Time Ago Helper ───────────────────────────────────────
 
-function formatTimeAgo(date: Date): string {
+export function formatTimeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
   if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
@@ -220,12 +220,30 @@ function ReadyToHostPanel() {
     });
   }, [onAny]);
 
+  // Listen for quit rooms (legacy online mode)
+  const [quitRooms, setQuitRooms] = useState<Room[]>([]);
+  useCommand("quitRoomsList", (msg) => {
+    if (msg.command !== "quitRoomsList") return;
+    setQuitRooms(msg.rooms);
+  });
+
   useEffect(() => {
     const email = state.ssoIdentity?.email || "";
     send({ command: "getOnlineRooms", email } as never);
+    send({ command: "getQuitRooms" });
     // Load local session history
     send({ command: "getLocalSessions", email } as never);
   }, [send, state.ssoIdentity?.email]);
+
+  const handleRefreshOnlineRooms = useCallback(() => {
+    const email = state.ssoIdentity?.email || "";
+    send({ command: "getOnlineRooms", email } as never);
+  }, [send, state.ssoIdentity?.email]);
+
+  const handleRemoveQuitRoom = useCallback((roomId: string) => {
+    send({ command: "removeQuitRoom", roomId });
+    setQuitRooms((prev) => prev.filter((r) => r.roomId !== roomId));
+  }, [send]);
 
   const handleStartLocal = useCallback(() => {
     // Only send startSession — it handles resetSession + workspace registration + upsertSession internally
@@ -327,17 +345,53 @@ function ReadyToHostPanel() {
             )}
           </div>
         ) : (
-          <>
-            {/* Room list — always joinable */}
-            {onlineRooms.length > 0 && (
-              <div className="room-list" style={{ width: "100%" }}>
-                {onlineRooms.map((room) => (
-                  <RoomCard key={room.roomId} room={room} onJoin={() => joinSession(room.roomId)} />
-                ))}
+          <div className="ready-section" style={{ width: "100%", gap: "var(--space-3)", display: "flex", flexDirection: "column" }}>
+            {/* Active rooms */}
+            <div className="online-rooms-section">
+              <div className="section-header-row">
+                <h3 className="section-label">Your Sessions</h3>
+                <button className="icon-btn-xs" onClick={handleRefreshOnlineRooms} title="Refresh">
+                  <svg viewBox="0 0 20 20" fill="currentColor" width="12" height="12">
+                    <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+              {onlineRooms.length > 0 ? (
+                <div className="room-list">
+                  {onlineRooms.map((room) => (
+                    <RoomCard key={room.roomId} room={room} onJoin={() => joinSession(room.roomId)} />
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-hint">No active sessions</p>
+              )}
+            </div>
+
+            {/* Quit rooms (previously left) */}
+            {quitRooms.length > 0 && (
+              <div className="quit-rooms-section">
+                <h3 className="section-label">Previous Sessions</h3>
+                <div className="room-list">
+                  {quitRooms.map((room) => (
+                    <div key={room.roomId} className="room-card-row">
+                      <button className="room-card" onClick={() => joinSession(room.roomId)}>
+                        <span className="room-id-mono">{room.roomId.substring(0, 8)}...</span>
+                        <span className="room-rejoin-label">Rejoin</span>
+                      </button>
+                      <button
+                        className="room-delete-btn"
+                        onClick={() => handleRemoveQuitRoom(room.roomId)}
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
-            {/* Join by invite — always available */}
+            {/* Join by invite */}
             <div style={{ display: "flex", alignItems: "center", gap: "8px", width: "100%", maxWidth: "280px" }}>
               <input
                 type="text"
@@ -353,13 +407,13 @@ function ReadyToHostPanel() {
               </button>
             </div>
 
-            {/* Host New Room — requires SSO */}
+            {/* Host New Room */}
             {state.ssoIdentity && (
               <button className="btn-primary btn-wide" onClick={startSession}>
                 Host New Room
               </button>
             )}
-          </>
+          </div>
         )}
       </div>
     </div>

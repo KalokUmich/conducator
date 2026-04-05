@@ -1,5 +1,7 @@
-import { memo, type RefObject } from "react";
+import { memo, useCallback, type RefObject } from "react";
 import type { ChatMessage } from "../../types/messages";
+import { useSession } from "../../contexts/SessionContext";
+import { useReadReceipts } from "../../hooks/useReadReceipts";
 import { MessageBubble } from "./MessageBubble";
 import { DateSeparator } from "./DateSeparator";
 
@@ -42,16 +44,34 @@ function shouldGroup(msg: ChatMessage, prevMsg: ChatMessage | null): boolean {
 
 export const MessageList = memo(function MessageList({
   messages,
+  scrollContainerRef,
 }: MessageListProps) {
+  const { state } = useSession();
+  const { observe } = useReadReceipts(scrollContainerRef);
+  const ownUserId = state.session?.userId;
+
+  // Ref callback: observe non-own messages for read receipts
+  const messageRefCallback = useCallback(
+    (el: HTMLDivElement | null, isOwn: boolean) => {
+      if (el && !isOwn) observe(el);
+    },
+    [observe]
+  );
+
   return (
     <div className="message-list-simple">
       {messages.map((msg, i) => {
         const prev = i > 0 ? messages[i - 1] : null;
         const showSeparator = needsDateSeparator(msg, prev);
         const isGrouped = shouldGroup(msg, prev);
+        const isOwn = msg.userId === ownUserId;
 
         return (
-          <div key={msg.id || `msg-${i}`}>
+          <div
+            key={msg.id || `msg-${i}`}
+            data-message-id={msg.id}
+            ref={(el) => messageRefCallback(el, isOwn)}
+          >
             {showSeparator && <DateSeparator ts={msg.ts} />}
             <MessageBubble message={msg} isGrouped={isGrouped} />
           </div>

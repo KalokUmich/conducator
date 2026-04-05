@@ -123,10 +123,10 @@ run-backend-port: ensure-backend-deps
 # ===========================
 # Testing
 # ===========================
-.PHONY: test test-backend test-extension test-parity integration-test
+.PHONY: test test-backend test-extension test-webview test-frontend test-parity integration-test
 
-## Run all tests (backend + extension + parity)
-test: test-backend test-extension test-parity
+## Run all tests (backend + extension + webview + parity)
+test: test-backend test-extension test-webview test-parity
 	@echo "All tests passed!"
 
 ## Run backend tests
@@ -134,14 +134,19 @@ test-backend: ensure-backend-deps
 	@echo "Running backend tests..."
 	cd backend && $(PYTHON) -m pytest tests/ -v
 
-## Run extension tests
+## Run extension service tests (node:test — FSM, controllers, services)
 test-extension:
-	@echo "Running extension tests..."
-	@if [ -f "extension/package.json" ] && grep -q '"test"' extension/package.json; then \
-		cd extension && npm test; \
-	else \
-		echo "No extension tests configured"; \
-	fi
+	@echo "Running extension service tests..."
+	cd extension && npm test
+
+## Run React WebView tests (vitest — components, reducers, pure logic)
+test-webview:
+	@echo "Running WebView tests..."
+	cd extension && npm run test:webview
+
+## Run all frontend tests (extension + webview)
+test-frontend: test-extension test-webview
+	@echo "All frontend tests passed!"
 
 ## Run backend integration tests (requires real API credentials)
 integration-test: ensure-backend-deps
@@ -394,9 +399,11 @@ help:
 	@echo "  make run-backend-port PORT=8001  Start on custom port"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test               Run all tests (backend + extension)"
+	@echo "  make test               Run all tests (backend + extension + webview + parity)"
 	@echo "  make test-backend       Run backend unit tests"
-	@echo "  make test-extension     Run extension tests"
+	@echo "  make test-extension     Run extension service tests (node:test)"
+	@echo "  make test-webview       Run React WebView tests (vitest)"
+	@echo "  make test-frontend      Run all frontend tests (extension + webview)"
 	@echo "  make test-parity        Validate Python<>TS tool parity"
 	@echo "  make integration-test   Run integration tests (needs API keys)"
 	@echo ""

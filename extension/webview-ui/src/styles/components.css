@@ -1411,6 +1411,848 @@
   border-radius: var(--radius-sm);
 }
 
+/* ── AI Working Space ─────────────────────────────────── */
+
+.workspace-section {
+  margin-bottom: var(--space-2);
+}
+
+.workspace-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--c-success);
+  font-weight: var(--weight-semibold);
+}
+
+.workspace-title {
+  font-size: var(--text-xs);
+}
+
+.workspace-dropzone {
+  min-height: 48px;
+  border: 2px dashed var(--c-border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  transition:
+    border-color var(--duration-normal) var(--ease-out),
+    background var(--duration-normal) var(--ease-out);
+}
+
+.workspace-dropzone.drag-over {
+  border-color: var(--c-success);
+  background: rgba(74, 222, 128, 0.05);
+}
+
+.workspace-empty {
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--c-text-muted);
+  padding: var(--space-3) var(--space-2);
+}
+
+.workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.workspace-card {
+  background: var(--c-bg-tertiary);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  animation: cardEnter var(--duration-normal) var(--ease-out) both;
+}
+
+.workspace-card.ws-done {
+  opacity: 0.6;
+}
+
+.ws-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ws-card-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-card-title {
+  font-size: var(--text-xs);
+  color: var(--c-text-primary);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-card-ticket {
+  font-size: 0.6rem;
+  font-family: var(--font-mono);
+  color: rgba(96, 165, 250, 0.7);
+}
+
+.ws-remove-btn {
+  flex-shrink: 0;
+  padding: 2px;
+  color: var(--c-text-muted);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+
+.workspace-card:hover .ws-remove-btn {
+  opacity: 1;
+}
+
+.ws-remove-btn:hover {
+  color: var(--c-error);
+}
+
+.ws-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.ws-action-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 0.65rem;
+  font-weight: var(--weight-medium);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.btn-investigate {
+  color: var(--c-success);
+  border-color: rgba(74, 222, 128, 0.3);
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.btn-investigate:hover:not(:disabled) {
+  background: rgba(74, 222, 128, 0.2);
+}
+
+.btn-investigate.disabled,
+.btn-investigate:disabled {
+  color: var(--c-text-muted);
+  border-color: var(--c-border-default);
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.btn-implement {
+  color: var(--c-text-muted);
+  border-color: var(--c-border-default);
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ── Backlog Cards (draggable) ────────────────────────── */
+
+.backlog-card {
+  background: var(--c-bg-tertiary);
+  border: 1px solid var(--c-border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  transition:
+    opacity var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+  animation: cardEnter var(--duration-normal) var(--ease-out) both;
+  cursor: default;
+}
+
+.backlog-card[draggable="true"] {
+  cursor: grab;
+}
+
+.backlog-card[draggable="true"]:active {
+  cursor: grabbing;
+  opacity: 0.4;
+  transform: scale(0.97);
+}
+
+.backlog-card.card-linked {
+  border-color: rgba(139, 92, 246, 0.2);
+}
+
+.backlog-card.card-blocked {
+  opacity: 0.5;
+}
+
+.backlog-card.card-done {
+  opacity: 0.5;
+}
+
+.backlog-card.card-jira {
+  border-color: rgba(96, 165, 250, 0.2);
+}
+
+.backlog-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.backlog-card-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+}
+
+.backlog-card-title {
+  font-size: var(--text-xs);
+  color: var(--c-text-primary);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.backlog-card-title:hover {
+  color: var(--c-brand-400);
+}
+
+.backlog-card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.backlog-card-location {
+  font-size: 0.55rem;
+  font-family: var(--font-mono);
+  color: var(--c-text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.backlog-card-location:hover {
+  color: var(--c-brand-400);
+}
+
+.backlog-card-priority {
+  font-size: 0.55rem;
+  color: var(--c-text-muted);
+}
+
+.drag-handle {
+  font-size: var(--text-xs);
+  color: var(--c-text-muted);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+  user-select: none;
+}
+
+.backlog-card:hover .drag-handle {
+  opacity: 0.6;
+}
+
+/* ── Badges ───────────────────────────────────────────── */
+
+.badge {
+  font-size: 0.55rem;
+  font-weight: var(--weight-semibold);
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.badge-todo {
+  color: var(--c-brand-400);
+  background: rgba(139, 92, 246, 0.15);
+}
+
+.badge-done {
+  color: var(--c-success);
+  background: rgba(74, 222, 128, 0.15);
+}
+
+.badge-blocked {
+  color: var(--c-error);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.badge-jira {
+  color: var(--c-info);
+  background: rgba(96, 165, 250, 0.15);
+  font-family: var(--font-mono);
+}
+
+.badge-status {
+  font-family: var(--font-mono);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.badge-status:hover {
+  opacity: 0.8;
+}
+
+/* ── Jira Ticket Popup ────────────────────────────────── */
+
+.jira-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+.jira-popup {
+  background: var(--c-bg-secondary);
+  border: 1px solid var(--c-border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  width: 280px;
+  max-width: 90%;
+  box-shadow: var(--shadow-xl);
+}
+
+.jira-popup-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.jira-popup-status {
+  font-size: var(--text-xs);
+  color: var(--c-text-muted);
+  margin-left: auto;
+}
+
+.jira-popup-close {
+  font-size: var(--text-lg);
+  color: var(--c-text-muted);
+  line-height: 1;
+  padding: 0 var(--space-1);
+}
+
+.jira-popup-close:hover {
+  color: var(--c-text-primary);
+}
+
+.jira-popup-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--c-text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.jira-popup-meta {
+  font-size: var(--text-xs);
+  color: var(--c-text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+.jira-popup-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+/* ── Card entrance animation ──────────────────────────── */
+
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* ── Header Workspace Rows ─────────────────────────────── */
+
+.header-workspace-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-3);
+  padding-top: var(--space-1);
+}
+
+.workspace-row-label {
+  font-size: 0.6rem;
+  color: var(--c-text-muted);
+}
+
+.action-btn-xs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 0.6rem;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-medium);
+  transition: color var(--duration-fast) var(--ease-out), opacity var(--duration-fast) var(--ease-out);
+}
+
+.action-btn-xs.action-brand { color: var(--c-brand-400); }
+.action-btn-xs.action-brand:hover { color: var(--c-brand-300); }
+.action-btn-xs.action-success { color: var(--c-success); }
+.action-btn-xs.action-success:hover { color: #6ee7b7; }
+.action-btn-xs.action-warn { color: var(--c-warning); }
+.action-btn-xs.action-warn:hover { color: #fcd34d; }
+
+/* ── Index Progress Bar ───────────────────────────────── */
+
+.index-progress-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3) var(--space-1);
+}
+
+.index-progress-track {
+  flex: 1;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.index-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: rgba(139, 92, 246, 0.6);
+  transition: width 0.3s var(--ease-out);
+}
+
+.index-progress-text {
+  font-size: 0.55rem;
+  color: var(--c-text-muted);
+  white-space: nowrap;
+}
+
+/* ── Backlog Edit Button ──────────────────────────────── */
+
+.backlog-edit-btn {
+  flex-shrink: 0;
+  padding: 2px;
+  color: var(--c-text-muted);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+
+.backlog-card:hover .backlog-edit-btn {
+  opacity: 1;
+}
+
+.backlog-edit-btn:hover {
+  color: var(--c-brand-400);
+}
+
+/* ── Jira Auth Styles ─────────────────────────────────── */
+
+.jira-status-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: center;
+  margin-bottom: var(--space-2);
+}
+
+.jira-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.jira-dot-connected {
+  background: var(--c-success);
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
+}
+
+.jira-dot-disconnected {
+  background: var(--c-text-muted);
+}
+
+.jira-status-text {
+  font-size: var(--text-xs);
+  color: var(--c-text-muted);
+}
+
+.jira-connected-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.jira-site-label {
+  font-size: 0.7rem;
+  color: var(--c-success);
+}
+
+.jira-disconnect-btn {
+  font-size: 0.65rem;
+  color: var(--c-text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.jira-disconnect-btn:hover {
+  color: var(--c-text-secondary);
+}
+
+.jira-auth-pending {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.jira-auth-hint {
+  font-size: var(--text-xs);
+  color: var(--c-text-secondary);
+  margin-bottom: var(--space-2);
+}
+
+.jira-auth-links {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.jira-auth-url {
+  margin-top: var(--space-1);
+  font-size: 0.6rem;
+  color: var(--c-text-muted);
+  word-break: break-all;
+}
+
+/* ── StatePanels Enhancements ─────────────────────────── */
+
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.section-label {
+  font-size: 0.6rem;
+  color: var(--c-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--weight-medium);
+}
+
+.empty-hint {
+  font-size: 0.65rem;
+  color: var(--c-text-muted);
+  text-align: center;
+  padding: var(--space-2) 0;
+}
+
+.online-rooms-section,
+.quit-rooms-section {
+  width: 100%;
+}
+
+.room-card-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.room-card-row .room-card {
+  flex: 1;
+}
+
+.room-id-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--c-text-secondary);
+}
+
+.room-rejoin-label {
+  font-size: 0.6rem;
+  color: var(--c-brand-400);
+}
+
+.room-delete-btn {
+  font-size: var(--text-base);
+  color: var(--c-text-muted);
+  padding: 0 var(--space-1);
+  line-height: 1;
+}
+
+.room-delete-btn:hover {
+  color: var(--c-error);
+}
+
+/* ── Code Prompt Action ───────────────────────────────── */
+
+.code-prompt-action {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--c-border-subtle);
+}
+
+.code-prompt-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* ── Scanning Overlay Mode Badge ──────────────────────── */
+
+.scanning-mode-badge {
+  font-size: 0.55rem;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-full);
+  color: var(--c-text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* ── Diagram Lightbox ─────────────────────────────────── */
+
+.diagram-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+  animation: fadeIn var(--duration-normal) var(--ease-out);
+}
+
+.diagram-lightbox-topbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-3);
+}
+
+.diagram-lightbox-close {
+  font-size: var(--text-xl);
+  color: var(--c-text-muted);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.diagram-lightbox-close:hover {
+  color: var(--c-text-primary);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.diagram-lightbox-body {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.diagram-lightbox-content {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.diagram-lightbox-content svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-clickable {
+  cursor: zoom-in;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.mermaid-clickable:hover {
+  opacity: 0.85;
+}
+
+/* ── AI Message Actions ───────────────────────────────── */
+
+.ai-message-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.bubble-ai:hover .ai-message-actions {
+  opacity: 1;
+}
+
+.ai-copy-btn {
+  font-size: 0.6rem;
+  color: var(--c-text-muted);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  transition: color var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out);
+}
+
+.ai-copy-btn:hover {
+  color: var(--c-text-primary);
+  background: var(--c-bg-hover);
+}
+
+/* ── Lead Transfer Button ─────────────────────────────── */
+
+.transfer-lead-btn {
+  flex-shrink: 0;
+  padding: 2px;
+  color: var(--c-text-muted);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+
+.user-row:hover .transfer-lead-btn {
+  opacity: 1;
+}
+
+.transfer-lead-btn:hover {
+  color: var(--c-brand-400);
+}
+
+/* ── Input Drop Active ────────────────────────────────── */
+
+@keyframes inputDropPulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(139, 92, 246, 0.3); }
+  50% { box-shadow: 0 0 20px rgba(139, 92, 246, 0.5); }
+}
+
+.chat-input-container.input-drop-active {
+  border-color: var(--c-brand-400);
+  animation: inputDropPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── Form Helpers ─────────────────────────────────────── */
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.form-label {
+  font-size: 0.6rem;
+  color: var(--c-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.form-hint {
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  color: var(--c-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.form-error {
+  font-size: var(--text-xs);
+  color: var(--c-error);
+}
+
+.form-description {
+  font-size: var(--text-xs);
+  color: var(--c-text-secondary);
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+.action-btn.action-warn {
+  background: rgba(217, 119, 6, 0.7);
+  color: white;
+  border-color: rgba(217, 119, 6, 0.5);
+}
+
+.action-btn.action-warn:hover {
+  background: rgba(217, 119, 6, 0.85);
+}
+
+.action-btn.full-width {
+  width: 100%;
+  justify-content: center;
+}
+
+.select-input {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%236b7280'%3E%3Cpath fill-rule='evenodd' d='M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z' clip-rule='evenodd'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 14px;
+  padding-right: 28px;
+}
+
+.textarea-input {
+  resize: vertical;
+  min-height: 60px;
+}
+
 /* ── Modal ─────────────────────────────────────────────── */
 
 .modal-overlay {

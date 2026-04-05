@@ -30,17 +30,23 @@ extension/src/
 │   └── chatLocalStore.ts               # Local message cache (IndexedDB via VS Code globalState)
 └── commands/index.ts
 
-extension/media/
-├── chat.html      # Main WebView — @AI /ask /pr /jira slash commands, Workflows tab
-│                  # Online mode room list, renderMessageByType, Highlight.js syntax highlighting
-│                  # chatLocalStore integration, mermaid with raw-source fallback
-│                  # Backlog: 3-section (Linked/Code/Jira) + AI Working Space + drag-and-drop
-│                  # Task Board: dependency gating (blocked items grayed), Epic grouping (mine=green/unassigned=orange)
-│                  # Jira: ticket creation modal, component multi-select, ticket key auto-linking
-└── workflow.html  # Workflow visualization — SVG graph + agent detail panel
+extension/webview-ui/
+├── src/
+│   ├── components/          # React 18 components (chat, modals, panels, tasks, shared)
+│   ├── contexts/            # ChatContext, SessionContext, VSCodeContext
+│   ├── hooks/               # useWebSocket, useReadReceipts, useHistoryPagination, useMermaid
+│   ├── types/               # commands.ts (postMessage contract), messages.ts (data types)
+│   ├── styles/              # design-tokens.css, components.css
+│   └── utils/               # format.ts helpers
+├── esbuild.mjs              # Bundler config (IIFE, browser target, JSX automatic)
+└── tsconfig.json
 
-extension/media/highlight.min.js    # Bundled Highlight.js 11.9.0 (no CDN dependency)
-extension/media/github-dark.min.css # Highlight.js GitHub Dark theme
+extension/media/
+├── webview.js       # React WebView bundle (esbuild output)
+├── webview.css      # React WebView styles (esbuild output)
+├── workflow.html    # Workflow visualization — SVG graph + agent detail panel
+├── highlight.min.js    # Bundled Highlight.js 11.9.0 (no CDN dependency)
+└── github-dark.min.css # Highlight.js GitHub Dark theme
 
 extension/grammars/          # tree-sitter .wasm grammar files (committed)
 ├── tree-sitter.wasm         # web-tree-sitter runtime
@@ -66,14 +72,16 @@ Grammar WASM files in `extension/grammars/` are committed to the repo. **Do not*
 grammars independently — the grammar ABI version must match `web-tree-sitter` (pinned at 0.26.7).
 Mismatched versions cause silent fallback to regex extraction with degraded accuracy.
 
-## Chat WebView (chat.html) Key Patterns
+## Chat WebView (React)
 
-- **Message rendering**: use `renderMessageByType(msg)` — dispatches to the correct renderer based on `msg.type` (`text`, `code_snippet`, `ai_response`, `file_share`, etc.). Do NOT use `renderMessage()` directly for history/cached messages as it only handles text.
-- **Syntax highlighting**: `highlightCodeBlocks(container)` — called after inserting any message DOM. Requires Highlight.js (`highlight.min.js` + `github-dark.min.css`) loaded from bundled files (not CDN).
-- **Mermaid diagrams**: wrap `mermaid.render()` calls in `.catch()` to show raw source as fallback on parse error (Qwen/other LLMs sometimes emit invalid syntax).
-- **Online mode**: auto-loads room list from `GET /chat/rooms?email=...` via `getOnlineRooms` extension command on mode selection. Rooms have status dots. Deleting a room calls `DELETE /chat/{roomId}` to purge history from Postgres.
-- **Local workspace**: `_handleStartSession` auto-registers the workspace via `POST /api/git-workspace/workspaces/local` — no manual "Use Local" button needed. If no workspace folder is open, shows a warning with "Open Folder" action.
-- **AI status retries**: silent retry up to 3 times before showing error banner — avoids false alarms on transient connectivity hiccups.
+The WebView is a React 18 SPA built with esbuild (`npm run compile:webview`). Key patterns:
+
+- **Message rendering**: `MessageBubble.tsx` dispatches by `msg.type` (`text`, `code_snippet`, `ai_answer`, `file`, `stack_trace`, `test_failures`, `system`, etc.)
+- **Syntax highlighting**: `CodeBlock.tsx` uses bundled Highlight.js (`highlight.min.js` + `github-dark.min.css`)
+- **Mermaid diagrams**: `AIContent` renders `.mermaid-source` elements; click opens `DiagramLightbox` (fullscreen zoom). Falls back to raw source on parse error.
+- **State management**: `ChatContext` (messages + AI state), `SessionContext` (FSM + permissions + SSO), `VSCodeContext` (postMessage bridge)
+- **WebSocket**: `useWebSocket.ts` — full lifecycle (connect → auth → history → join → messages → reconnect)
+- **Typed commands**: `commands.ts` defines `IncomingCommand` / `OutgoingCommand` union types for the postMessage contract
 
 ## Tool Parity Testing
 

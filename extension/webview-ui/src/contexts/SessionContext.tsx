@@ -27,7 +27,7 @@ export interface SSOPendingInfo {
 // Global session state — conductor FSM, permissions, users
 // ============================================================
 
-interface SessionState {
+export interface SessionState {
   conductorState: ConductorState;
   session: Session | null;
   permissions: Permissions;
@@ -41,7 +41,7 @@ interface SessionState {
   ssoPending: SSOPendingInfo | null;
 }
 
-type SessionAction =
+export type SessionAction =
   | { type: "SET_CONDUCTOR_STATE"; state: ConductorState; session?: Session; ssoIdentity?: SSOIdentity; ssoProvider?: string }
   | { type: "SET_PERMISSIONS"; permissions: Permissions }
   | { type: "SET_AUTO_APPLY"; enabled: boolean }
@@ -57,7 +57,7 @@ type SessionAction =
   | { type: "SSO_CLEARED" }
   | { type: "RESET_SESSION" };
 
-function sessionReducer(state: SessionState, action: SessionAction): SessionState {
+export function sessionReducer(state: SessionState, action: SessionAction): SessionState {
   switch (action.type) {
     case "SET_CONDUCTOR_STATE":
       return {
@@ -230,7 +230,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           const identity = data.identity as SSOIdentity;
           // Attach userUuid from backend user profile
           if (data.userUuid) {
-            (identity as Record<string, unknown>).userUuid = data.userUuid;
+            (identity as unknown as Record<string, unknown>).userUuid = data.userUuid;
           }
           dispatch({
             type: "SSO_DONE",
@@ -251,7 +251,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [onAny, dispatch]);
 
   useCommand("endChatConfirmed", () => {
-    // Tell extension to transition FSM back (mirrors old chat.html sessionEnded flow)
+    // Tell extension to transition FSM back
     send({ command: "sessionEnded" } as never);
     dispatch({ type: "RESET_SESSION" });
   });

@@ -5,7 +5,7 @@ import { useVSCode } from "../contexts/VSCodeContext";
 import type { ChatMessage, UserInfo } from "../types/messages";
 
 // ============================================================
-// useWebSocket — FULL WebSocket lifecycle matching old chat.html
+// useWebSocket — full WebSocket lifecycle for chat sessions
 //
 // Flow: connect → recv 'connected' (store userId/role) →
 //       recv 'history' (render users + messages, send 'join') →
@@ -269,9 +269,26 @@ export function useWebSocket() {
         return;
       }
 
-      // ── 10. Skip internal protocol messages that shouldn't render ──
+      // ── 10. role_restored — update session role + show system message ──
+      if (type === "role_restored") {
+        const newRole = (data.sessionRole as string) || "host";
+        sessionDispatch({
+          type: "SET_PERMISSIONS",
+          permissions: { sessionRole: newRole as "host" | "guest" | "none" },
+        });
+        addMessageRef.current({
+          id: `system-role-${Date.now()}`,
+          userId: "system", displayName: "System", role: "system",
+          content: "Host role restored via SSO identity",
+          type: "system",
+          ts: Date.now() / 1000,
+        });
+        return;
+      }
+
+      // ── 11. Skip internal protocol messages that shouldn't render ──
       const SKIP_TYPES = new Set([
-        "role_restored", "lead_changed_ack", "settings_updated",
+        "lead_changed_ack", "settings_updated",
         "error", "quit_confirmed", "end_session_blocked", "history_cleared",
       ]);
       if (SKIP_TYPES.has(type)) {

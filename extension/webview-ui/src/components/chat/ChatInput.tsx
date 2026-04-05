@@ -11,19 +11,14 @@ import { useSession } from "../../contexts/SessionContext";
 import { useVSCode } from "../../contexts/VSCodeContext";
 import { useWebSocketSend, getTypingDisplayNames } from "../../hooks/useWebSocket";
 import { formatFileSize } from "../../utils/format";
+import { showToast } from "../shared/Toast";
+import { SLASH_COMMANDS, matchSlashCommands, computeGhostHint, parseMessageForAI } from "../../utils/slashCommands";
+import type { SlashCommand } from "../../utils/slashCommands";
 
 // ============================================================
 // ChatInput — slash commands, code attachments, file upload,
 //             action buttons, typing indicator, auto-resize
 // ============================================================
-
-interface SlashCommand {
-  name: string;
-  description: string;
-  hint: string;
-  transform: (args: string) => string;
-  isAI?: boolean;
-}
 
 /** Rotating help tips shown as placeholder text. Add/remove freely. */
 const HELP_TIPS: string[] = [
@@ -39,12 +34,6 @@ const HELP_TIPS: string[] = [
 
 /** Cycle interval in milliseconds (2 minutes). */
 const HELP_TIP_INTERVAL_MS = 2 * 60 * 1000;
-
-const SLASH_COMMANDS: SlashCommand[] = [
-  { name: "/ask", description: "Ask AI a question", hint: "Type your question...", transform: (args) => args, isAI: true },
-  { name: "/pr", description: "Request a code review", hint: "Describe the PR or paste a link...", transform: (args) => `[query_type:code_review] ${args}`, isAI: true },
-  { name: "/jira", description: "Create or search Jira issues", hint: "Describe the task or search query...", transform: (args) => `[query_type:issue_tracking] ${args}`, isAI: true },
-];
 
 export function ChatInput() {
   const [value, setValue] = useState("");
@@ -81,18 +70,13 @@ export function ChatInput() {
     return () => clearInterval(timer);
   }, []);
 
-  // Slash command detection
+  // Slash command detection (uses extracted utils)
   useEffect(() => {
-    if (value.startsWith("/")) {
-      const input = value.toLowerCase();
-      const matches = SLASH_COMMANDS.filter((c) => c.name.startsWith(input.split(" ")[0]));
-      if (matches.length > 0 && !value.includes(" ")) {
-        setSlashMenu({ visible: true, items: matches, activeIndex: 0 });
-        if (matches[0].name.startsWith(input)) {
-          setGhostHint(matches[0].name.slice(input.length));
-        }
-        return;
-      }
+    const matches = matchSlashCommands(value);
+    if (matches.length > 0) {
+      setSlashMenu({ visible: true, items: matches, activeIndex: 0 });
+      setGhostHint(computeGhostHint(value, matches));
+      return;
     }
     setSlashMenu((s) => ({ ...s, visible: false }));
     setGhostHint("");
@@ -135,23 +119,8 @@ export function ChatInput() {
       return; // File upload is handled separately
     }
 
-    // Check for slash commands / @AI
-    let query = text;
-    let isAIQuery = false;
-
-    for (const cmd of SLASH_COMMANDS) {
-      if (text.startsWith(cmd.name + " ") || text === cmd.name) {
-        const args = text.slice(cmd.name.length).trim();
-        query = cmd.transform(args);
-        isAIQuery = !!cmd.isAI;
-        break;
-      }
-    }
-
-    if (text.startsWith("@AI ") || text.startsWith("@ai ")) {
-      query = text.slice(4);
-      isAIQuery = true;
-    }
+    // Check for slash commands / @AI (uses extracted parser)
+    const { query, isAI: isAIQuery } = parseMessageForAI(text);
 
     if (isAIQuery) {
       askAI(query, attachedSnippet || undefined);
@@ -225,7 +194,7 @@ export function ChatInput() {
       if (msg?.command === "uploadFileResult") {
         if (msg.success && msg.result) {
           const result = msg.result;
-          // Send file message to chat via WebSocket (same as old chat.html)
+          // Send file message to chat via WebSocket
           wsSend({
             type: "file",
             id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
@@ -297,8 +266,41 @@ export function ChatInput() {
   // Typing indicator display — show actual names
   const typingNames = getTypingDisplayNames(sessionState.session?.userId);
 
+  // File drag-drop hint (VS Code WebViews don't support external file drops)
+  const [inputDropActive, setInputDropActive] = useState(false);
+  const dragCounterRef = useRef(0);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (dragCounterRef.current === 1) setInputDropActive(true);
+  }, []);
+
+  const handleDragLeave = useCallback(() => {
+    dragCounterRef.current--;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setInputDropActive(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setInputDropActive(false);
+    if (e.dataTransfer?.files?.length) {
+      showToast("Drag-and-drop not supported in VS Code. Use the clip button.", "info");
+    }
+  }, []);
+
   return (
-    <div className="chat-input-container">
+    <div
+      className={`chat-input-container ${inputDropActive ? "input-drop-active" : ""}`}
+      onDragEnter={handleDragEnter}
+      onDragOver={(e) => e.preventDefault()}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {/* Typing indicator */}
       {typingNames.length > 0 && (
         <div className="typing-indicator-bar animate-fade-in">

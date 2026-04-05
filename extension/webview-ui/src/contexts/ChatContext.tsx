@@ -20,7 +20,7 @@ import { useSession } from "./SessionContext";
 // Chat state — messages, AI thinking, WebSocket
 // ============================================================
 
-interface ChatState {
+export interface ChatState {
   messages: ChatMessage[];
   seenIds: Set<string>;
   isAIThinking: boolean;
@@ -33,7 +33,7 @@ interface ChatState {
   isLoadingHistory: boolean;
 }
 
-type ChatAction =
+export type ChatAction =
   | { type: "ADD_MESSAGE"; message: ChatMessage }
   | { type: "ADD_MESSAGES_BATCH"; messages: ChatMessage[] }
   | { type: "AI_PROGRESS"; event: AIProgressEvent }
@@ -141,7 +141,7 @@ const INITIAL_BRAIN_TREE: BrainTree = {
   currentAgent: "",
 };
 
-function chatReducer(state: ChatState, action: ChatAction): ChatState {
+export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case "ADD_MESSAGE": {
       const msg = action.message;

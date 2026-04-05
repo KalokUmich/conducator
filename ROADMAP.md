@@ -856,6 +856,31 @@ Completed 2026-03-22. Quality-of-life improvements and infrastructure fixes.
 - [x] **Error banners**: unified `.error-banner` class with dismiss button across all 5 error containers
 - [x] **Markdown enhancements**: tables, links, italic in `inlineFormat()`, larger code blocks (`max-h-80`)
 
+## Phase 8.5: React WebView Migration (COMPLETE — 2026-04-05)
+
+Full migration from legacy `chat.html` (11,425 lines) to React 18 WebView. Legacy HTML deleted.
+
+- [x] React 18 + esbuild pipeline (IIFE bundle, 268KB JS / 71KB CSS)
+- [x] All chat components: MessageBubble (8 message types), ChatInput (slash commands), ThinkingIndicator, AgentQuestionCard
+- [x] All modals: AIConfig, Jira (with OAuth pending flow), RoomSettings, Summarize, StackTrace, SetupIndex, RebuildIndex, WorkspaceTodoEdit
+- [x] State panels: Idle, Disconnected, ReadyToHost (local sessions + online rooms + quit rooms)
+- [x] Task Board: 3-section backlog + AI Working Space + drag-and-drop + dependency graph + Jira popup
+- [x] ChatRecord v2: participants map, sender UUID, aiMeta
+- [x] Mermaid diagram lightbox/zoom (click SVG → fullscreen overlay)
+- [x] Auto-apply logic in PendingChangesCard (reads autoApplyEnabled, auto-sends applyChanges)
+- [x] Lead Transfer button in UsersSidebar (host only, sends transfer_lead via WebSocket)
+- [x] role_restored handling in useWebSocket (updates session role + system message)
+- [x] AI message copy button, code prompt generation button
+- [x] File drag-drop hint on ChatInput (glow effect + toast)
+- [x] Read receipts via IntersectionObserver (useReadReceipts hook)
+- [x] Scanning overlay with branch-changed banner + AST-only badge
+- [x] Index progress bar in ChatHeader
+- [x] Legacy chat.html deleted, fallback code removed from extension.ts
+- [x] TypeScript strict mode: 0 errors
+- [x] Vitest test suite: 151 tests (9 files) — pure logic, reducers, components, command contracts
+- [x] File uploads migrated to `~/.conductor/projects/{sanitized}/uploads/` via conductorPaths.ts
+- [x] Makefile: `make test-webview`, `make test-frontend`, `make test-all`
+
 ## Phase 9: Claude Code Pattern Adoption (IN PROGRESS)
 
 **Reference**: `reference/claude-code/` — Anthropic's official CLI source (~205K lines TypeScript). Extracted from npm sourcemaps 2026-03-31. Read-only study material.
@@ -1213,6 +1238,7 @@ All exceptions are built-in or Pydantic. No retry logic for transient failures.
 | Phase 7.3–7.4: Jira Extension UI | ✅ Complete | Sprint 11 |
 | Phase 7.5–7.6: Teams + Slack | 🟡 Planned | Sprint 12 |
 | Phase 8: Infrastructure & UI Hardening | ✅ Complete | Sprint 12 |
+| Phase 8.5: React WebView Migration | ✅ Complete | Sprint 13 |
 | Phase 9: Claude Code Pattern Adoption | 🟢 In Progress | Sprint 13+ |
 | Phase 10: Companion & Developer Experience | 🟡 Planned | Sprint 14+ |
 | Phase 11: Engineering Infrastructure | 🟡 Planned | Sprint 13+ |

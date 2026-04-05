@@ -18,9 +18,12 @@ interface JiraProject {
 }
 
 export function JiraModal({ open, onClose }: Props) {
-  const { send } = useVSCode();
+  const { send, onAny } = useVSCode();
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [authUrl, setAuthUrl] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [siteUrl, setSiteUrl] = useState("");
   const [projectKey, setProjectKey] = useState("");
   const [issueTypes, setIssueTypes] = useState<Array<{ name: string; id: string }>>([]);
   const [selectedIssueType, setSelectedIssueType] = useState("");
@@ -42,12 +45,43 @@ export function JiraModal({ open, onClose }: Props) {
     if (msg.command !== "jiraConnected") return;
     setConnected(true);
     setConnecting(false);
+    setAuthUrl("");
+    const data = msg as unknown as { site_url?: string };
+    if (data.site_url) setSiteUrl(data.site_url);
     send({ command: "jiraCheckStatus" });
   });
 
   useCommand("jiraDisconnected", () => {
     setConnected(false);
+    setSiteUrl("");
   });
+
+  // Handle auth URL for pending OAuth flow
+  useCommand("jiraAuthRequired", (msg) => {
+    if (msg.command !== "jiraAuthRequired") return;
+    const data = msg as unknown as { authorizeUrl: string };
+    setAuthUrl(data.authorizeUrl || "");
+    setConnecting(true);
+    // Open the auth URL in external browser
+    if (data.authorizeUrl) {
+      send({ command: "openExternal", url: data.authorizeUrl });
+    }
+  });
+
+  // Handle jiraStatus (initial check response)
+  useEffect(() => {
+    return onAny((msg: unknown) => {
+      const data = msg as { command: string; connected?: boolean; site_url?: string };
+      if (data.command === "jiraStatus") {
+        setConnected(!!data.connected);
+        if (data.site_url) setSiteUrl(data.site_url);
+        if (data.connected) {
+          setConnecting(false);
+          setAuthUrl("");
+        }
+      }
+    });
+  }, [onAny]);
 
   useCommand("jiraIssueTypes", (msg) => {
     if (msg.command !== "jiraIssueTypes") return;
@@ -114,19 +148,65 @@ export function JiraModal({ open, onClose }: Props) {
     <Modal open={open} onClose={onClose} title="Create Jira Ticket">
       {!connected ? (
         <div className="jira-auth">
-          <p className="config-hint" style={{ textAlign: "center", marginBottom: "var(--space-4)" }}>
-            Connect your Jira account to create tickets
+          <div className="jira-status-row">
+            <span className={`jira-status-dot ${connected ? "jira-dot-connected" : "jira-dot-disconnected"}`} />
+            <span className="jira-status-text">
+              {connecting ? "Waiting for authorization..." : "Not connected to Jira"}
+            </span>
+          </div>
+          <p className="config-hint" style={{ textAlign: "center", marginBottom: "var(--space-3)" }}>
+            Connect your Jira account to create tickets.
           </p>
           <button
             className="btn-primary btn-wide"
             onClick={handleConnect}
             disabled={connecting}
           >
-            {connecting ? "Connecting..." : "Connect to Jira"}
+            {connecting ? "Waiting..." : "Connect to Jira"}
           </button>
+          {/* Pending auth — show URL controls */}
+          {authUrl && (
+            <div className="jira-auth-pending">
+              <div className="jira-auth-hint">Waiting for authorization...</div>
+              <div className="jira-auth-links">
+                <button
+                  className="action-btn action-brand"
+                  onClick={() => send({ command: "openExternal", url: authUrl })}
+                >
+                  Open link again
+                </button>
+                <button
+                  className="action-btn"
+                  onClick={() => {
+                    navigator.clipboard.writeText(authUrl);
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                  }}
+                >
+                  {copied ? "Copied!" : "Copy URL"}
+                </button>
+              </div>
+              <div className="jira-auth-url">
+                {authUrl.length > 60 ? authUrl.slice(0, 60) + "..." : authUrl}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="jira-form stagger-children">
+          {/* Connected status + disconnect */}
+          <div className="jira-connected-row">
+            <div className="jira-status-row">
+              <span className="jira-status-dot jira-dot-connected" />
+              <span className="jira-site-label">{siteUrl || "Connected"}</span>
+            </div>
+            <button
+              className="jira-disconnect-btn"
+              onClick={() => send({ command: "jiraDisconnect" })}
+            >
+              Disconnect
+            </button>
+          </div>
           {/* Project */}
           <div className="form-field">
             <label className="form-label">Project Key</label>

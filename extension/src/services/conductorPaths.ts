@@ -148,6 +148,20 @@ export function getCredentialsDir(): string {
 }
 
 /**
+ * Get the uploads directory for a workspace.
+ *
+ * @param workspacePath - Absolute path to the workspace folder
+ * @returns Path to ~/.conductor/projects/{sanitized}/uploads/
+ */
+export function getUploadsDir(workspacePath: string): string {
+    const dir = path.join(getProjectDir(workspacePath), 'uploads');
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+}
+
+/**
  * Get the user settings file path.
  * @returns Path to ~/.conductor/settings.json
  */

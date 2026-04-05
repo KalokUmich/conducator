@@ -57,7 +57,7 @@ import { JiraTokenStore } from './services/jiraTokenStore';
 import { JiraTicketProvider, type ITicketProvider, type TicketStatus } from './services/ticketProvider';
 import { ChatLocalStore, toRecordMessage, toParticipant } from './services/chatLocalStore';
 import { LocalSessionManager } from './services/localSessionManager';
-import { getConductorRoot } from './services/conductorPaths';
+import { getConductorRoot, getUploadsDir } from './services/conductorPaths';
 import { saveSSO, loadSSO, clearSSO } from './services/credentialStore';
 
 /** Output channel for logging invite links to the user. */
@@ -1998,7 +1998,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * Save a file locally to {workspace}/.conductor/uploads/
+     * Save a file locally to ~/.conductor/projects/{sanitized}/uploads/
      */
     private async _saveFileLocally(
         roomId: string,
@@ -2011,10 +2011,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             throw new Error('No workspace folder open');
         }
 
-        const uploadsDir = path.join(folders[0].uri.fsPath, '.conductor', 'uploads');
-        if (!fs.existsSync(uploadsDir)) {
-            fs.mkdirSync(uploadsDir, { recursive: true });
-        }
+        const uploadsDir = getUploadsDir(folders[0].uri.fsPath);
 
         // Generate unique filename
         const ext = path.extname(fileName);
@@ -6354,19 +6351,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             `<script>window.initialSSOIdentity = ${JSON.stringify(ssoIdentity)};window.initialSSOProvider = ${JSON.stringify(ssoProvider || null)};window.initialEnabledSSOProviders = ${JSON.stringify(this._enabledSSOProviders)};window.__conductorCurrentWorkspace = ${JSON.stringify(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || null)};</script>`,
         ].join('\n');
 
-        // --- Try React WebView first (media/webview.js) ---
-        const reactBundlePath = vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.js');
-        const useReactWebView = fs.existsSync(reactBundlePath.fsPath);
+        // --- React WebView (media/webview.js) ---
+        const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'tailwind.css'));
+        const webviewCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.css'));
+        const hljsCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'github-dark.min.css'));
+        const hljsJsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.min.js'));
+        const webviewJsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.js'));
 
-        if (useReactWebView) {
-            // React WebView — load from webview.html template
-            const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'tailwind.css'));
-            const webviewCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.css'));
-            const hljsCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'github-dark.min.css'));
-            const hljsJsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.min.js'));
-            const webviewJsUri = webview.asWebviewUri(reactBundlePath);
-
-            return `<!DOCTYPE html>
+        return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -6384,19 +6376,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
   <script src="${webviewJsUri}"></script>
 </body>
 </html>`;
-        }
-
-        // --- Fallback: legacy chat.html ---
-        const htmlPath = vscode.Uri.joinPath(this._extensionUri, 'media', 'chat.html');
-        let html = fs.readFileSync(htmlPath.fsPath, 'utf8');
-        const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'tailwind.css'));
-        html = html.replace('href="tailwind.css"', `href="${cssUri}"`);
-        const hljsJsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.min.js'));
-        const hljsCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'github-dark.min.css'));
-        html = html.replace('src="highlight.min.js"', `src="${hljsJsUri}"`);
-        html = html.replace('href="github-dark.min.css"', `href="${hljsCssUri}"`);
-        html = html.replace('</head>', `${cspMeta}${initialStateScripts}</head>`);
-        return html;
     }
 }
 

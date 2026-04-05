@@ -1,11 +1,13 @@
 import { useCallback, useState } from "react";
 import { useSession, useSessionActions } from "../../contexts/SessionContext";
-import { useVSCode } from "../../contexts/VSCodeContext";
+import { useVSCode, useCommand } from "../../contexts/VSCodeContext";
 import { AIConfigModal } from "../modals/AIConfigModal";
 import { JiraModal } from "../modals/JiraModal";
 import { RoomSettingsModal } from "../modals/RoomSettingsModal";
 import { SummarizeModal } from "../modals/SummarizeModal";
 import { StackTraceModal } from "../modals/StackTraceModal";
+import { SetupIndexModal } from "../modals/SetupIndexModal";
+import { RebuildIndexModal } from "../modals/RebuildIndexModal";
 
 // ============================================================
 // ChatHeader — brand, room info, all session controls
@@ -25,6 +27,66 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
   const [showRoomSettings, setShowRoomSettings] = useState(false);
   const [showSummarize, setShowSummarize] = useState(false);
   const [showStackTrace, setShowStackTrace] = useState(false);
+  const [showSetupIndex, setShowSetupIndex] = useState(false);
+  const [showRebuildIndex, setShowRebuildIndex] = useState(false);
+  const [rebuildLoading, setRebuildLoading] = useState(false);
+  const [setupLoading, setSetupLoading] = useState(false);
+  const [workspaceReady, setWorkspaceReady] = useState(false);
+  const [workspaceRoomId, setWorkspaceRoomId] = useState("");
+  const [indexProgress, setIndexProgress] = useState<{ phase: string; pct: number; detail: string } | null>(null);
+
+  // Listen for index rebuild result
+  useCommand("indexRebuildComplete", (msg) => {
+    if (msg.command !== "indexRebuildComplete") return;
+    setRebuildLoading(false);
+  });
+
+  // Listen for setup & index results
+  useCommand("setupAndIndexComplete", (msg) => {
+    if (msg.command !== "setupAndIndexComplete") return;
+    const data = msg as unknown as { success: boolean; roomId?: string };
+    setSetupLoading(false);
+    if (data.success) {
+      setWorkspaceReady(true);
+      if (data.roomId) setWorkspaceRoomId(data.roomId);
+    }
+  });
+
+  // Listen for index progress
+  useCommand("indexProgress", (msg) => {
+    if (msg.command !== "indexProgress") return;
+    const p = (msg as unknown as { payload: { phase: string; filesScanned?: number; totalFiles?: number; filesIndexed?: number; symbolsExtracted?: number; embeddingsEnqueued?: number } }).payload;
+    if (p.phase === "done") {
+      setIndexProgress(null);
+      return;
+    }
+    let pct = 0;
+    let detail = "";
+    if (p.phase === "scanning") {
+      pct = p.totalFiles ? Math.round(((p.filesScanned || 0) / p.totalFiles) * 100) : 5;
+      detail = `Scanning… (${p.filesScanned || 0} files)`;
+    } else if (p.phase === "extracting") {
+      const filePct = p.totalFiles ? (p.filesIndexed || 0) / p.totalFiles : 0;
+      pct = Math.min(90, Math.max(10, Math.round(filePct * 80) + 10));
+      detail = `Building index… (${p.filesIndexed || 0}/${p.totalFiles || "?"} files)`;
+    } else if (p.phase === "embedding") {
+      pct = 70 + Math.min(28, Math.round(((p.embeddingsEnqueued || 0) / Math.max(p.symbolsExtracted || 1, 1)) * 28));
+      detail = `Embedding… (${p.embeddingsEnqueued || 0} queued)`;
+    }
+    setIndexProgress({ phase: p.phase, pct, detail });
+  });
+
+  const handleRebuildConfirm = useCallback(() => {
+    setShowRebuildIndex(false);
+    setRebuildLoading(true);
+    send({ command: "rebuildIndex" });
+  }, [send]);
+
+  const handleOpenWorkspace = useCallback(() => {
+    if (workspaceRoomId) {
+      send({ command: "openConductorWorkspace", roomId: workspaceRoomId });
+    }
+  }, [send, workspaceRoomId]);
 
   const isHosting = state.conductorState === "Hosting";
   const isLead = state.permissions.sessionRole === "host";
@@ -121,6 +183,50 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
           </div>
         </div>
 
+        {/* Workspace action rows */}
+        {isHosting && !workspaceReady && (
+          <div className="header-workspace-row">
+            <span className="workspace-row-label">Workspace</span>
+            <button
+              className="action-btn-xs action-brand"
+              onClick={() => setShowSetupIndex(true)}
+              disabled={setupLoading}
+            >
+              {setupLoading ? "Setting up..." : "Git Repo"}
+            </button>
+          </div>
+        )}
+        {isHosting && workspaceReady && workspaceRoomId && (
+          <div className="header-workspace-row">
+            <span className="workspace-row-label">Remote code</span>
+            <button className="action-btn-xs action-success" onClick={handleOpenWorkspace}>
+              Open Workspace
+            </button>
+          </div>
+        )}
+        {isHosting && workspaceReady && (
+          <div className="header-workspace-row">
+            <span className="workspace-row-label">Context index</span>
+            <button
+              className="action-btn-xs action-warn"
+              onClick={() => setShowRebuildIndex(true)}
+              disabled={rebuildLoading}
+            >
+              {rebuildLoading ? "Rebuilding..." : "Rebuild Index"}
+            </button>
+          </div>
+        )}
+
+        {/* Index progress bar */}
+        {indexProgress && (
+          <div className="index-progress-bar">
+            <div className="index-progress-track">
+              <div className="index-progress-fill" style={{ width: indexProgress.pct + "%" }} />
+            </div>
+            <span className="index-progress-text">{indexProgress.detail}</span>
+          </div>
+        )}
+
         {/* Row 2: Session action bar */}
         <div className="header-row-2">
           {isHosting ? (
@@ -168,6 +274,8 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
       <RoomSettingsModal open={showRoomSettings} onClose={() => setShowRoomSettings(false)} />
       <SummarizeModal open={showSummarize} onClose={() => setShowSummarize(false)} />
       <StackTraceModal open={showStackTrace} onClose={() => setShowStackTrace(false)} />
+      <SetupIndexModal open={showSetupIndex} onClose={() => setShowSetupIndex(false)} />
+      <RebuildIndexModal open={showRebuildIndex} onClose={() => setShowRebuildIndex(false)} onConfirm={handleRebuildConfirm} />
     </>
   );
 }

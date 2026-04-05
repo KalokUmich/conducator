@@ -1,5 +1,5 @@
 // ============================================================
-// Message types matching the existing chat.html contract
+// Message types — the contract between React WebView and extension host
 // ============================================================
 
 export type MessageType =
@@ -250,6 +250,46 @@ export interface Todo {
   source: "linked" | "code" | "jira";
   filePath?: string;
   lineNumber?: number;
+  // Workspace scan fields (from todoScanner WorkspaceTodo)
+  relativePath?: string;
+  commentPrefix?: string;
+  descriptionLine?: number;
+  rawTag?: string;
+  blockEndLine?: number;
+  changeNumber?: number;
+  afterDeps?: number[];
+  blockedBy?: string[];
+  parentTicket?: string;
+  // Jira enrichment
+  browseUrl?: string;
+  ticketStatus?: string;
+  priority?: string;
+  assignee?: string;
+  isDone?: boolean;
+}
+
+/** Item in the AI Working Space (dragged from backlog or room TODO). */
+export interface WorkspaceItem {
+  id: string;
+  source: "code" | "ticket";
+  title: string;
+  description?: string;
+  ticketKey?: string;
+  ticketStatus?: { key: string; summary: string; status: string; isDone: boolean; browseUrl?: string };
+  filePath?: string;
+  relativePath?: string;
+  lineNumber?: number;
+  commentPrefix?: string;
+  descriptionLine?: number;
+  rawTag?: string;
+  blockEndLine?: number;
+  changeNumber?: number;
+  afterDeps?: number[];
+  blockedBy?: string[];
+  parentTicket?: string;
+  priority?: string;
+  browseUrl?: string;
+  isDone?: boolean;
 }
 
 // ============================================================

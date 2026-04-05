@@ -4,6 +4,7 @@ import { useVSCode } from "../../contexts/VSCodeContext";
 import type { ChatMessage } from "../../types/messages";
 import { escapeHtml, formatTime, getInitials, getAvatarColor } from "../../utils/format";
 import { CodeBlock } from "../shared/CodeBlock";
+import { DiagramLightbox } from "../shared/DiagramLightbox";
 
 // ============================================================
 // MessageBubble — renders a single chat message
@@ -97,6 +98,30 @@ function TextMessage({ message, isOwn, isGrouped }: TextMessageProps) {
 
 function AIMessage({ message, isGrouped }: { message: ChatMessage; isGrouped: boolean }) {
   const content = message.answer || message.summary || message.codePrompt || message.content || "";
+  const { send } = useVSCode();
+  const { state: sessionState } = useSession();
+  const [codePromptLoading, setCodePromptLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  // Code prompt generation: show button for ai_summary messages with content
+  const isSummary = message.type === "ai_summary" && !!message.summary;
+
+  const handleCopyMessage = useCallback(() => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [content]);
+
+  const handleGenerateCodePrompt = useCallback(() => {
+    if (!sessionState.session?.roomId || !message.summary) return;
+    setCodePromptLoading(true);
+    send({
+      command: "generateCodePromptAndPost",
+      decisionSummary: message.summary,
+      roomId: sessionState.session.roomId,
+    });
+  }, [send, sessionState.session?.roomId, message.summary]);
 
   return (
     <div className={`message-row message-other ${isGrouped ? "message-grouped" : ""}`}>
@@ -107,6 +132,31 @@ function AIMessage({ message, isGrouped }: { message: ChatMessage; isGrouped: bo
         )}
         <div className="message-bubble bubble-ai">
           <AIContent content={content} />
+          {/* AI message actions: copy + code prompt */}
+          <div className="ai-message-actions">
+            <button
+              className="ai-copy-btn"
+              onClick={handleCopyMessage}
+              title="Copy response"
+            >
+              {copied ? "Copied!" : "Copy"}
+            </button>
+          </div>
+          {/* Code prompt generation button for summaries */}
+          {isSummary && (
+            <div className="code-prompt-action">
+              <button
+                className="action-btn action-brand code-prompt-btn"
+                onClick={handleGenerateCodePrompt}
+                disabled={codePromptLoading}
+              >
+                <svg viewBox="0 0 20 20" fill="currentColor" width="12" height="12">
+                  <path fillRule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+                {codePromptLoading ? "Generating..." : "Generate Code Prompt"}
+              </button>
+            </div>
+          )}
         </div>
         <MessageMeta ts={message.ts} isOwn={false} />
       </div>
@@ -117,11 +167,12 @@ function AIMessage({ message, isGrouped }: { message: ChatMessage; isGrouped: bo
 /** Render AI content with markdown-like formatting + mermaid */
 function AIContent({ content }: { content: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [lightboxSvg, setLightboxSvg] = useState<string | null>(null);
 
   // Split by code blocks
   const parts = content.split(/(```[\s\S]*?```)/g);
 
-  // After render, try to render mermaid diagrams
+  // After render, try to render mermaid diagrams + add click-to-zoom
   useEffect(() => {
     const el = containerRef.current;
     if (!el || !window.mermaid) return;
@@ -135,6 +186,9 @@ function AIContent({ content }: { content: string }) {
         const { svg } = await window.mermaid!.render(id, code);
         mel.innerHTML = svg;
         mel.dataset.rendered = "true";
+        mel.classList.add("mermaid-clickable");
+        mel.title = "Click to zoom";
+        mel.addEventListener("click", () => setLightboxSvg(mel.innerHTML));
       } catch {
         // keep raw source
       }
@@ -169,6 +223,9 @@ function AIContent({ content }: { content: string }) {
           />
         );
       })}
+      {lightboxSvg && (
+        <DiagramLightbox svgHtml={lightboxSvg} onClose={() => setLightboxSvg(null)} />
+      )}
     </div>
   );
 }
@@ -176,7 +233,7 @@ function AIContent({ content }: { content: string }) {
 
 
 /** Simple markdown → HTML renderer (bold, italic, inline code, links) */
-function renderMarkdown(text: string): string {
+export function renderMarkdown(text: string): string {
   return escapeHtml(text)
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.*?)\*/g, "<em>$1</em>")

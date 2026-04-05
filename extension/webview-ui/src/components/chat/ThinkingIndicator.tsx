@@ -6,9 +6,7 @@ import { escapeHtml } from "../../utils/format";
 // ============================================================
 // ThinkingIndicator — concurrent rendering with useDeferredValue
 //
-// This is the main perf bottleneck in the old chat.html.
-// Old: innerHTML replaced on every SSE event (dozens/sec), causing reflow.
-// New: React diffs only changed nodes. useDeferredValue ensures the
+// React diffs only changed nodes. useDeferredValue ensures the
 // indicator update never blocks the input thread.
 // ============================================================
 

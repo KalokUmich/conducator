@@ -32,6 +32,7 @@ export type IncomingCommand =
   | { command: "jiraConnected"; site_url: string }
   | { command: "jiraDisconnected" }
   | { command: "jiraAuthRequired"; authorizeUrl: string }
+  | { command: "jiraStatus"; connected: boolean; site_url?: string; projects?: Array<{ key: string; name: string }> }
   | { command: "jiraIssueTypes"; types: Array<{ name: string; id: string }> }
   | { command: "jiraCreateMeta"; priorities?: Array<{ name: string }>; teams?: Array<{ name: string }>; components?: Array<{ name: string }> }
   | { command: "jiraIssueCreated"; key: string; browse_url?: string }
@@ -50,7 +51,7 @@ export type IncomingCommand =
   | { command: "todoCreated"; todo: Todo }
   | { command: "todoUpdated"; todo: Todo }
   | { command: "todoDeleted"; todoId: string }
-  | { command: "workspaceTodosScanned"; todos: Todo[]; error?: string }
+  | { command: "workspaceTodosScanned"; todos: Todo[]; ticketStatuses?: Record<string, { key: string; summary: string; status: string; isDone: boolean; browseUrl?: string; priority?: string }>; ticketSyncEnabled?: boolean; ticketAuthNeeded?: boolean; error?: string }
   | { command: "workspaceTodoUpdated"; ok: boolean; filePath: string }
   | { command: "todoDoneConfirmed" }
   // Jira tickets
@@ -64,6 +65,21 @@ export type IncomingCommand =
   | { command: "setAiModelResult"; data: { success: boolean; active_model?: string; message: string; error?: string } }
   // Index
   | { command: "indexRebuildComplete"; success: boolean; error?: string }
+  | { command: "indexProgress"; payload: { phase: "scanning" | "extracting" | "embedding" | "done"; filesScanned?: number; totalFiles?: number; filesIndexed?: number; symbolsExtracted?: number; embeddingsEnqueued?: number; isIncremental?: boolean; staleFilesCount?: number; embeddingEnabled?: boolean } }
+  | { command: "indexBranchChanged"; from: string; to: string }
+  // Remote branches
+  | { command: "remoteBranchesLoaded"; branches: string[]; defaultBranch?: string; error?: string }
+  // Setup & Index
+  | { command: "setupAndIndexProgress"; detail?: string; percent?: number; current?: number; total?: number }
+  | { command: "setupAndIndexComplete"; success: boolean; message?: string; filesIndexed?: number; chunksIndexed?: number; roomId?: string; isLocal?: boolean }
+  // Code prompt
+  | { command: "codePromptPostResult"; data: { success?: boolean; error?: string } }
+  // Snippet explain
+  | { command: "explainCodeFromSnippetDone"; success: boolean; error?: string }
+  // Local sessions
+  | { command: "localSessionsList"; sessions: Array<{ roomId: string; displayName?: string; lastActive?: number; messageCount?: number; ssoEmail?: string }> }
+  | { command: "localSessionDeleted"; roomId: string }
+  | { command: "localSessionRenamed"; roomId: string; displayName: string }
   // SSO
   | { command: "ssoCacheCleared" }
   // History
@@ -147,7 +163,7 @@ export type OutgoingCommand =
   | { command: "loadTodos"; roomId: string }
   | { command: "deleteTodo"; todoId: string }
   | { command: "scanWorkspaceTodos" }
-  | { command: "updateWorkspaceTodo"; filePath: string; lineNumber: number; updates: Record<string, unknown> }
+  | { command: "updateWorkspaceTodo"; payload: { filePath: string; lineNumber: number; newTitle: string; newDescription: string; descriptionLine?: number; commentPrefix: string; rawTag?: string; blockEndLine?: number } }
   | { command: "startTaskFromTodo"; todoId: string; roomId: string }
   | { command: "confirmTodoDone"; todoId: string; filePath: string }
   // SSO
@@ -156,10 +172,14 @@ export type OutgoingCommand =
   | { command: "ssoClearCache" }
   // Workspace
   | { command: "setupLocalWorkspace" }
-  | { command: "setupWorkspaceAndIndex"; workspacePath: string }
+  | { command: "setupWorkspaceAndIndex"; repoUrl: string; sourceBranch: string; workingBranch?: string | null; token?: string | null }
   | { command: "rebuildIndex" }
-  | { command: "fetchRemoteBranches" }
+  | { command: "fetchRemoteBranches"; repoUrl: string; token?: string | null }
   | { command: "openConductorWorkspace"; roomId: string }
+  // Local sessions
+  | { command: "getLocalSessions"; email?: string }
+  | { command: "deleteLocalSession"; roomId: string }
+  | { command: "renameLocalSession"; roomId: string; displayName: string }
   // External
   | { command: "openExternal"; url: string }
   | { command: "showWorkflow" }
