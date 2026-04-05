@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useChat } from "../contexts/ChatContext";
 import { useSession } from "../contexts/SessionContext";
 import { useVSCode, useCommand } from "../contexts/VSCodeContext";
-import type { ChatMessage } from "../types/messages";
+import type { ChatMessage, Participant } from "../types/messages";
 
 // ============================================================
 // useHistoryPagination — scroll-to-top loads older messages
@@ -14,7 +14,7 @@ export function useHistoryPagination(
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
 ) {
   const { state: chatState, dispatch } = useChat();
-  const { state: sessionState } = useSession();
+  const { state: sessionState, dispatch: sessionDispatch } = useSession();
   const { send } = useVSCode();
   const loadingRef = useRef(false);
 
@@ -36,10 +36,14 @@ export function useHistoryPagination(
     });
   });
 
-  // Also handle local messages loaded
+  // Also handle local messages loaded (ChatRecord v2 — includes participants)
   useCommand("localMessagesLoaded", (msg) => {
     if (msg.command !== "localMessagesLoaded") return;
-    const data = msg as { messages?: unknown[] };
+    const data = msg as { messages?: unknown[]; participants?: Record<string, Participant> };
+    // Merge participants into SessionContext users map
+    if (data.participants && Object.keys(data.participants).length > 0) {
+      sessionDispatch({ type: "MERGE_PARTICIPANTS", participants: data.participants });
+    }
     if (data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
       const sorted = (data.messages as ChatMessage[]).sort((a, b) => a.ts - b.ts);
       dispatch({ type: "ADD_MESSAGES_BATCH", messages: sorted });

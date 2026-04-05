@@ -219,7 +219,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     langfuse_ok = init_langfuse(settings)
     if langfuse_ok:
-        logger.info("Langfuse observability: enabled (host=%s)", settings.langfuse.host)
+        import os
+        logger.info("Langfuse observability: enabled (host=%s)", os.environ.get("LANGFUSE_HOST", settings.langfuse.host))
     else:
         logger.info("Langfuse observability: disabled")
 

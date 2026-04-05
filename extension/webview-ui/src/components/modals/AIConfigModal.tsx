@@ -155,12 +155,16 @@ export function AIConfigModal({ open, onClose }: Props) {
                   <span className="config-hint">Used by specialist sub-agents</span>
                 </div>
                 <label className="toggle-switch" style={{ marginLeft: "auto" }}>
-                  <input type="checkbox" checked={explorerEnabled} onChange={() => setExplorerEnabled(!explorerEnabled)} />
+                  <input type="checkbox" checked={explorerEnabled} onChange={() => {
+                    const next = !explorerEnabled;
+                    setExplorerEnabled(next);
+                    send({ command: "setExplorer", explorer: next ? selectedExplorer : "", enabled: next });
+                  }} />
                   <span className="toggle-slider" />
                 </label>
               </div>
               {explorerEnabled && (
-                <select className="config-select" value={selectedExplorer} onChange={(e) => { setSelectedExplorer(e.target.value); send({ command: "setExplorer", explorer: e.target.value }); }}>
+                <select className="config-select" value={selectedExplorer} onChange={(e) => { setSelectedExplorer(e.target.value); send({ command: "setExplorer", explorer: e.target.value, enabled: true }); }}>
                   <option value="">Select explorer...</option>
                   {explorerModels.map((m) => (
                     <option key={m.id} value={m.id}>{abbreviateModelId(m.id)}</option>
@@ -193,7 +197,7 @@ export function AIConfigModal({ open, onClose }: Props) {
             selectedModel={selectedModel}
             explorerModels={explorerModels}
             selectedExplorer={selectedExplorer}
-            onExplorerChange={(v) => { setSelectedExplorer(v); send({ command: "setExplorer", explorer: v }); }}
+            onExplorerChange={(v) => { setSelectedExplorer(v); send({ command: "setExplorer", explorer: v, enabled: true } as never); }}
             onOpenDiagram={() => { send({ command: "showWorkflow" }); onClose(); }}
           />
         )}

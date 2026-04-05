@@ -25,6 +25,21 @@ interface SlashCommand {
   isAI?: boolean;
 }
 
+/** Rotating help tips shown as placeholder text. Add/remove freely. */
+const HELP_TIPS: string[] = [
+  "Message, /ask, /pr, /jira, or @AI...",
+  "Try: @AI explain this codebase",
+  "Try: @AI /ask what does this function do?",
+  "Try: @AI /pr review my latest changes",
+  "Try: @AI /jira create a bug ticket",
+  "Tip: Attach code with the </> button, then @AI",
+  "Tip: Shift+Enter for multi-line messages",
+  "Tip: Paste a stack trace with the \u26A0 button",
+];
+
+/** Cycle interval in milliseconds (2 minutes). */
+const HELP_TIP_INTERVAL_MS = 2 * 60 * 1000;
+
 const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/ask", description: "Ask AI a question", hint: "Type your question...", transform: (args) => args, isAI: true },
   { name: "/pr", description: "Request a code review", hint: "Describe the PR or paste a link...", transform: (args) => `[query_type:code_review] ${args}`, isAI: true },
@@ -38,6 +53,8 @@ export function ChatInput() {
   const [attachedSnippet, setAttachedSnippet] = useState<Record<string, unknown> | null>(null);
   const [attachedFile, setAttachedFile] = useState<{ file: File; previewUrl?: string } | null>(null);
   const [fileCaption, setFileCaption] = useState("");
+
+  const [tipIndex, setTipIndex] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -55,6 +72,14 @@ export function ChatInput() {
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
   }, [value]);
+
+  // Rotate help tips
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTipIndex((i) => (i + 1) % HELP_TIPS.length);
+    }, HELP_TIP_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, []);
 
   // Slash command detection
   useEffect(() => {
@@ -392,7 +417,7 @@ export function ChatInput() {
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
-            placeholder={isDisabled ? "AI is thinking..." : "Message, /ask, /pr, /jira, or @AI..."}
+            placeholder={isDisabled ? "AI is thinking..." : HELP_TIPS[tipIndex]}
             disabled={isDisabled}
             rows={1}
             aria-label="Chat input"

@@ -270,7 +270,21 @@ export function useWebSocket() {
       }
 
       // ── 10. Skip internal protocol messages that shouldn't render ──
-      if (type === "role_restored" || type === "lead_changed_ack" || type === "settings_updated") {
+      const SKIP_TYPES = new Set([
+        "role_restored", "lead_changed_ack", "settings_updated",
+        "error", "quit_confirmed", "end_session_blocked", "history_cleared",
+      ]);
+      if (SKIP_TYPES.has(type)) {
+        if (type === "error") {
+          console.warn("[WS] Server error:", data.error);
+        }
+        return;
+      }
+
+      // Skip messages with no renderable content (protocol noise)
+      if (!data.content && !data.answer && !data.summary && !data.codePrompt && !data.code_prompt
+          && !data.codeSnippet && !data.fileId && !data.stackTrace && !data.testFailures) {
+        console.warn("[WS] Skipping empty message:", type, JSON.stringify(data).slice(0, 200));
         return;
       }
 
@@ -278,14 +292,16 @@ export function useWebSocket() {
       const msg = parseMessageData(data);
       addMessageRef.current(msg);
 
-      // Cache every incoming message locally for offline recovery
+      // Cache every incoming message locally for offline recovery (ChatRecord v2)
       sendRef.current({ command: "saveLocalMessages", roomId, messages: [data] } as never);
     }
 
     function parseMessageData(data: Record<string, unknown>): ChatMessage {
+      const userId = (data.userId as string) || (data.sender as string) || "";
       return {
         id: (data.id as string) || `msg-${Date.now()}-${Math.random()}`,
-        userId: (data.userId as string) || "",
+        userId,
+        sender: userId,
         displayName: (data.displayName as string) || "Unknown",
         role: (data.role as ChatMessage["role"]) || "engineer",
         content: (data.content as string) || "",
@@ -304,6 +320,7 @@ export function useWebSocket() {
         answer: data.answer as string,
         summary: data.summary as string,
         codePrompt: (data.codePrompt as string) || (data.code_prompt as string),
+        aiMeta: data.aiMeta as ChatMessage["aiMeta"],
         thinkingSteps: data.thinkingSteps as ChatMessage["thinkingSteps"],
         stackTrace: data.stackTrace as ChatMessage["stackTrace"],
         testFailures: data.testFailures as ChatMessage["testFailures"],
@@ -329,13 +346,15 @@ export function useWebSocket() {
   }, [session?.backendUrl, session?.roomId]);
 
   // Forward tool responses from extension back via WebSocket
+  // IMPORTANT: Backend routes by `data.type`, extension sends `command`.
+  // Must set `type: "tool_response"` so backend's WS handler matches.
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const data = event.data;
       if (data?.command === "tool_response") {
         console.log("[WS] Tool response relay:", data.tool, "reqId:", data.requestId, "wsOpen:", _ws?.readyState === WebSocket.OPEN);
         if (_ws?.readyState === WebSocket.OPEN) {
-          _ws.send(JSON.stringify(data));
+          _ws.send(JSON.stringify({ ...data, type: "tool_response" }));
         }
       }
     };

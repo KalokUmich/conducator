@@ -8,6 +8,7 @@ import {
 } from "react";
 import type {
   ConductorState,
+  Participant,
   Permissions,
   Session,
   SSOIdentity,
@@ -48,6 +49,7 @@ type SessionAction =
   | { type: "SET_USERS"; users: Map<string, UserInfo> }
   | { type: "UPDATE_USER"; userId: string; info: UserInfo }
   | { type: "REMOVE_USER"; userId: string }
+  | { type: "MERGE_PARTICIPANTS"; participants: Record<string, Participant> }
   | { type: "SET_AI_BUSY"; busy: boolean }
   | { type: "SET_SSO_PROVIDERS"; providers: string[] }
   | { type: "SSO_PENDING"; userCode: string; provider: string }
@@ -82,6 +84,22 @@ function sessionReducer(state: SessionState, action: SessionAction): SessionStat
     case "REMOVE_USER": {
       const users = new Map(state.users);
       users.delete(action.userId);
+      return { ...state, users };
+    }
+    case "MERGE_PARTICIPANTS": {
+      // Merge ChatRecord participants into users map (don't overwrite existing online users)
+      const users = new Map(state.users);
+      for (const [uid, p] of Object.entries(action.participants)) {
+        if (!users.has(uid)) {
+          users.set(uid, {
+            displayName: p.name,
+            role: p.role,
+            avatarColor: p.avatarColor ?? 0,
+            identitySource: p.identitySource,
+            online: false,
+          });
+        }
+      }
       return { ...state, users };
     }
     case "SET_AI_BUSY":

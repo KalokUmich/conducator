@@ -9,6 +9,19 @@ import { CodeBlock } from "../shared/CodeBlock";
 // MessageBubble — renders a single chat message
 // ============================================================
 
+/** Resolve display info from SessionContext users map (ChatRecord v2 participants). */
+function useParticipant(message: ChatMessage) {
+  const { state } = useSession();
+  const uid = message.sender || message.userId;
+  const user = state.users.get(uid);
+  return {
+    displayName: user?.displayName || message.displayName || "Unknown",
+    role: user?.role || message.role || "engineer",
+    identitySource: user?.identitySource || message.identitySource,
+    avatarColor: uid?.charCodeAt(0) || 0,
+  };
+}
+
 interface MessageBubbleProps {
   message: ChatMessage;
   isGrouped: boolean;
@@ -53,21 +66,22 @@ interface TextMessageProps {
 }
 
 function TextMessage({ message, isOwn, isGrouped }: TextMessageProps) {
+  const p = useParticipant(message);
   return (
     <div className={`message-row ${isOwn ? "message-own" : "message-other"} ${isGrouped ? "message-grouped" : ""}`}>
       {!isOwn && (
         <Avatar
-          name={message.displayName}
-          colorIndex={message.userId?.charCodeAt(0) || 0}
+          name={p.displayName}
+          colorIndex={p.avatarColor}
           hidden={isGrouped}
         />
       )}
       <div className="message-content-wrapper">
         {!isOwn && !isGrouped && (
           <MessageHeader
-            name={message.displayName}
-            role={message.role}
-            identitySource={message.identitySource}
+            name={p.displayName}
+            role={p.role}
+            identitySource={p.identitySource}
           />
         )}
         <div className={`message-bubble ${isOwn ? "bubble-own" : "bubble-other"}`}>
@@ -181,6 +195,7 @@ function CodeSnippetMessage({
   isOwn,
   isGrouped,
 }: TextMessageProps) {
+  const p = useParticipant(message);
   const snippet = message.codeSnippet || message.metadata as ChatMessage["codeSnippet"];
   const { send } = useVSCode();
   const { state: sessionState } = useSession();
@@ -231,14 +246,14 @@ function CodeSnippetMessage({
     <div className={`message-row ${isOwn ? "message-own" : "message-other"} ${isGrouped ? "message-grouped" : ""}`}>
       {!isOwn && (
         <Avatar
-          name={message.displayName}
-          colorIndex={message.userId?.charCodeAt(0) || 0}
+          name={p.displayName}
+          colorIndex={p.avatarColor}
           hidden={isGrouped}
         />
       )}
       <div className="message-content-wrapper" style={{ maxWidth: "88%" }}>
         {!isOwn && !isGrouped && (
-          <MessageHeader name={message.displayName} role={message.role} />
+          <MessageHeader name={p.displayName} role={p.role} />
         )}
 
         {/* Comment text if any */}
@@ -318,6 +333,7 @@ function CodeSnippetMessage({
 // ── File Message ──────────────────────────────────────────
 
 function FileMessage({ message, isOwn, isGrouped }: TextMessageProps) {
+  const p = useParticipant(message);
   const { send } = useVSCode();
 
   const handleDownload = useCallback(() => {
@@ -334,14 +350,14 @@ function FileMessage({ message, isOwn, isGrouped }: TextMessageProps) {
     <div className={`message-row ${isOwn ? "message-own" : "message-other"} ${isGrouped ? "message-grouped" : ""}`}>
       {!isOwn && (
         <Avatar
-          name={message.displayName}
-          colorIndex={message.userId?.charCodeAt(0) || 0}
+          name={p.displayName}
+          colorIndex={p.avatarColor}
           hidden={isGrouped}
         />
       )}
       <div className="message-content-wrapper">
         {!isOwn && !isGrouped && (
-          <MessageHeader name={message.displayName} role={message.role} />
+          <MessageHeader name={p.displayName} role={p.role} />
         )}
         <div className="message-bubble bubble-file" onClick={handleDownload}>
           <div className="file-icon">
@@ -378,6 +394,7 @@ function getFileIcon(mimeType: string): string {
 // ── Test Failures Message ─────────────────────────────────
 
 function TestFailuresMessage({ message, isOwn, isGrouped }: TextMessageProps) {
+  const p = useParticipant(message);
   const { send } = useVSCode();
   const tf = message.testFailures;
   if (!tf) return null;
@@ -386,14 +403,14 @@ function TestFailuresMessage({ message, isOwn, isGrouped }: TextMessageProps) {
     <div className={`message-row ${isOwn ? "message-own" : "message-other"} ${isGrouped ? "message-grouped" : ""}`}>
       {!isOwn && (
         <Avatar
-          name={message.displayName}
-          colorIndex={message.userId?.charCodeAt(0) || 0}
+          name={p.displayName}
+          colorIndex={p.avatarColor}
           hidden={isGrouped}
         />
       )}
       <div className="message-content-wrapper" style={{ maxWidth: "90%" }}>
         {!isOwn && !isGrouped && (
-          <MessageHeader name={message.displayName} role={message.role} />
+          <MessageHeader name={p.displayName} role={p.role} />
         )}
         <div className="message-bubble bubble-test-fail">
           <div className="test-fail-header">
@@ -442,6 +459,7 @@ function TestFailuresMessage({ message, isOwn, isGrouped }: TextMessageProps) {
 // ── Stack Trace Message ───────────────────────────────────
 
 function StackTraceMessage({ message, isOwn, isGrouped }: TextMessageProps) {
+  const p = useParticipant(message);
   const st = message.stackTrace;
   if (!st) return null;
 
@@ -449,8 +467,8 @@ function StackTraceMessage({ message, isOwn, isGrouped }: TextMessageProps) {
     <div className={`message-row ${isOwn ? "message-own" : "message-other"} ${isGrouped ? "message-grouped" : ""}`}>
       {!isOwn && (
         <Avatar
-          name={message.displayName}
-          colorIndex={message.userId?.charCodeAt(0) || 0}
+          name={p.displayName}
+          colorIndex={p.avatarColor}
           hidden={isGrouped}
         />
       )}

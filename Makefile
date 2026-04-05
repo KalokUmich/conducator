@@ -233,12 +233,14 @@ data-logs:
 app-up:
 	@echo "Starting app tier (Backend + Langfuse)..."
 	docker compose -f $(APP_COMPOSE) up -d --build
+	@docker image prune -f --filter "label=com.docker.compose.project=docker" >/dev/null 2>&1 || true
 	@echo "App tier starting. Backend: localhost:8000, Langfuse: localhost:3001"
 
 ## Rebuild and restart a single app service (usage: make app-rebuild SVC=backend)
 app-rebuild:
 	@echo "Rebuilding $(SVC)..."
 	docker compose -f $(APP_COMPOSE) up -d --build --force-recreate $(SVC)
+	@docker image prune -f --filter "label=com.docker.compose.project=docker" >/dev/null 2>&1 || true
 	@echo "$(SVC) rebuilt and restarted."
 
 ## Restart backend after config/secrets change (no rebuild needed)
@@ -279,6 +281,7 @@ docker-clean: docker-down
 	@echo "Removing conductor containers and images..."
 	-docker rm -f conductor-backend conductor-postgres conductor-redis conductor-langfuse 2>/dev/null
 	-docker rmi conductor/backend:latest postgres:16-alpine redis:7-alpine langfuse/langfuse:2 2>/dev/null
+	-docker image prune -f --filter "label=com.docker.compose.project=docker" 2>/dev/null
 	@echo "Docker clean complete."
 
 # ===========================

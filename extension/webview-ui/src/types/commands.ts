@@ -68,8 +68,8 @@ export type IncomingCommand =
   | { command: "ssoCacheCleared" }
   // History
   | { command: "historyLoaded"; messages: unknown[] }
-  // Local messages
-  | { command: "localMessagesLoaded"; messages: unknown[] }
+  // Local messages (ChatRecord v2 — includes participants map)
+  | { command: "localMessagesLoaded"; messages: unknown[]; participants?: Record<string, import("./messages").Participant> }
   // Backend diagnostics
   | { command: "backendConnectionDiagnosis"; requestId: string; diagnosis: Record<string, unknown> }
   // Stack trace & test failures
@@ -106,7 +106,7 @@ export type OutgoingCommand =
   | { command: "getAiStatus" }
   | { command: "setAiModel"; modelId: string }
   | { command: "setClassifier"; classifier: string }
-  | { command: "setExplorer"; explorer: string }
+  | { command: "setExplorer"; explorer: string; enabled: boolean }
   | { command: "agentAnswer"; sessionId: string; answer: string }
   // Code
   | { command: "getCodeSnippet"; filePath: string; startLine: number; endLine: number }
@@ -121,7 +121,7 @@ export type OutgoingCommand =
   | { command: "downloadFile"; fileId: string; fileName: string; downloadUrl: string }
   // Messages
   | { command: "loadLocalMessages"; roomId: string }
-  | { command: "saveLocalMessages"; roomId: string; messages: unknown[] }
+  | { command: "saveLocalMessages"; roomId: string; messages: unknown[]; participants?: Record<string, import("./messages").Participant> }
   | { command: "clearLocalMessages"; roomId: string }
   | { command: "loadHistory"; roomId: string }
   // Tool dispatch

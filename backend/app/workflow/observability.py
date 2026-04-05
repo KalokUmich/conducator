@@ -99,13 +99,12 @@ def init_langfuse(settings=None) -> bool:
     os.environ["LANGFUSE_PUBLIC_KEY"] = public_key
     os.environ["LANGFUSE_SECRET_KEY"] = secret_key
     os.environ["LANGFUSE_HOST"] = host
-    # Disable OTEL exporter — Langfuse server v2 doesn't support OTEL ingestion.
-    # The SDK v2.60+ defaults to OTEL; setting this forces native API mode.
-    os.environ.setdefault("LANGFUSE_TRACING_BACKEND", "langfuse")
+    # Langfuse SDK v2.x uses native API (no OTEL dependency).
+    # requirements.txt pins langfuse<3.0 to match server v2.
 
     _langfuse_enabled = True
     _langfuse_initialized = True
-    logger.info("Langfuse: initialized (host=%s)", langfuse_settings.host)
+    logger.info("Langfuse: initialized (host=%s)", host)
     return True
 
 

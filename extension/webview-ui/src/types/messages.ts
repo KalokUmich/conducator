@@ -22,6 +22,8 @@ export interface ChatMessage {
   content: string;
   type: MessageType;
   ts: number;
+  sender?: string;          // participant UUID (= userId); used by ChatRecord v2
+  aiMeta?: AIMeta;           // AI-specific metadata (model, tokens, thinking)
   identitySource?: string;
   metadata?: Record<string, unknown>;
   // Code snippet fields
@@ -85,6 +87,26 @@ export interface ThinkingStep {
   message?: string;
   text?: string;
   success?: boolean;
+}
+
+// ============================================================
+// Chat Record v2 — participant & AI metadata
+// ============================================================
+
+export interface Participant {
+  email?: string;
+  name: string;
+  role: "host" | "engineer" | "ai";
+  status: "active" | "left";
+  avatarColor?: number;
+  identitySource?: string;
+}
+
+export interface AIMeta {
+  model?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  thinkingSteps?: ThinkingStep[];
 }
 
 // ============================================================

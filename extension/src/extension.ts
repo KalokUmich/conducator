@@ -55,7 +55,7 @@ import {
 } from './services/jiraAuthService';
 import { JiraTokenStore } from './services/jiraTokenStore';
 import { JiraTicketProvider, type ITicketProvider, type TicketStatus } from './services/ticketProvider';
-import { ChatLocalStore } from './services/chatLocalStore';
+import { ChatLocalStore, toRecordMessage, toParticipant } from './services/chatLocalStore';
 import { LocalSessionManager } from './services/localSessionManager';
 import { getConductorRoot } from './services/conductorPaths';
 import { saveSSO, loadSSO, clearSSO } from './services/credentialStore';
@@ -1092,27 +1092,56 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     return;
                 }
                 case 'loadLocalMessages': {
-                    // WebView requests cached messages for a room
+                    // WebView requests cached messages for a room (ChatRecord v2)
                     if (chatLocalStore && message.roomId) {
-                        const cache = await chatLocalStore.loadMessages(message.roomId);
-                        const lastId = cache && cache.messages.length > 0
-                            ? cache.messages[cache.messages.length - 1].id
-                            : null;
+                        const result = await chatLocalStore.loadDenormalized(message.roomId);
+                        const msgs = result ? result.messages : [];
+                        const lastId = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
                         this._view?.webview.postMessage({
                             command: 'localMessagesLoaded',
                             roomId: message.roomId,
-                            messages: cache ? cache.messages : [],
+                            messages: msgs,
+                            participants: result ? result.participants : {},
                             lastMessageId: lastId,
                         });
                     }
                     return;
                 }
-                case 'saveLocalMessages':
-                    // WebView sends messages to cache locally
+                case 'saveLocalMessages': {
+                    // WebView sends messages to cache locally (ChatRecord v2)
                     if (chatLocalStore && message.roomId && message.messages) {
-                        await chatLocalStore.appendMessages(message.roomId, message.messages);
+                        const rawMsgs = message.messages as Record<string, unknown>[];
+                        const recordMsgs = rawMsgs.map(toRecordMessage);
+                        // Build participants from message data
+                        const participants: Record<string, { name: string; role: 'host' | 'engineer' | 'ai'; status: 'active' | 'left'; email?: string; identitySource?: string; avatarColor?: number }> = {};
+                        if (message.participants) {
+                            Object.assign(participants, message.participants);
+                        }
+                        for (const raw of rawMsgs) {
+                            const uid = (raw.userId as string) || '';
+                            if (uid && uid !== 'system' && !participants[uid]) {
+                                participants[uid] = toParticipant(raw);
+                            }
+                        }
+                        // Enrich SSO participants with identity (name, email).
+                        // Can't match by getSessionService().getUserId() because the
+                        // backend assigns a different UUID on WS connect. Instead,
+                        // enrich any non-AI SSO participant missing an email.
+                        const sso = this._getValidSSOIdentity();
+                        if (sso) {
+                            const ssoName = (sso.name as string) || (sso.email as string)?.split('@')[0];
+                            for (const [, p] of Object.entries(participants)) {
+                                if (p.role !== 'ai' && !p.email) {
+                                    if (ssoName) p.name = ssoName;
+                                    if (sso.email) p.email = sso.email as string;
+                                    p.identitySource = 'sso';
+                                }
+                            }
+                        }
+                        await chatLocalStore.appendMessages(message.roomId, recordMsgs, participants);
                     }
                     return;
+                }
                 case 'clearLocalMessages':
                     if (chatLocalStore && message.roomId) {
                         await chatLocalStore.clearRoom(message.roomId);
@@ -1212,10 +1241,14 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     console.log('[Conductor] Received setClassifier message from WebView:', message.enabled, message.modelId);
                     this._handleSetClassifier(message.enabled, message.modelId);
                     return;
-                case 'setExplorer':
-                    console.log('[Conductor] Received setExplorer message from WebView:', message.enabled, message.modelId);
-                    this._handleSetExplorer(message.enabled, message.modelId);
+                case 'setExplorer': {
+                    // WebView sends { explorer: "model-id" } from AIConfigModal select
+                    const explorerModel = message.explorer || message.modelId || null;
+                    const explorerEnabled = message.enabled !== undefined ? message.enabled : !!explorerModel;
+                    console.log('[Conductor] Received setExplorer message from WebView:', explorerEnabled, explorerModel);
+                    this._handleSetExplorer(explorerEnabled, explorerModel);
                     return;
+                }
                 case 'summarize':
                     this._handleSummarizeAndPost(message.messages);
                     return;
@@ -1724,7 +1757,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             // Update local session manager with latest message count (await before FSM transition)
             if (localSessionManager) {
                 try {
-                    const cache = chatLocalStore ? await chatLocalStore.loadMessages(roomId) : null;
+                    const cache = chatLocalStore ? await chatLocalStore.loadRecord(roomId) : null;
                     const count = cache?.messageCount ?? 0;
                     console.log(`[Conductor] quitChat: roomId=${roomId}, cached msgs=${count}`);
                     localSessionManager.touch(roomId, count);
@@ -3024,6 +3057,12 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     this._handleSSOCancel();
 
                     if (pollData.status === 'complete' && pollData.identity) {
+                        // Enrich identity with display name from backend user profile
+                        // (AWS SSO doesn't return a name; backend derives one from email)
+                        const userProfile = (pollData as Record<string, unknown>).userProfile as Record<string, unknown> | undefined;
+                        if (userProfile?.display_name && !pollData.identity.name) {
+                            pollData.identity.name = userProfile.display_name as string;
+                        }
                         // Store identity + userUuid in ~/.conductor/credentials/sso.json
                         const userUuid = (pollData as Record<string, unknown>).userUuid as string | undefined;
                         saveSSO(pollData.identity, provider, userUuid);
