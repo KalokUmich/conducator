@@ -89,6 +89,7 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
   }, [send, workspaceRoomId]);
 
   const isHosting = state.conductorState === "Hosting";
+  const isLocalSession = !!state.session?.isLocal;
   const isLead = state.permissions.sessionRole === "host";
   const roomId = state.session?.roomId || "";
   const shortRoomId = roomId.slice(0, 8);
@@ -171,20 +172,28 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
               </div>
             )}
 
-            {/* SSO badge */}
-            {state.ssoIdentity && (
+            {/* SSO badge or sign-in button */}
+            {state.ssoIdentity ? (
               <span className="sso-badge" title={state.ssoIdentity.email}>
                 {state.ssoIdentity.name?.split(" ")[0] || state.ssoIdentity.email.split("@")[0]}
               </span>
-            )}
+            ) : state.enabledSSOProviders.length > 0 ? (
+              <button
+                className="action-btn-xs action-brand"
+                onClick={() => send({ command: "ssoLogin", provider: state.enabledSSOProviders[0] })}
+                title="Sign in with SSO"
+              >
+                Sign In
+              </button>
+            ) : null}
 
             {/* Role badge */}
             <span className="role-chip">{isLead ? "Lead" : "Member"}</span>
           </div>
         </div>
 
-        {/* Workspace action rows */}
-        {isHosting && !workspaceReady && (
+        {/* Workspace action rows — only for online mode (remote git repos) */}
+        {isHosting && !isLocalSession && !workspaceReady && (
           <div className="header-workspace-row">
             <span className="workspace-row-label">Workspace</span>
             <button
@@ -196,7 +205,7 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
             </button>
           </div>
         )}
-        {isHosting && workspaceReady && workspaceRoomId && (
+        {isHosting && !isLocalSession && workspaceReady && workspaceRoomId && (
           <div className="header-workspace-row">
             <span className="workspace-row-label">Remote code</span>
             <button className="action-btn-xs action-success" onClick={handleOpenWorkspace}>
@@ -204,7 +213,7 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
             </button>
           </div>
         )}
-        {isHosting && workspaceReady && (
+        {isHosting && (workspaceReady || isLocalSession) && (
           <div className="header-workspace-row">
             <span className="workspace-row-label">Context index</span>
             <button

@@ -2030,6 +2030,16 @@
   color: var(--c-error);
 }
 
+/* ── Jira Auth Hint (in Tasks panel) ───────────────────── */
+
+.jira-auth-hint-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
 /* ── Code Prompt Action ───────────────────────────────── */
 
 .code-prompt-action {
@@ -3721,6 +3731,8 @@
 .app-content-row .app-content {
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ── Active icon button state ──────────────────────────── */

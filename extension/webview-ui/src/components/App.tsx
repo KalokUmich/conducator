@@ -32,8 +32,13 @@ export function App() {
 
         <div className="app-content-row">
           <div className="app-content">
-            {activeTab === "chat" && <ChatTab />}
-            {activeTab === "tasks" && <TasksTab />}
+            {/* Both tabs stay mounted — CSS hides inactive tab to preserve state */}
+            <div style={{ display: activeTab === "chat" ? "contents" : "none" }}>
+              <ChatTab />
+            </div>
+            <div style={{ display: activeTab === "tasks" ? "contents" : "none" }}>
+              <TasksTab />
+            </div>
           </div>
           <UsersSidebar visible={showUsers} />
         </div>

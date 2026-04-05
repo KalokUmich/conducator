@@ -143,6 +143,7 @@ export function TasksTab() {
   const [scanning, setScanning] = useState(false);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [editingTodo, setEditingTodo] = useState<WorkspaceItem | null>(null);
+  const [jiraAuthNeeded, setJiraAuthNeeded] = useState(false);
   const { send, onAny } = useVSCode();
   const { state: sessionState } = useSession();
 
@@ -186,6 +187,12 @@ export function TasksTab() {
     };
     setWorkspaceTodos(raw.todos || []);
     if (raw.ticketStatuses) setTicketStatuses(raw.ticketStatuses);
+
+    // Auto-refresh Jira tickets if scan found linked ticket keys
+    const hasLinkedKeys = (raw.todos || []).some((t) => t.jiraKey);
+    if (hasLinkedKeys) {
+      send({ command: "loadJiraTickets" });
+    }
   });
 
   // Listen for Jira tickets
@@ -193,8 +200,21 @@ export function TasksTab() {
     return onAny((msg) => {
       const cmd = (msg as unknown as { command: string }).command;
       if (cmd === "jiraTicketsLoaded") {
-        const data = msg as unknown as { tickets?: Array<Record<string, unknown>> };
-        if (data.tickets) {
+        const data = msg as unknown as {
+          tickets?: Array<Record<string, unknown>>;
+          error?: string;
+          authNeeded?: boolean;
+        };
+        console.log("[TasksTab] jiraTicketsLoaded:", data.tickets?.length ?? 0, "tickets, error:", data.error, "authNeeded:", data.authNeeded);
+        if (data.authNeeded) {
+          setJiraAuthNeeded(true);
+        } else {
+          setJiraAuthNeeded(false);
+        }
+        if (data.error) {
+          console.warn("[TasksTab] Jira load error:", data.error);
+        }
+        if (data.tickets && data.tickets.length > 0) {
           const mapped: Todo[] = data.tickets.map((t) => ({
             id: (t.key as string) || `jira-${Date.now()}`,
             title: (t.summary as string) || (t.key as string) || "Jira ticket",
@@ -210,6 +230,8 @@ export function TasksTab() {
             isDone: (t.status as string) === "Done" || (t.isDone as boolean),
           }));
           setJiraTickets(mapped);
+        } else {
+          setJiraTickets([]);
         }
       }
     });
@@ -394,6 +416,7 @@ export function TasksTab() {
         expanded={expandedSections.has("jira")}
         onToggle={() => toggleSection("jira")}
         tickets={jiraItems}
+        authNeeded={jiraAuthNeeded}
       />
 
       {/* Workspace TODO Edit Modal */}
@@ -780,13 +803,15 @@ function JiraSectionComp({
   expanded,
   onToggle,
   tickets,
+  authNeeded,
 }: {
   count: number;
   expanded: boolean;
   onToggle: () => void;
   tickets: Todo[];
+  authNeeded?: boolean;
 }) {
-  if (count === 0 && !expanded) return null;
+  const { send } = useVSCode();
 
   // Group by epic
   const epicGroups = new Map<string, Todo[]>();
@@ -810,7 +835,19 @@ function JiraSectionComp({
       {expanded && (
         <div className="jira-ticket-list">
           {tickets.length === 0 ? (
-            <div className="todo-empty">No tickets loaded</div>
+            authNeeded ? (
+              <div className="jira-auth-hint-panel">
+                <p className="todo-empty">Connect Jira to load tickets</p>
+                <button
+                  className="action-btn action-brand"
+                  onClick={() => send({ command: "jiraConnect" })}
+                >
+                  Connect Jira
+                </button>
+              </div>
+            ) : (
+              <div className="todo-empty">No tickets loaded</div>
+            )
           ) : (
             <>
               {Array.from(epicGroups.entries()).map(([epicKey, items]) => {

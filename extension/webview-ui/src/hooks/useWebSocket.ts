@@ -60,6 +60,8 @@ export function useWebSocket() {
     // Load local cache BEFORE WS connects (instant display, like old code)
     sendRef.current({ command: "loadLocalMessages", roomId });
 
+    let hasJoinedOnce = false; // Suppress duplicate join/role_restored on reconnect
+
     function connect() {
       console.log("[WS] Connecting to:", fullWsUrl);
       const ws = new WebSocket(fullWsUrl);
@@ -166,8 +168,14 @@ export function useWebSocket() {
           }));
         }
 
-        // Fetch AI status
-        sendRef.current({ command: "getAiStatus" });
+        // Mark as joined — suppress duplicate system messages on reconnect
+        const isFirstJoin = !hasJoinedOnce;
+        hasJoinedOnce = true;
+
+        // Fetch AI status (only on first connect to avoid spam)
+        if (isFirstJoin) {
+          sendRef.current({ command: "getAiStatus" });
+        }
         return;
       }
 
@@ -206,6 +214,16 @@ export function useWebSocket() {
             });
           });
           sessionDispatchRef.current({ type: "SET_USERS", users: map });
+        }
+
+        // Only show system message on first join — skip on reconnect
+        if (hasJoinedOnce && type === "user_joined") {
+          // Check if this is the current user rejoining (self-join on reconnect)
+          const joinedUserId = (data.user as Record<string, unknown>)?.userId as string
+            || (data.userId as string) || "";
+          if (joinedUserId === assignedUserIdRef.current) {
+            return; // Suppress self-rejoin notification
+          }
         }
 
         const user = data.user as Record<string, unknown> | undefined;
@@ -269,20 +287,23 @@ export function useWebSocket() {
         return;
       }
 
-      // ── 10. role_restored — update session role + show system message ──
+      // ── 10. role_restored — update session role (suppress duplicate on reconnect) ──
       if (type === "role_restored") {
         const newRole = (data.sessionRole as string) || "host";
         sessionDispatch({
           type: "SET_PERMISSIONS",
           permissions: { sessionRole: newRole as "host" | "guest" | "none" },
         });
-        addMessageRef.current({
-          id: `system-role-${Date.now()}`,
-          userId: "system", displayName: "System", role: "system",
-          content: "Host role restored via SSO identity",
-          type: "system",
-          ts: Date.now() / 1000,
-        });
+        // Only show system message on first occurrence, not reconnects
+        if (!hasJoinedOnce) {
+          addMessageRef.current({
+            id: `system-role-${Date.now()}`,
+            userId: "system", displayName: "System", role: "system",
+            content: "Host role restored via SSO identity",
+            type: "system",
+            ts: Date.now() / 1000,
+          });
+        }
         return;
       }
 

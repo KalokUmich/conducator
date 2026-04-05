@@ -187,6 +187,7 @@ export interface Session {
   displayName?: string;
   createdAt: number;
   backendUrl: string;
+  isLocal?: boolean;
 }
 
 export interface Permissions {

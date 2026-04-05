@@ -2058,14 +2058,24 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            // Fetch file from backend
-            const response = await fetch(this._normalizeUrl(message.downloadUrl));
-            if (!response.ok) {
-                throw new Error(`Download failed: HTTP ${response.status}`);
-            }
+            let buffer: Buffer;
 
-            const arrayBuffer = await response.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
+            if (message.downloadUrl.startsWith('file://')) {
+                // Local mode: read directly from filesystem
+                const localPath = message.downloadUrl.replace('file://', '');
+                if (!fs.existsSync(localPath)) {
+                    throw new Error(`Local file not found: ${localPath}`);
+                }
+                buffer = fs.readFileSync(localPath);
+            } else {
+                // Online mode: fetch from backend
+                const response = await fetch(this._normalizeUrl(message.downloadUrl));
+                if (!response.ok) {
+                    throw new Error(`Download failed: HTTP ${response.status}`);
+                }
+                const arrayBuffer = await response.arrayBuffer();
+                buffer = Buffer.from(arrayBuffer);
+            }
 
             // Write to file
             await vscode.workspace.fs.writeFile(uri, buffer);
@@ -6258,10 +6268,11 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
      */
     private async _handleLoadJiraTickets(): Promise<void> {
         if (!this._ticketProvider) {
+            console.warn('[Conductor] loadJiraTickets: no ticket provider — skipping');
             this._view?.webview.postMessage({
                 command: 'jiraTicketsLoaded',
                 tickets: [],
-                error: 'No ticket provider configured',
+                error: 'No ticket provider configured. Open a workspace folder first.',
             });
             return;
         }
@@ -6269,6 +6280,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
         try {
             // Try fetching directly — isAuthenticated checks both local + backend tokens
             const isAuth = await this._ticketProvider.isAuthenticated();
+            console.log('[Conductor] loadJiraTickets: isAuthenticated =', isAuth);
             if (!isAuth) {
                 this._view?.webview.postMessage({
                     command: 'jiraTicketsLoaded',
@@ -6279,6 +6291,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
             }
 
             const { tickets, epics, unassignedTickets } = await this._ticketProvider.fetchMyTickets();
+            console.log('[Conductor] loadJiraTickets: got', tickets.length, 'tickets,', unassignedTickets.length, 'unassigned');
 
             // Also scan TODOs to find associations
             const todos = await scanWorkspaceTodos();
