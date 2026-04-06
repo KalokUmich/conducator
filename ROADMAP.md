@@ -1175,6 +1175,7 @@ Learn from `Tool.ts` — richer tool definitions for better agent behavior.
 9.9 (Brain Planning) ───> standalone ───────────> enhances auditability
 9.10 (Competitive) ─────> ongoing ──────────���───> informs 7.8, 9.1-9.7
 9.11 (Prompt Cache) ────> benefits from 9.3 ───> reduces token cost
+9.12 (Diff Sharding) ───> standalone ─────────> reduces token cost, combines with 9.11
 ```
 
 ### 9.9 Brain Explicit Planning & Dynamic Agent Composition (COMPLETE)
@@ -1263,6 +1264,17 @@ Add `cache_control` / `cachePoint` breakpoints to system prompts and tool defini
 - [ ] Apply to Brain system prompt (shared across sub-agent dispatches, per Phase 9.3)
 - [ ] Measure cache hit rate and token savings in Langfuse
 - [ ] Expected impact: ~45% input token reduction for PR review pipeline (810K/1.82M tokens cacheable)
+
+### 9.12 Diff Sharding for Review Agents (PLANNED)
+Scope each review agent's diff context to only the files relevant to its focus area, instead of sending the full diff to every agent. Expected ~60% reduction in per-agent input tokens.
+
+- [ ] Classify changed files by type: business logic, security-sensitive, config, test, infrastructure
+- [ ] correctness/correctness_b: only business logic files
+- [ ] security: business logic + config + auth-related files
+- [ ] reliability: business logic + error-handling-heavy files
+- [ ] test_coverage: all files (needs full picture)
+- [ ] Update `_build_agent_query` / `build_diffs_section` to accept file filter per agent
+- [ ] Combined with prompt caching (9.11): estimated total cost reduction from ~$1.89 to ~$0.50 per review
 
 ### Reference Study Process
 For each sub-phase:
