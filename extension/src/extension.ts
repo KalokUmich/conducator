@@ -1202,7 +1202,7 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                         } else {
                             // Online sessions: rejoin with SSO identity
                             const sso = this._getValidSSOIdentity();
-                            const savedBackendUrl = targetSession?.backendUrl || getSessionService().getBackendUrl();
+                            const savedBackendUrl = getSessionService().getBackendUrl();
 
                             if (sso) {
                                 // SSO valid — rejoin as host
