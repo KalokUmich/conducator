@@ -136,6 +136,30 @@ AGENT_SPECS: List[AgentSpec] = [
         ),
     ),
     AgentSpec(
+        name="correctness_b",
+        category=FindingCategory.CORRECTNESS,
+        tools=_REVIEW_CORE_TOOLS
+        + [
+            "git_diff",
+            "git_show",
+            "git_log",
+            "find_references",
+            "get_callers",
+            "get_dependencies",
+            "get_dependents",
+        ],
+        budget_tokens=_sub_budget(0.80),  # lighter than correctness_a
+        max_iterations=_sub_iters(0.80),
+        risk_dimensions=["correctness"],
+        strategy_hint=(
+            "Defensive review: focus on null safety, error handling, and edge cases. "
+            "For each changed method, trace every nullable return value and verify "
+            "the caller handles null. Check exception paths — does every catch block "
+            "leave the system in a consistent state? Use get_dependents to find callers "
+            "that may break due to changed contracts."
+        ),
+    ),
+    AgentSpec(
         name="concurrency",
         category=FindingCategory.CONCURRENCY,
         tools=_REVIEW_CORE_TOOLS
@@ -279,6 +303,16 @@ risk: {risk_summary}
 </diffs>
 
 {impact_context_section}
+## Diff interpretation — understand intent before flagging
+When reviewing diffs, distinguish these categories:
+- **New code** (entirely new file or new method): Look for bugs in the new logic.
+- **Changed code** (old line replaced by new line): Understand WHY it changed.
+  Use git_show to see the BEFORE version. If the change is intentional (e.g.,
+  POST→GET, gRPC→REST migration, renamed method), do NOT flag the new pattern
+  as a defect unless it is provably broken.
+- **Moved/refactored code**: If logic is preserved but restructured, do NOT flag
+  pre-existing patterns as new issues introduced by this PR.
+
 ## Investigation instructions
 1. Analyze the diffs above for issues in your focus area.
 2. Use **read_file** with line ranges for broader context around changes.

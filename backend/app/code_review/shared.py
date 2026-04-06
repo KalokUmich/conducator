@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Minimum confidence to keep a finding (below this = too speculative).
-MIN_CONFIDENCE = 0.75  # aligned with Anthropic's code-review plugin (80/100 ≈ 0.75)
+MIN_CONFIDENCE = 0.80  # raised from 0.75 to reduce weak/speculative findings
 
 # Matches "diff --git a/path b/path" headers in unified diff output
 DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)

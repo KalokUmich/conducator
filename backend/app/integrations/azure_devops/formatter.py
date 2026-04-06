@@ -79,12 +79,14 @@ def split_finding_into_comments(finding: ReviewFinding) -> List[InlineComment]:
 
     if not locations:
         # No line references — single comment at the finding's location
-        return [InlineComment(
-            file_path=finding.file or None,
-            start_line=finding.start_line or None,
-            end_line=finding.start_line or None,
-            content=_format_primary_comment(finding, badge),
-        )]
+        return [
+            InlineComment(
+                file_path=finding.file or None,
+                start_line=finding.start_line or None,
+                end_line=finding.start_line or None,
+                content=_format_primary_comment(finding, badge),
+            )
+        ]
 
     # Group nearby lines (within 20 lines → same comment, same diff hunk)
     groups: List[List[tuple]] = []
@@ -109,10 +111,7 @@ def split_finding_into_comments(finding: ReviewFinding) -> List[InlineComment]:
                 others = [str(ln) for ln in other_lines[1:]]
                 also = f"\n\n_Also at: line {', '.join(others)}_"
 
-            content = (
-                f"{badge}\n\n"
-                f"**{finding.title}**\n\n"
-            )
+            content = f"{badge}\n\n**{finding.title}**\n\n"
             if finding.risk:
                 content += f"{finding.risk}\n\n"
             for et in evidence_texts:
@@ -122,18 +121,18 @@ def split_finding_into_comments(finding: ReviewFinding) -> List[InlineComment]:
             content += also
         else:
             # Secondary comment — brief, cross-reference primary
-            content = (
-                f"{badge} Same pattern as line {other_lines[0]}\n\n"
-            )
+            content = f"{badge} Same pattern as line {other_lines[0]}\n\n"
             for et in evidence_texts:
                 content += f"- {et}\n"
 
-        comments.append(InlineComment(
-            file_path=finding.file or None,
-            start_line=start,
-            end_line=min(end, start + 10),  # Keep highlight focused
-            content=content.strip(),
-        ))
+        comments.append(
+            InlineComment(
+                file_path=finding.file or None,
+                start_line=start,
+                end_line=min(end, start + 10),  # Keep highlight focused
+                content=content.strip(),
+            )
+        )
 
     return comments
 

@@ -74,6 +74,153 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Verification agent — reads code to confirm or refute each finding
+# ---------------------------------------------------------------------------
+
+_VERIFY_PROMPT = """\
+You are a **code verification agent**. Your job is to DISPROVE the finding below.
+Try your hardest to find counter-evidence that makes this finding invalid.
+
+## The finding to verify
+- **Title**: {title}
+- **Severity**: {severity}
+- **File**: {file}:{start_line}
+- **Risk**: {risk}
+- **Evidence claimed**:
+{evidence}
+
+## Your task
+1. Read the actual code at the reported location using read_file.
+2. Check for context that would invalidate the finding:
+   - Is there a null check, try-catch, or guard clause nearby?
+   - Is this an intentional design change visible in the diff?
+   - Is the concern already handled by a framework, annotation, or parent caller?
+   - Does the caller validate inputs before reaching this code?
+3. Render your verdict as JSON:
+
+```json
+{{"verdict": "confirmed"|"refuted"|"weakened", "confidence": 0.0-1.0, "reason": "..."}}
+```
+
+- **confirmed**: The finding is real and code-provable. State what you verified.
+- **refuted**: You found concrete counter-evidence. Cite file:line.
+- **weakened**: The finding has some merit but is overstated. Explain why.
+
+Be thorough but fast — you have limited iterations."""
+
+_VERIFY_TOOLS = ["read_file", "grep", "find_symbol", "file_outline", "git_show"]
+
+
+async def _verify_single_finding(
+    finding: ReviewFinding,
+    provider: AIProvider,
+    workspace_path: str,
+    trace_writer=None,
+    llm_semaphore: Optional[asyncio.Semaphore] = None,
+) -> tuple:
+    """Verify a single finding using an agent with tool access.
+
+    Returns (finding, verdict_str, new_confidence).
+    """
+    from app.agent_loop.budget import BudgetConfig
+    from app.agent_loop.service import AgentLoopService
+
+    evidence_lines = "\n".join(f"  - {e}" for e in finding.evidence[:5])
+    query = _VERIFY_PROMPT.format(
+        title=finding.title,
+        severity=finding.severity.value,
+        file=finding.file,
+        start_line=finding.start_line,
+        risk=finding.risk,
+        evidence=evidence_lines,
+    )
+
+    budget = BudgetConfig(max_input_tokens=150_000, max_iterations=8)
+    agent = AgentLoopService(
+        provider=provider,
+        max_iterations=8,
+        budget_config=budget,
+        trace_writer=trace_writer,
+        _is_sub_agent=True,
+        llm_semaphore=llm_semaphore,
+    )
+
+    try:
+        result = await agent.run(query=query, workspace_path=workspace_path)
+        answer = result.answer or ""
+
+        # Parse verdict JSON from answer
+        verdict = "confirmed"
+        confidence = finding.confidence
+        reason = ""
+
+        json_match = re.search(r'\{[^}]*"verdict"[^}]*\}', answer, re.DOTALL)
+        if json_match:
+            try:
+                vdata = json.loads(json_match.group())
+                verdict = vdata.get("verdict", "confirmed")
+                confidence = float(vdata.get("confidence", finding.confidence))
+                reason = vdata.get("reason", "")
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return finding, verdict, confidence, reason
+    except Exception as exc:
+        logger.warning("Verification failed for '%s': %s", finding.title, exc)
+        return finding, "confirmed", finding.confidence, ""
+
+
+async def _verify_findings(
+    findings: List[ReviewFinding],
+    provider: AIProvider,
+    workspace_path: str,
+    trace_writer=None,
+) -> List[ReviewFinding]:
+    """Run verification agent on each finding in parallel.
+
+    Refuted findings are dropped. Weakened findings get confidence reduced.
+    Confirmed findings get a small confidence boost.
+    """
+    if not findings:
+        return findings
+
+    llm_semaphore = asyncio.Semaphore(2)
+    tasks = [_verify_single_finding(f, provider, workspace_path, trace_writer, llm_semaphore) for f in findings]
+    results = await asyncio.gather(*tasks)
+
+    verified = []
+    for finding, verdict, confidence, reason in results:
+        if verdict == "refuted":
+            logger.info(
+                "Verification: REFUTED '%s' — %s",
+                finding.title,
+                reason,
+            )
+            continue
+        elif verdict == "weakened":
+            finding.confidence = min(finding.confidence, confidence)
+            finding.reasoning = (finding.reasoning or "") + f"\n[verifier: weakened — {reason}]"
+            logger.info(
+                "Verification: WEAKENED '%s' (confidence → %.2f) — %s",
+                finding.title,
+                finding.confidence,
+                reason,
+            )
+        else:
+            # Confirmed — small confidence boost
+            finding.confidence = min(finding.confidence + 0.05, 1.0)
+            logger.info("Verification: CONFIRMED '%s'", finding.title)
+        verified.append(finding)
+
+    logger.info(
+        "Verification complete: %d/%d findings survived",
+        len(verified),
+        len(findings),
+    )
+    return verified
+
+
+# ---------------------------------------------------------------------------
 # Severity arbitration + defense attorney (merged)
 # ---------------------------------------------------------------------------
 
@@ -509,6 +656,15 @@ class CodeReviewService:
                 _MAX_FINDINGS,
             )
             ranked = ranked[:_MAX_FINDINGS]
+
+        # Step 6b: Verification — agent with tool access tries to refute each finding
+        # Like Claude Code's bughunter "verifying" phase
+        ranked = await _verify_findings(
+            findings=ranked,
+            provider=self._sub_agent_provider,
+            workspace_path=workspace_path,
+            trace_writer=self._trace_writer,
+        )
 
         # Step 7: Severity arbitration + adversarial challenge — strong model
         # reviews severity AND challenges findings (merged defense attorney).

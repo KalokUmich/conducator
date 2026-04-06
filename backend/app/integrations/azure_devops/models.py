@@ -16,7 +16,7 @@ class AzureDevOpsReviewRequest(BaseModel):
     pr_id: int = Field(..., description="Pull Request ID")
     source_branch: str = Field("", description="Source branch (optional, read from PR if empty)")
     target_branch: str = Field("", description="Target branch (optional, read from PR if empty)")
-    max_agents: int = Field(default=5, ge=1, le=7, description="Max review agents")
+    max_agents: int = Field(default=6, ge=1, le=8, description="Max review agents (incl. correctness_b)")
 
 
 class AzureDevOpsReviewResponse(BaseModel):
