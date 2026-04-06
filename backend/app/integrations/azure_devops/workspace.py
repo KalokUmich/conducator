@@ -146,11 +146,8 @@ async def create_pr_worktree(
 
             shutil.rmtree(worktree_path, ignore_errors=True)
 
-    # Fetch latest
-    rc, _, stderr = await _run(["git", "fetch", "--all", "--prune"], cwd=ws)
-    if rc != 0:
-        logger.error("[AzureDevOps] git fetch failed: %s", stderr.strip())
-        return None
+    # No fetch here — caller (router) already ran fetch_latest() before
+    # creating the worktree. Avoids duplicate network round-trip.
 
     # Create worktree from origin/source_branch
     rc, _, stderr = await _run(
