@@ -1,11 +1,19 @@
 """Azure DevOps workspace management.
 
-Handles auto-cloning and fetching of the target repository so that
-the code review pipeline has a local git workspace to operate on.
+Two-tier workspace architecture:
 
-The workspace is a full clone (not --no-checkout) because the review
-agents need to read arbitrary files on disk (grep, read_file,
-find_symbol, get_dependencies, etc.), not just the diff.
+  ~/.conductor/
+  └── pr_workspaces/
+      └── abound-server/               ← main clone (startup, shared .git objects)
+          abound-server-pr-14126/       ← worktree per PR review (temporary)
+          abound-server-pr-14130/       ← concurrent reviews don't conflict
+
+Main clone is created once at startup via ``ensure_workspace()``.
+Each PR review gets its own worktree via ``create_pr_worktree()``,
+which is cleaned up after the review via ``cleanup_pr_worktree()``.
+
+Worktrees share .git objects with the main clone — creation is near-instant
+and disk usage is minimal (only checked-out files, not full history).
 """
 
 from __future__ import annotations
@@ -17,8 +25,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Default root for auto-managed workspaces
-_DEFAULT_ROOT = Path.home() / ".conductor" / "azure_workspaces"
+# Default root for PR review workspaces (separate from chat room workspaces)
+_DEFAULT_ROOT = Path.home() / ".conductor" / "pr_workspaces"
 
 
 def _repo_name_from_url(repo_url: str) -> str:
@@ -67,21 +75,18 @@ async def ensure_workspace(
     pat: str,
     workspace_path: str = "",
 ) -> str | None:
-    """Ensure a local git workspace exists and is up to date.
+    """Ensure the main clone exists and is up to date.
 
-    If *workspace_path* is provided and already exists, runs ``git fetch``.
-    If *workspace_path* is empty, derives a default path under
-    ``~/.conductor/azure_workspaces/{repo_name}``.
-    If the directory does not exist, runs ``git clone``.
+    Called once at startup. Creates the shared clone that all PR worktrees
+    are derived from. If already exists, runs ``git fetch``.
 
     Returns:
-        The absolute workspace path, or None if clone/fetch failed.
+        The absolute path to the main clone, or None on failure.
     """
     if not repo_url:
         logger.warning("[AzureDevOps] No repo_url configured — workspace not available")
         return None
 
-    # Resolve workspace path
     if workspace_path:
         ws = Path(workspace_path)
     else:
@@ -92,16 +97,14 @@ async def ensure_workspace(
     auth_url = _inject_pat(repo_url, pat)
 
     if ws.exists() and (ws / ".git").exists():
-        # Already cloned — fetch latest
         logger.info("[AzureDevOps] Fetching latest for %s", ws_str)
         rc, _, stderr = await _run(["git", "fetch", "--all", "--prune"], cwd=ws_str)
         if rc != 0:
             logger.error("[AzureDevOps] git fetch failed: %s", stderr.strip())
-            return ws_str  # still usable, just not latest
+            return ws_str
         logger.info("[AzureDevOps] Fetch complete for %s", ws_str)
         return ws_str
 
-    # Full clone — agents need files on disk for grep, read_file, etc.
     ws.parent.mkdir(parents=True, exist_ok=True)
     logger.info("[AzureDevOps] Cloning %s → %s", repo_url, ws_str)
     rc, _, stderr = await _run(["git", "clone", auth_url, ws_str])
@@ -113,41 +116,73 @@ async def ensure_workspace(
     return ws_str
 
 
-async def prepare_for_review(
-    workspace_path: str,
+async def create_pr_worktree(
+    main_workspace: str,
     source_branch: str,
-    target_branch: str,
-) -> bool:
-    """Prepare the workspace for a PR review.
+    pr_id: int,
+) -> str | None:
+    """Create an isolated worktree for a PR review.
 
-    1. Fetch all remotes to get latest branch refs.
-    2. Checkout the source branch so agents can read the PR's code on disk.
+    1. Fetch latest refs from all remotes.
+    2. Create a worktree checked out to the source branch.
 
-    Returns True if workspace is ready.
+    The worktree is placed alongside the main clone:
+      {main_workspace}-pr-{pr_id}/
+
+    Returns:
+        Absolute path to the worktree, or None on failure.
     """
-    ws = workspace_path
+    ws = main_workspace
+    worktree_path = f"{ws}-pr-{pr_id}"
+
+    # Clean up stale worktree if it exists (e.g., from a crashed review)
+    wt = Path(worktree_path)
+    if wt.exists():
+        logger.info("[AzureDevOps] Cleaning stale worktree: %s", worktree_path)
+        await _run(["git", "worktree", "remove", "--force", worktree_path], cwd=ws)
+        # If git worktree remove fails (e.g., locked), force-delete the directory
+        if wt.exists():
+            import shutil
+
+            shutil.rmtree(worktree_path, ignore_errors=True)
 
     # Fetch latest
     rc, _, stderr = await _run(["git", "fetch", "--all", "--prune"], cwd=ws)
     if rc != 0:
         logger.error("[AzureDevOps] git fetch failed: %s", stderr.strip())
-        return False
+        return None
 
-    # Checkout source branch (the PR's code) so agents see the new files.
-    # Try local branch first; if it doesn't exist, create from origin/.
-    rc, _, _ = await _run(["git", "checkout", source_branch], cwd=ws)
+    # Create worktree from origin/source_branch
+    rc, _, stderr = await _run(
+        ["git", "worktree", "add", "--detach", worktree_path, f"origin/{source_branch}"],
+        cwd=ws,
+    )
     if rc != 0:
-        # Local branch doesn't exist — create tracking branch
-        rc, _, stderr = await _run(
-            ["git", "checkout", "-b", source_branch, f"origin/{source_branch}"],
-            cwd=ws,
+        logger.error(
+            "[AzureDevOps] worktree add failed for PR #%d: %s",
+            pr_id,
+            stderr.strip(),
         )
-        if rc != 0:
-            logger.error("[AzureDevOps] checkout %s failed: %s", source_branch, stderr.strip())
-            return False
-    else:
-        # Local branch exists — pull latest from origin
-        await _run(["git", "reset", "--hard", f"origin/{source_branch}"], cwd=ws)
+        return None
 
-    logger.info("[AzureDevOps] Workspace checked out to %s", source_branch)
-    return True
+    logger.info("[AzureDevOps] Worktree created: %s (branch: %s)", worktree_path, source_branch)
+    return worktree_path
+
+
+async def cleanup_pr_worktree(main_workspace: str, worktree_path: str) -> None:
+    """Remove a PR review worktree after the review is complete."""
+    rc, _, stderr = await _run(
+        ["git", "worktree", "remove", "--force", worktree_path],
+        cwd=main_workspace,
+    )
+    if rc != 0:
+        logger.warning("[AzureDevOps] worktree cleanup failed: %s", stderr.strip())
+        # Fallback: force-delete the directory
+        import shutil
+
+        shutil.rmtree(worktree_path, ignore_errors=True)
+    else:
+        logger.info("[AzureDevOps] Worktree cleaned up: %s", worktree_path)
+
+    # Prune stale worktree refs
+    await _run(["git", "worktree", "prune"], cwd=main_workspace)

@@ -71,21 +71,18 @@ async def review_pull_request(
             source_branch = source_branch or pr_data.get("sourceRefName", "").replace("refs/heads/", "")
             target_branch = target_branch or pr_data.get("targetRefName", "").replace("refs/heads/", "")
 
-        # target uses origin/ (remote ref), source is checked out locally
-        diff_spec = f"origin/{target_branch}...{source_branch}"
+        # Worktree uses detached HEAD at origin/source — both refs use origin/
+        diff_spec = f"origin/{target_branch}...origin/{source_branch}"
         logger.info("[AzureDevOps] Diff spec: %s", diff_spec)
 
-        # Step 1.5: Fetch + checkout source branch so agents can read files on disk
-        workspace_path = getattr(request.app.state, "azure_devops_workspace", None)
-        if workspace_path:
-            from .workspace import prepare_for_review
+        # Step 1.5: Create isolated worktree for this PR review
+        main_workspace = getattr(request.app.state, "azure_devops_workspace", None)
+        if not main_workspace:
+            raise HTTPException(
+                status_code=503,
+                detail="No workspace configured for Azure DevOps reviews.",
+            )
 
-            if await prepare_for_review(workspace_path, source_branch, target_branch):
-                logger.info("[AzureDevOps] Workspace ready on branch %s", source_branch)
-            else:
-                logger.warning("[AzureDevOps] Workspace preparation failed — review may be incomplete")
-
-        # Step 2: Run code review via PRBrainOrchestrator
         pr_brain_factory = getattr(request.app.state, "pr_brain_factory", None)
         if not pr_brain_factory:
             raise HTTPException(
@@ -93,139 +90,143 @@ async def review_pull_request(
                 detail="PR Brain not initialized.",
             )
 
-        workspace_path = getattr(request.app.state, "azure_devops_workspace", None)
-        if not workspace_path:
+        from .workspace import cleanup_pr_worktree, create_pr_worktree
+
+        worktree_path = await create_pr_worktree(main_workspace, source_branch, req.pr_id)
+        if not worktree_path:
             raise HTTPException(
-                status_code=503,
-                detail="No workspace configured for Azure DevOps reviews. "
-                "Clone the repo and set azure_devops.workspace_path in settings.",
+                status_code=500,
+                detail=f"Failed to create worktree for PR #{req.pr_id}",
             )
 
-        orchestrator = pr_brain_factory(workspace_path, diff_spec)
+        try:
+            orchestrator = pr_brain_factory(worktree_path, diff_spec)
 
-        # Collect results from the streaming pipeline
-        from app.code_review.models import (
-            FindingCategory,
-            ReviewFinding,
-            ReviewResult,
-            Severity,
-        )
+            # Collect results from the streaming pipeline
+            from app.code_review.models import (
+                FindingCategory,
+                ReviewFinding,
+                ReviewResult,
+                Severity,
+            )
 
-        findings = []
-        synthesis = ""
-        merge_rec = ""
-        files_reviewed = []
-        total_tokens = 0
-        total_iterations = 0
-        duration_ms = 0.0
+            findings = []
+            synthesis = ""
+            merge_rec = ""
+            files_reviewed = []
+            total_tokens = 0
+            total_iterations = 0
+            duration_ms = 0.0
 
-        async for event in orchestrator.run_stream():
-            if event.kind == "done":
-                data = event.data
-                synthesis = data.get("answer", "")
-                merge_rec = data.get("merge_recommendation", "")
-                files_reviewed = data.get("files_reviewed", [])
-                total_iterations = data.get("total_iterations", 0)
-                duration_ms = data.get("duration_ms", 0.0)
-                for fd in data.get("findings", []):
-                    try:
-                        findings.append(
-                            ReviewFinding(
-                                title=fd.get("title", ""),
-                                category=FindingCategory(fd.get("category", "correctness")),
-                                severity=Severity(fd.get("severity", "warning")),
-                                confidence=fd.get("confidence", 0.7),
-                                file=fd.get("file", ""),
-                                start_line=fd.get("start_line", 0),
-                                end_line=fd.get("end_line", 0),
-                                evidence=fd.get("evidence", []),
-                                risk=fd.get("risk", ""),
-                                suggested_fix=fd.get("suggested_fix", ""),
-                                agent=fd.get("agent", ""),
+            async for event in orchestrator.run_stream():
+                if event.kind == "done":
+                    data = event.data
+                    synthesis = data.get("answer", "")
+                    merge_rec = data.get("merge_recommendation", "")
+                    files_reviewed = data.get("files_reviewed", [])
+                    total_iterations = data.get("total_iterations", 0)
+                    duration_ms = data.get("duration_ms", 0.0)
+                    for fd in data.get("findings", []):
+                        try:
+                            findings.append(
+                                ReviewFinding(
+                                    title=fd.get("title", ""),
+                                    category=FindingCategory(fd.get("category", "correctness")),
+                                    severity=Severity(fd.get("severity", "warning")),
+                                    confidence=fd.get("confidence", 0.7),
+                                    file=fd.get("file", ""),
+                                    start_line=fd.get("start_line", 0),
+                                    end_line=fd.get("end_line", 0),
+                                    evidence=fd.get("evidence", []),
+                                    risk=fd.get("risk", ""),
+                                    suggested_fix=fd.get("suggested_fix", ""),
+                                    agent=fd.get("agent", ""),
+                                )
                             )
-                        )
-                    except Exception:
-                        continue
+                        except Exception:
+                            continue
 
-        result = ReviewResult(
-            diff_spec=diff_spec,
-            findings=findings,
-            files_reviewed=files_reviewed,
-            merge_recommendation=merge_rec,
-            synthesis=synthesis,
-            total_tokens=total_tokens,
-            total_iterations=total_iterations,
-            total_duration_ms=duration_ms,
-        )
-
-        logger.info(
-            "[AzureDevOps] Review complete: %d findings, recommendation=%s",
-            len(result.findings),
-            result.merge_recommendation,
-        )
-
-        # Step 3: Post each finding as inline thread(s)
-        # Split findings into per-location comments (Google/CodeRabbit pattern)
-        threads_created = 0
-        for finding in result.findings:
-            inline_comments = split_finding_into_comments(finding)
-            for comment in inline_comments:
-                try:
-                    await client.create_thread(
-                        project=req.project,
-                        repo=req.repo,
-                        pr_id=req.pr_id,
-                        content=comment.content,
-                        file_path=comment.file_path,
-                        start_line=comment.start_line,
-                        end_line=comment.end_line,
-                    )
-                    threads_created += 1
-                except Exception as exc:
-                    logger.warning(
-                        "[AzureDevOps] Failed to create thread for finding '%s' at line %s: %s",
-                        finding.title,
-                        comment.start_line,
-                        exc,
-                    )
-
-        # Step 4: Post summary comment (no file context — PR-level)
-        try:
-            summary_md = format_summary_markdown(result)
-            await client.create_thread(
-                project=req.project,
-                repo=req.repo,
-                pr_id=req.pr_id,
-                content=summary_md,
+            result = ReviewResult(
+                diff_spec=diff_spec,
+                findings=findings,
+                files_reviewed=files_reviewed,
+                merge_recommendation=merge_rec,
+                synthesis=synthesis,
+                total_tokens=total_tokens,
+                total_iterations=total_iterations,
+                total_duration_ms=duration_ms,
             )
-            threads_created += 1
-        except Exception as exc:
-            logger.warning("[AzureDevOps] Failed to post summary: %s", exc)
 
-        # Step 5: Set vote
-        vote_value = recommendation_to_vote(result.merge_recommendation)
-        try:
-            await client.vote(req.project, req.repo, req.pr_id, vote_value)
-        except Exception as exc:
-            logger.warning("[AzureDevOps] Failed to set vote: %s", exc)
+            logger.info(
+                "[AzureDevOps] Review complete: %d findings, recommendation=%s",
+                len(result.findings),
+                result.merge_recommendation,
+            )
 
-        duration = time.time() - start_time
-        logger.info(
-            "[AzureDevOps] PR #%d review posted: %d threads, vote=%d, %.1fs",
-            req.pr_id,
-            threads_created,
-            vote_value,
-            duration,
-        )
+            # Step 3: Post each finding as inline thread(s)
+            threads_created = 0
+            for finding in result.findings:
+                inline_comments = split_finding_into_comments(finding)
+                for comment in inline_comments:
+                    try:
+                        await client.create_thread(
+                            project=req.project,
+                            repo=req.repo,
+                            pr_id=req.pr_id,
+                            content=comment.content,
+                            file_path=comment.file_path,
+                            start_line=comment.start_line,
+                            end_line=comment.end_line,
+                        )
+                        threads_created += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "[AzureDevOps] Failed to create thread for finding '%s' at line %s: %s",
+                            finding.title,
+                            comment.start_line,
+                            exc,
+                        )
 
-        return AzureDevOpsReviewResponse(
-            status="ok",
-            pr_id=req.pr_id,
-            threads_created=threads_created,
-            findings_count=len(result.findings),
-            merge_recommendation=result.merge_recommendation,
-            vote=vote_value,
-        )
+            # Step 4: Post summary comment
+            try:
+                summary_md = format_summary_markdown(result)
+                await client.create_thread(
+                    project=req.project,
+                    repo=req.repo,
+                    pr_id=req.pr_id,
+                    content=summary_md,
+                )
+                threads_created += 1
+            except Exception as exc:
+                logger.warning("[AzureDevOps] Failed to post summary: %s", exc)
+
+            # Step 5: Set vote
+            vote_value = recommendation_to_vote(result.merge_recommendation)
+            try:
+                await client.vote(req.project, req.repo, req.pr_id, vote_value)
+            except Exception as exc:
+                logger.warning("[AzureDevOps] Failed to set vote: %s", exc)
+
+            duration = time.time() - start_time
+            logger.info(
+                "[AzureDevOps] PR #%d review posted: %d threads, vote=%d, %.1fs",
+                req.pr_id,
+                threads_created,
+                vote_value,
+                duration,
+            )
+
+            return AzureDevOpsReviewResponse(
+                status="ok",
+                pr_id=req.pr_id,
+                threads_created=threads_created,
+                findings_count=len(result.findings),
+                merge_recommendation=result.merge_recommendation,
+                vote=vote_value,
+            )
+        finally:
+            # Always clean up the worktree, even if review fails
+            await cleanup_pr_worktree(main_workspace, worktree_path)
 
     except HTTPException:
         raise
