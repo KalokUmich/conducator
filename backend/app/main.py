@@ -24,8 +24,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .ai_provider.resolver import ProviderResolver, set_resolver
 from .config import (
     AppSettings,
-    _find_config_file,
-    _load_yaml,
     get_config,
     load_settings,
 )
@@ -232,8 +230,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Read ngrok config from raw YAML (not modelled in AppSettings).
     # Required for VS Code Remote-WSL: the webview runs in the Windows
     # Electron process and cannot reach WSL's localhost directly.
-    _settings_raw = _load_yaml(_find_config_file("conductor.settings.yaml"))
-    _secrets_raw = _load_yaml(_find_config_file("conductor.secrets.yaml"))
+    from .config import _load_yaml_with_local
+
+    _settings_raw = _load_yaml_with_local("conductor.settings.yaml")
+    _secrets_raw = _load_yaml_with_local("conductor.secrets.yaml")
     ngrok_cfg = _settings_raw.get("ngrok", {})
     ngrok_sec = _secrets_raw.get("ngrok", {})
 
