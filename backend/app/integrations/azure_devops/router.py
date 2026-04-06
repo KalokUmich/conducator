@@ -97,26 +97,13 @@ async def review_pull_request(
             )
 
         try:
-            # Step 2: Generate PR summary and update description (fast, ~5s)
-            await _generate_and_post_summary(
-                client=client,
-                request=request,
-                project=req.project,
-                repo=req.repo,
-                pr_id=req.pr_id,
-                pr_title=pr_data.get("title", ""),
-                source_branch=source_branch,
-                worktree_path=worktree_path,
-                diff_spec=diff_spec,
-            )
-
-            # Step 2.5: Check diff size — skip review for trivial PRs
+            # Step 2: Check diff size first (no LLM call, instant)
             _total_changed = _count_changed_lines(worktree_path, diff_spec)
             _MIN_REVIEW_LINES = 30
 
             if _total_changed < _MIN_REVIEW_LINES:
                 logger.info(
-                    "[AzureDevOps] PR #%d has %d lines — below %d threshold, skipping review (summary only)",
+                    "[AzureDevOps] PR #%d has %d lines — below %d, skipping summary and review",
                     req.pr_id,
                     _total_changed,
                     _MIN_REVIEW_LINES,
@@ -129,6 +116,19 @@ async def review_pull_request(
                     merge_recommendation="approve",
                     vote=0,
                 )
+
+            # Step 3: Generate PR summary (Haiku, ~5s — failure won't block review)
+            await _generate_and_post_summary(
+                client=client,
+                request=request,
+                project=req.project,
+                repo=req.repo,
+                pr_id=req.pr_id,
+                pr_title=pr_data.get("title", ""),
+                source_branch=source_branch,
+                worktree_path=worktree_path,
+                diff_spec=diff_spec,
+            )
 
             # Step 3: Full review via PRBrainOrchestrator
             orchestrator = pr_brain_factory(worktree_path, diff_spec)
