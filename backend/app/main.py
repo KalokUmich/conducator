@@ -243,6 +243,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             port=settings.server.port,
             authtoken=ngrok_sec.get("authtoken", ""),
             region=ngrok_cfg.get("region", "us"),
+            domain=ngrok_cfg.get("domain"),
         )
         if ngrok_url:
             logger.info("Ngrok tunnel active: %s", ngrok_url)

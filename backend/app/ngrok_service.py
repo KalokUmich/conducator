@@ -28,7 +28,7 @@ _tunnel = None
 logger = logging.getLogger(__name__)
 
 
-def start_ngrok(port: int = 8000, authtoken: Optional[str] = None, region: str = "us") -> Optional[str]:
+def start_ngrok(port: int = 8000, authtoken: Optional[str] = None, region: str = "us", domain: Optional[str] = None) -> Optional[str]:
     """Start ngrok tunnel and return the public URL.
 
     Uses pyngrok library which handles ngrok binary download automatically.
@@ -55,7 +55,11 @@ def start_ngrok(port: int = 8000, authtoken: Optional[str] = None, region: str =
 
         # Start tunnel
         logger.info(f"Starting ngrok tunnel on port {port}...")
-        _tunnel = ngrok.connect(port, "http")
+        connect_kwargs: dict = {"addr": port, "proto": "http"}
+        if domain:
+            connect_kwargs["hostname"] = domain
+            logger.info(f"Using custom ngrok domain: {domain}")
+        _tunnel = ngrok.connect(**connect_kwargs)
         _public_url = _tunnel.public_url
 
         # Convert http to https if needed
