@@ -114,11 +114,13 @@ summary:
 # =============================================================================
 # AI Provider Settings
 # =============================================================================
+# Enable/disable providers here; credentials go in conductor.secrets.yaml
+# Override in .local.yaml to enable providers for your environment
 ai_provider_settings:
-  anthropic_enabled: true
-  aws_bedrock_enabled: true
+  anthropic_enabled: false
+  aws_bedrock_enabled: false
   openai_enabled: false
-  alibaba_enabled: true
+  alibaba_enabled: false
   moonshot_enabled: false
 
 # =============================================================================
