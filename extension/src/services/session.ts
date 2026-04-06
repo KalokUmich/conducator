@@ -215,9 +215,21 @@ export class SessionService {
                 const data = await resp.json() as { public_url?: string };
                 const url = (data.public_url ?? '').trim();
                 if (url) {
-                    this._ngrokUrl = url;
-                    console.log('[Session] Using backend-configured public_url:', url);
-                    return url;
+                    // Verify the public URL is actually reachable before using it
+                    try {
+                        const probe = await fetch(`${url}/health`, {
+                            method: 'GET',
+                            signal: AbortSignal.timeout(5000),
+                        });
+                        if (probe.ok) {
+                            this._ngrokUrl = url;
+                            console.log('[Session] Using backend-configured public_url:', url);
+                            return url;
+                        }
+                        console.log('[Session] public_url configured but not reachable:', url);
+                    } catch {
+                        console.log('[Session] public_url probe failed (tunnel offline?):', url);
+                    }
                 }
             }
         } catch {
