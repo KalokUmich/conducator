@@ -19,6 +19,7 @@ limits:
 # Review agents dispatched in parallel (risk-gated)
 review_agents:
   - correctness
+  - correctness_b
   - concurrency
   - security
   - reliability
@@ -30,6 +31,7 @@ arbitrator: pr_arbitrator
 # Budget weights per agent (relative complexity)
 budget_weights:
   correctness: 1.00
+  correctness_b: 0.80
   concurrency: 0.85
   security: 0.75
   reliability: 0.70
@@ -37,7 +39,7 @@ budget_weights:
 
 # Deterministic post-processing settings
 post_processing:
-  min_confidence: 0.75
+  min_confidence: 0.80
   max_findings: 10
   max_findings_per_agent: 3         # Per-agent cap before merge (reduces false positives)
 

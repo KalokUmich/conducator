@@ -325,16 +325,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         app.state.azure_devops_workspace = ado_workspace
 
-        # Initialize CodeReviewService for Azure DevOps PR reviews
+        # Initialize PRBrainOrchestrator factory for Azure DevOps PR reviews
         if agent_provider and ado_workspace:
-            from .code_review.service import CodeReviewService
+            from .agent_loop.pr_brain import PRBrainOrchestrator
+            from .code_tools.executor import LocalToolExecutor
+            from .workflow.loader import load_agent_registry, load_pr_brain_config
 
-            app.state.code_review_service = CodeReviewService(
-                provider=agent_provider,
-                explorer_provider=explorer_provider,
-                trace_writer=trace_writer,
-            )
-            logger.info("Azure DevOps code review service: ready")
+            _pr_brain_config = load_pr_brain_config()
+            _agent_registry = load_agent_registry()
+
+            def _make_pr_brain(workspace: str, diff_spec: str) -> PRBrainOrchestrator:
+                return PRBrainOrchestrator(
+                    provider=agent_provider,
+                    explorer_provider=explorer_provider or agent_provider,
+                    workspace_path=workspace,
+                    diff_spec=diff_spec,
+                    pr_brain_config=_pr_brain_config,
+                    agent_registry=_agent_registry,
+                    tool_executor=LocalToolExecutor(workspace),
+                    trace_writer=trace_writer,
+                )
+
+            app.state.pr_brain_factory = _make_pr_brain
+            logger.info("Azure DevOps PR Brain: ready")
 
         logger.info(
             "Azure DevOps integration: enabled (org=%s, workspace=%s)",

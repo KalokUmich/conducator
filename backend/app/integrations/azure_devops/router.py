@@ -85,12 +85,12 @@ async def review_pull_request(
             else:
                 logger.warning("[AzureDevOps] Workspace preparation failed — review may be incomplete")
 
-        # Step 2: Run code review via CodeReviewService
-        review_service = getattr(request.app.state, "code_review_service", None)
-        if not review_service:
+        # Step 2: Run code review via PRBrainOrchestrator
+        pr_brain_factory = getattr(request.app.state, "pr_brain_factory", None)
+        if not pr_brain_factory:
             raise HTTPException(
                 status_code=503,
-                detail="Code review service not initialized.",
+                detail="PR Brain not initialized.",
             )
 
         workspace_path = getattr(request.app.state, "azure_devops_workspace", None)
@@ -101,10 +101,61 @@ async def review_pull_request(
                 "Clone the repo and set azure_devops.workspace_path in settings.",
             )
 
-        result = await review_service.review(
-            workspace_path=workspace_path,
+        orchestrator = pr_brain_factory(workspace_path, diff_spec)
+
+        # Collect results from the streaming pipeline
+        from app.code_review.models import (
+            FindingCategory,
+            ReviewFinding,
+            ReviewResult,
+            Severity,
+        )
+
+        findings = []
+        synthesis = ""
+        merge_rec = ""
+        files_reviewed = []
+        total_tokens = 0
+        total_iterations = 0
+        duration_ms = 0.0
+
+        async for event in orchestrator.run_stream():
+            if event.kind == "done":
+                data = event.data
+                synthesis = data.get("answer", "")
+                merge_rec = data.get("merge_recommendation", "")
+                files_reviewed = data.get("files_reviewed", [])
+                total_iterations = data.get("total_iterations", 0)
+                duration_ms = data.get("duration_ms", 0.0)
+                for fd in data.get("findings", []):
+                    try:
+                        findings.append(
+                            ReviewFinding(
+                                title=fd.get("title", ""),
+                                category=FindingCategory(fd.get("category", "correctness")),
+                                severity=Severity(fd.get("severity", "warning")),
+                                confidence=fd.get("confidence", 0.7),
+                                file=fd.get("file", ""),
+                                start_line=fd.get("start_line", 0),
+                                end_line=fd.get("end_line", 0),
+                                evidence=fd.get("evidence", []),
+                                risk=fd.get("risk", ""),
+                                suggested_fix=fd.get("suggested_fix", ""),
+                                agent=fd.get("agent", ""),
+                            )
+                        )
+                    except Exception:
+                        continue
+
+        result = ReviewResult(
             diff_spec=diff_spec,
-            max_agents=req.max_agents,
+            findings=findings,
+            files_reviewed=files_reviewed,
+            merge_recommendation=merge_rec,
+            synthesis=synthesis,
+            total_tokens=total_tokens,
+            total_iterations=total_iterations,
+            total_duration_ms=duration_ms,
         )
 
         logger.info(

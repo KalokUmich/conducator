@@ -318,6 +318,20 @@ class PRBrainOrchestrator:
         )
 
         # ------------------------------------------------------------------
+        # Phase 3b: Verification — agent with tool access refutes findings
+        # Like Claude Code's bughunter "verifying" phase
+        # ------------------------------------------------------------------
+
+        if findings:
+            findings = await self._verify_findings(findings)
+            yield WorkflowEvent(
+                "verification_complete",
+                {
+                    "findings_survived": len(findings),
+                },
+            )
+
+        # ------------------------------------------------------------------
         # Phase 4: Arbitration agent
         # ------------------------------------------------------------------
 
@@ -620,6 +634,16 @@ risk: {risk_summary}
 {diffs_section}
 </diffs>
 {impact_section}
+## Diff interpretation — understand intent before flagging
+When reviewing diffs, distinguish these categories:
+- **New code** (entirely new file or new method): Look for bugs in the new logic.
+- **Changed code** (old line replaced by new line): Understand WHY it changed.
+  Use git_show to see the BEFORE version. If the change is intentional (e.g.,
+  POST→GET, gRPC→REST migration, renamed method), do NOT flag the new pattern
+  as a defect unless it is provably broken.
+- **Moved/refactored code**: If logic is preserved but restructured, do NOT flag
+  pre-existing patterns as new issues introduced by this PR.
+
 ## Instructions
 1. Analyze the diffs above for issues in your focus area.
 2. Use **read_file** with line ranges for broader context around changes.
@@ -729,6 +753,123 @@ risk: {risk_summary}
             ranked = ranked[:max_findings]
 
         return ranked
+
+    # ------------------------------------------------------------------
+    # Phase 3b: Verification — tool-enabled agent reads code to confirm/refute
+    # ------------------------------------------------------------------
+
+    _VERIFY_PROMPT = """\
+You are a **code verification agent**. Your job is to DISPROVE the finding below.
+Try your hardest to find counter-evidence that makes this finding invalid.
+
+## The finding to verify
+- **Title**: {title}
+- **Severity**: {severity}
+- **File**: {file}:{start_line}
+- **Risk**: {risk}
+- **Evidence claimed**:
+{evidence}
+
+## Your task
+1. Read the actual code at the reported location using read_file.
+2. Check for context that would invalidate the finding:
+   - Is there a null check, try-catch, or guard clause nearby?
+   - Is this an intentional design change visible in the diff?
+   - Is the concern already handled by a framework, annotation, or parent caller?
+   - Does the caller validate inputs before reaching this code?
+3. Render your verdict as JSON:
+
+```json
+{{"verdict": "confirmed"|"refuted"|"weakened", "confidence": 0.0-1.0, "reason": "..."}}
+```
+
+- **confirmed**: The finding is real and code-provable. State what you verified.
+- **refuted**: You found concrete counter-evidence. Cite file:line.
+- **weakened**: The finding has some merit but is overstated. Explain why.
+
+Be thorough but fast — you have limited iterations."""
+
+    async def _verify_findings(
+        self,
+        findings: List[ReviewFinding],
+    ) -> List[ReviewFinding]:
+        """Run verification agent on each finding in parallel.
+
+        Refuted findings are dropped. Weakened findings get confidence reduced.
+        Confirmed findings get a small confidence boost.
+        """
+        from .budget import BudgetConfig
+        from .service import AgentLoopService
+
+        llm_semaphore = asyncio.Semaphore(2)
+
+        async def verify_one(finding: ReviewFinding) -> tuple:
+            evidence_lines = "\n".join(f"  - {e}" for e in finding.evidence[:5])
+            query = self._VERIFY_PROMPT.format(
+                title=finding.title,
+                severity=finding.severity.value,
+                file=finding.file,
+                start_line=finding.start_line,
+                risk=finding.risk,
+                evidence=evidence_lines,
+            )
+
+            budget = BudgetConfig(max_input_tokens=250_000, max_iterations=12)
+            agent = AgentLoopService(
+                provider=self._explorer_provider,
+                max_iterations=12,
+                budget_config=budget,
+                trace_writer=self._trace_writer,
+                _is_sub_agent=True,
+                llm_semaphore=llm_semaphore,
+            )
+
+            try:
+                result = await agent.run(query=query, workspace_path=self._workspace_path)
+                answer = result.answer or ""
+
+                verdict = "confirmed"
+                confidence = finding.confidence
+                reason = ""
+
+                json_match = re.search(r'\{[^}]*"verdict"[^}]*\}', answer, re.DOTALL)
+                if json_match:
+                    try:
+                        vdata = json.loads(json_match.group())
+                        verdict = vdata.get("verdict", "confirmed")
+                        confidence = float(vdata.get("confidence", finding.confidence))
+                        reason = vdata.get("reason", "")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
+                return finding, verdict, confidence, reason
+            except Exception as exc:
+                logger.warning("Verification failed for '%s': %s", finding.title, exc)
+                return finding, "confirmed", finding.confidence, ""
+
+        results = await asyncio.gather(*[verify_one(f) for f in findings])
+
+        verified = []
+        for finding, verdict, confidence, reason in results:
+            if verdict == "refuted":
+                logger.info("Verification: REFUTED '%s' — %s", finding.title, reason)
+                continue
+            elif verdict == "weakened":
+                finding.confidence = min(finding.confidence, confidence)
+                finding.reasoning = (finding.reasoning or "") + f"\n[verifier: weakened — {reason}]"
+                logger.info(
+                    "Verification: WEAKENED '%s' (confidence → %.2f) — %s",
+                    finding.title,
+                    finding.confidence,
+                    reason,
+                )
+            else:
+                finding.confidence = min(finding.confidence + 0.05, 1.0)
+                logger.info("Verification: CONFIRMED '%s'", finding.title)
+            verified.append(finding)
+
+        logger.info("Verification complete: %d/%d findings survived", len(verified), len(findings))
+        return verified
 
     # ------------------------------------------------------------------
     # Phase 4: Arbitration (adversarial verification)

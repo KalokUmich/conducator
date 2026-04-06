@@ -85,6 +85,11 @@ FOCUS_DESCRIPTIONS = {
         "resource leaks, missing observability (logging/metrics), "
         "hardcoded config, shutdown behavior, DLQ/retry gaps."
     ),
+    "correctness_b": (
+        "Null safety, error handling, edge cases, and contract violations. "
+        "For each changed method, trace every nullable return value and verify "
+        "the caller handles null. Check exception paths for state consistency."
+    ),
     "test_coverage": (
         "New logic without test coverage, untested failure paths, "
         "tests that don't assert meaningful behavior, missing edge case tests, "
@@ -116,6 +121,12 @@ STRATEGY_HINTS = {
         "and error path in the changed files. Use get_callers to verify "
         "callers handle errors. Brief checks across many paths > deep dive on one."
     ),
+    "correctness_b": (
+        "Defensive review: for each changed method, trace every nullable "
+        "return value and verify the caller handles null. Check exception "
+        "paths — does every catch block leave the system consistent? "
+        "Use get_dependents to find callers that may break."
+    ),
     "test_coverage": (
         "Breadth-first: for each changed file, use find_tests to locate "
         "existing tests. Use test_outline on found test files to assess "
@@ -127,6 +138,7 @@ STRATEGY_HINTS = {
 # Agent category mapping (agent name → FindingCategory)
 AGENT_CATEGORIES = {
     "correctness": FindingCategory.CORRECTNESS,
+    "correctness_b": FindingCategory.CORRECTNESS,
     "concurrency": FindingCategory.CONCURRENCY,
     "security": FindingCategory.SECURITY,
     "reliability": FindingCategory.RELIABILITY,
