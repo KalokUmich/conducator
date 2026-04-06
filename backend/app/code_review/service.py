@@ -135,10 +135,10 @@ async def _verify_single_finding(
         evidence=evidence_lines,
     )
 
-    budget = BudgetConfig(max_input_tokens=150_000, max_iterations=8)
+    budget = BudgetConfig(max_input_tokens=250_000, max_iterations=12)
     agent = AgentLoopService(
         provider=provider,
-        max_iterations=8,
+        max_iterations=12,
         budget_config=budget,
         trace_writer=trace_writer,
         _is_sub_agent=True,
