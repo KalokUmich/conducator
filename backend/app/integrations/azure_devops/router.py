@@ -63,13 +63,10 @@ async def review_pull_request(
             req.repo,
         )
 
-        source_branch = req.source_branch
-        target_branch = req.target_branch
-
-        if not source_branch or not target_branch:
-            pr_data = await client.get_pull_request(req.project, req.repo, req.pr_id)
-            source_branch = source_branch or pr_data.get("sourceRefName", "").replace("refs/heads/", "")
-            target_branch = target_branch or pr_data.get("targetRefName", "").replace("refs/heads/", "")
+        # Always fetch PR metadata (need title + existing description for summary)
+        pr_data = await client.get_pull_request(req.project, req.repo, req.pr_id)
+        source_branch = req.source_branch or pr_data.get("sourceRefName", "").replace("refs/heads/", "")
+        target_branch = req.target_branch or pr_data.get("targetRefName", "").replace("refs/heads/", "")
 
         # Worktree uses detached HEAD at origin/source — both refs use origin/
         diff_spec = f"origin/{target_branch}...origin/{source_branch}"
@@ -100,6 +97,20 @@ async def review_pull_request(
             )
 
         try:
+            # Step 2: Generate PR summary and update description (fast, ~5s)
+            await _generate_and_post_summary(
+                client=client,
+                request=request,
+                project=req.project,
+                repo=req.repo,
+                pr_id=req.pr_id,
+                pr_title=pr_data.get("title", "") if not req.source_branch else "",
+                source_branch=source_branch,
+                worktree_path=worktree_path,
+                diff_spec=diff_spec,
+            )
+
+            # Step 3: Full review via PRBrainOrchestrator
             orchestrator = pr_brain_factory(worktree_path, diff_spec)
 
             # Collect results from the streaming pipeline
@@ -237,6 +248,75 @@ async def review_pull_request(
             pr_id=req.pr_id,
             error=str(exc),
         )
+
+
+async def _generate_and_post_summary(
+    client: AzureDevOpsClient,
+    request: Request,
+    project: str,
+    repo: str,
+    pr_id: int,
+    pr_title: str,
+    source_branch: str,
+    worktree_path: str,
+    diff_spec: str,
+) -> None:
+    """Generate AI summary and append to PR description.
+
+    Uses the explorer provider (Haiku) for speed — summary is ready in ~5s,
+    well before the full review finishes.
+    """
+    import subprocess
+
+    from .summarizer import build_description_with_summary, generate_pr_summary
+
+    explorer = getattr(request.app.state, "explorer_provider", None)
+    if not explorer:
+        logger.info("[AzureDevOps] No explorer provider — skipping PR summary")
+        return
+
+    # Get diff text from the worktree
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--stat"] + diff_spec.split() + ["--"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        diff_stat = result.stdout
+
+        result = subprocess.run(
+            ["git", "diff", "--unified=3"] + diff_spec.split() + ["--"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        diff_text = result.stdout
+    except Exception as exc:
+        logger.warning("[AzureDevOps] Failed to get diff for summary: %s", exc)
+        return
+
+    summary = await generate_pr_summary(
+        provider=explorer,
+        diff_text=f"{diff_stat}\n\n{diff_text}",
+        pr_title=pr_title,
+        source_branch=source_branch,
+    )
+
+    if not summary:
+        return
+
+    # Get existing description and append summary
+    try:
+        pr_data = await client.get_pull_request(project, repo, pr_id)
+        existing_desc = pr_data.get("description", "") or ""
+        new_desc = build_description_with_summary(existing_desc, summary)
+        await client.update_pr_description(project, repo, pr_id, new_desc)
+        logger.info("[AzureDevOps] PR #%d description updated with AI summary", pr_id)
+    except Exception as exc:
+        logger.warning("[AzureDevOps] Failed to update PR description: %s", exc)
 
 
 @router.get("/status")

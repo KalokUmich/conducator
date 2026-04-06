@@ -197,3 +197,25 @@ class AzureDevOpsClient:
             resp.raise_for_status()
 
         return f"{target_branch}...{source_branch}"
+
+    async def update_pr_description(
+        self,
+        project: str,
+        repo: str,
+        pr_id: int,
+        description: str,
+    ) -> Dict[str, Any]:
+        """Update a PR's description (body text).
+
+        Preserves existing content by appending after a separator.
+        """
+        url = self._url(project, f"git/repositories/{repo}/pullRequests/{pr_id}")
+        async with httpx.AsyncClient() as client:
+            resp = await client.patch(
+                url,
+                auth=self._auth,
+                json={"description": description},
+                params={"api-version": self._api_version},
+            )
+            resp.raise_for_status()
+            return resp.json()
