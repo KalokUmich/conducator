@@ -95,6 +95,8 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
+    "postinstall": "bash scripts/download-grammars.sh",
+    "download-grammars": "bash scripts/download-grammars.sh",
     "compile": "npm run compile:ts && npm run compile:webview && npm run compile:css",
     "compile:ts": "npx tsc -p ./",
     "compile:webview": "node webview-ui/esbuild.mjs --production",

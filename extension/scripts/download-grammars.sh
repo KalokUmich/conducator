@@ -19,12 +19,46 @@ EXTENSION_DIR="$(dirname "$SCRIPT_DIR")"
 GRAMMARS_DIR="$EXTENSION_DIR/grammars"
 USE_LATEST=false
 
+# The grammar tags pinned below are known to produce wasms with an ABI
+# compatible with this exact web-tree-sitter version. If package.json drifts,
+# we abort instead of silently downloading mismatched grammars.
+EXPECTED_WTS_VERSION="0.26.7"
+
 # Parse flags
 for arg in "$@"; do
     case "$arg" in
         --latest) USE_LATEST=true ;;
     esac
 done
+
+# ---- Sanity check: web-tree-sitter version match --------------------------
+# Skipped under --latest, where the developer is intentionally re-pinning.
+if [[ "$USE_LATEST" == false ]]; then
+    if command -v node &>/dev/null; then
+        ACTUAL_WTS_RAW=$(node -p "require('$EXTENSION_DIR/package.json').dependencies['web-tree-sitter']" 2>/dev/null || echo "")
+        ACTUAL_WTS_VERSION="${ACTUAL_WTS_RAW#[\^~]}"
+        if [[ -n "$ACTUAL_WTS_VERSION" && "$ACTUAL_WTS_VERSION" != "$EXPECTED_WTS_VERSION" ]]; then
+            echo "[error] web-tree-sitter version mismatch:" >&2
+            echo "        package.json:           $ACTUAL_WTS_VERSION" >&2
+            echo "        download-grammars.sh:   $EXPECTED_WTS_VERSION" >&2
+            echo "" >&2
+            echo "        The grammar tags hardcoded in this script were tested" >&2
+            echo "        against web-tree-sitter $EXPECTED_WTS_VERSION. Loading" >&2
+            echo "        them under a different version risks silent ABI" >&2
+            echo "        mismatch and degraded code analysis." >&2
+            echo "" >&2
+            echo "        If you intentionally upgraded web-tree-sitter:" >&2
+            echo "          1. Update LANGUAGES tags below to ABI-compatible versions" >&2
+            echo "          2. Run: bash scripts/download-grammars.sh --latest" >&2
+            echo "          3. Regenerate grammars/grammars.sha256:" >&2
+            echo "             (cd grammars && sha256sum tree-sitter-*.wasm > grammars.sha256)" >&2
+            echo "          4. Update EXPECTED_WTS_VERSION at the top of this script" >&2
+            exit 1
+        fi
+    else
+        echo "[warn] node not found -- skipping web-tree-sitter version check" >&2
+    fi
+fi
 
 mkdir -p "$GRAMMARS_DIR"
 
@@ -128,11 +162,39 @@ done
 
 echo ""
 if [[ "$FAILED" -gt 0 ]]; then
-    echo "Warning: $FAILED grammar(s) failed to download."
-    echo "The tree-sitter service will fall back to regex extraction for missing languages."
-    # Don't exit with error -- partial grammars are still useful
-else
-    echo "All grammars downloaded successfully."
+    echo "[error] $FAILED grammar(s) failed to download." >&2
+    echo "        Refusing to proceed -- partial grammars cause silent regex" >&2
+    echo "        fallback at runtime, which is hard to diagnose later." >&2
+    exit 1
+fi
+echo "All grammars downloaded successfully."
+
+# ---- Verify SHA256 against pinned manifest --------------------------------
+# Skipped under --latest (you're intentionally fetching new bytes; you must
+# regenerate grammars/grammars.sha256 yourself afterwards).
+CHECKSUM_FILE="$GRAMMARS_DIR/grammars.sha256"
+if [[ "$USE_LATEST" == false ]] && [[ -f "$CHECKSUM_FILE" ]]; then
+    echo ""
+    echo "Verifying SHA256 checksums against grammars.sha256..."
+    if ! (cd "$GRAMMARS_DIR" && sha256sum -c grammars.sha256 --quiet); then
+        echo "" >&2
+        echo "[error] SHA256 verification failed." >&2
+        echo "        Downloaded grammars do not match the pinned manifest." >&2
+        echo "        Possible causes:" >&2
+        echo "          - GitHub re-tagged a release (rare)" >&2
+        echo "          - Download corruption / network MITM" >&2
+        echo "          - LANGUAGES tags drifted from grammars.sha256" >&2
+        echo "" >&2
+        echo "        To regenerate the manifest after an intentional update:" >&2
+        echo "          (cd grammars && sha256sum tree-sitter-*.wasm > grammars.sha256)" >&2
+        exit 1
+    fi
+    echo "[ok] All grammar checksums match."
+elif [[ "$USE_LATEST" == true ]]; then
+    echo ""
+    echo "[note] --latest used: skipping SHA256 verification."
+    echo "       Remember to regenerate grammars/grammars.sha256 if these wasms"
+    echo "       become the new pinned versions."
 fi
 
 # Also ensure the tree-sitter runtime .wasm file is available.
