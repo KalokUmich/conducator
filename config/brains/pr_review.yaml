@@ -41,7 +41,7 @@ budget_weights:
 post_processing:
   min_confidence: 0.80
   max_findings: 10
-  max_findings_per_agent: 3         # Per-agent cap before merge (reduces false positives)
+  max_findings_per_agent: 5         # Per-agent cap before merge (dedup + ranking does final filtering)
 
 # Synthesis LLM call settings
 synthesis:

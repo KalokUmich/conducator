@@ -7,7 +7,7 @@ skill: code_review_pr
 tools: [git_diff, git_show, git_log, find_references, get_callers, get_dependencies, get_dependents]
 limits:
   max_iterations: 16
-  budget_tokens: 250000
+  budget_tokens: 320000
   evidence_retries: 1
 quality:
   evidence_check: true
