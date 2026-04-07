@@ -94,6 +94,17 @@ ensure-backend-deps: venv
 		echo "Backend dependencies ready"; \
 	fi
 
+## Ensure extension dependencies are installed and in sync with the lockfile.
+## Triggers `npm install` (which fires the postinstall hook → grammar download
+## + SHA verification) when node_modules is missing or package-lock.json is
+## newer than node_modules. No-op on a normal incremental build.
+ensure-extension-deps:
+	@if [ ! -d extension/node_modules ] || [ extension/package-lock.json -nt extension/node_modules ]; then \
+		echo "Extension dependencies missing or stale -- running npm install..."; \
+		cd extension && npm install; \
+		echo "Extension dependencies ready"; \
+	fi
+
 ## Install all dependencies (alias for setup)
 install: setup
 
@@ -135,12 +146,12 @@ test-backend: ensure-backend-deps
 	cd backend && $(PYTHON) -m pytest tests/ -v
 
 ## Run extension service tests (node:test — FSM, controllers, services)
-test-extension:
+test-extension: ensure-extension-deps
 	@echo "Running extension service tests..."
 	cd extension && npm test
 
 ## Run React WebView tests (vitest — components, reducers, pure logic)
-test-webview:
+test-webview: ensure-extension-deps
 	@echo "Running WebView tests..."
 	cd extension && npm run test:webview
 
@@ -154,7 +165,7 @@ integration-test: ensure-backend-deps
 	cd backend && $(PYTHON) -m pytest tests/ -v -s -m integration
 
 ## Validate Python↔TS tool parity (shared contract + cross-language tests)
-test-parity: ensure-backend-deps
+test-parity: ensure-backend-deps ensure-extension-deps
 	@echo "Step 1: Check contract matches Python schemas..."
 	cd backend && $(PYTHON) ../scripts/generate_tool_contracts.py --check
 	@echo "Step 2: Compile extension & validate TS + subprocess tools against contract..."
@@ -174,22 +185,22 @@ compile: compile-all
 	@echo "Extension compiled!"
 
 ## Compile all (TS + WebView + CSS via npm run compile)
-compile-all:
+compile-all: ensure-extension-deps
 	@echo "Compiling extension (TS + React WebView + CSS)..."
 	cd extension && npm run compile
 
 ## Compile TypeScript only
-compile-ts:
+compile-ts: ensure-extension-deps
 	@echo "Compiling TypeScript..."
 	cd extension && npm run compile:ts
 
 ## Compile React WebView only
-compile-webview:
+compile-webview: ensure-extension-deps
 	@echo "Building React WebView..."
 	cd extension && npm run compile:webview
 
 ## Compile Tailwind CSS only
-compile-css:
+compile-css: ensure-extension-deps
 	@echo "Building Tailwind CSS..."
 	cd extension && npm run build:css
 

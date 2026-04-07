@@ -131,22 +131,28 @@ def _walk_for_definitions(node, source: bytes, file_path: str, symbols: FileSymb
     """Recursively walk tree-sitter AST to find definitions."""
     # Python: function_definition, class_definition
     # JS/TS: function_declaration, class_declaration, method_definition
-    # Go: function_declaration, method_declaration
+    # Go: function_declaration, method_declaration, type_spec (struct/interface)
     # Rust: function_item, impl_item, struct_item
-    # Java: method_declaration, class_declaration
+    # Java: method_declaration, class_declaration, constructor_declaration
+    # C/C++: function_definition (name nested in declarator chain),
+    #        class_specifier, struct_specifier
 
     DEF_NODE_TYPES = {
-        "function_definition",  # Python
+        "function_definition",  # Python / C / C++
         "class_definition",  # Python
         "function_declaration",  # JS/TS/Go
         "class_declaration",  # JS/TS/Java
         "method_definition",  # JS/TS
         "method_declaration",  # Java/Go
+        "constructor_declaration",  # Java
         "function_item",  # Rust
         "struct_item",  # Rust
         "impl_item",  # Rust
         "interface_declaration",  # TS/Java
         "type_alias_declaration",  # TS
+        "class_specifier",  # C++
+        "struct_specifier",  # C/C++
+        "type_spec",  # Go (struct / interface / type alias)
     }
 
     KIND_MAP = {
@@ -155,29 +161,23 @@ def _walk_for_definitions(node, source: bytes, file_path: str, symbols: FileSymb
         "function_item": "function",
         "class_definition": "class",
         "class_declaration": "class",
+        "class_specifier": "class",
+        "struct_specifier": "class",
         "struct_item": "class",
         "impl_item": "class",
         "interface_declaration": "interface",
         "method_definition": "method",
         "method_declaration": "method",
+        "constructor_declaration": "method",
         "type_alias_declaration": "type",
     }
 
     if node.type in DEF_NODE_TYPES:
-        # Find the name child — prefer the tree-sitter "name" field over
-        # positional search.  This is critical for Java where the return type
-        # (type_identifier) comes *before* the method name (identifier) in
-        # method_declaration nodes; a naive first-match picks the return type.
-        name_node = node.child_by_field_name("name")
-        if name_node is None:
-            for child in node.children:
-                if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
-                    name_node = child
-                    break
+        name_node = _resolve_def_name(node)
 
         if name_node is not None:
             name = source[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
-            kind = KIND_MAP.get(node.type, "symbol")
+            kind = KIND_MAP.get(node.type) or _kind_from_type_spec(node)
 
             # Build a one-line signature
             first_line = source[node.start_byte :].split(b"\n")[0]
@@ -199,6 +199,71 @@ def _walk_for_definitions(node, source: bytes, file_path: str, symbols: FileSymb
 
     for child in node.children:
         _walk_for_definitions(child, source, file_path, symbols)
+
+
+def _resolve_def_name(node):
+    """Find the identifier node that names this definition.
+
+    Handles three tricky cases the simple "first identifier-like child" loop
+    gets wrong:
+
+    1. C/C++ function_definition: the name is buried inside a declarator chain
+       like ``function_definition → declarator (function_declarator)
+       → declarator (identifier|field_identifier)``. A naive search either
+       finds nothing (when the function has a primitive return type) or grabs
+       a `type_identifier` (e.g. picks ``T`` instead of ``identity`` for a
+       template function).
+    2. C++ class_specifier / struct_specifier: name is a `type_identifier`
+       child, not under a "name" field.
+    3. Go type_spec: name is a `type_identifier` child.
+    """
+    # Try the explicit "name" field first — works for Python, JS/TS, Java,
+    # Rust, etc. This must come before any structural search so Java methods
+    # don't pick up the return type by mistake.
+    name_node = node.child_by_field_name("name")
+    if name_node is not None:
+        return name_node
+
+    # C/C++ function_definition: walk down the declarator chain.
+    if node.type == "function_definition":
+        decl = node.child_by_field_name("declarator")
+        # Limit the walk to a few levels to avoid pathological cycles.
+        for _ in range(8):
+            if decl is None:
+                break
+            if decl.type in ("identifier", "field_identifier"):
+                return decl
+            decl = decl.child_by_field_name("declarator")
+        # Fall through to the generic search below if the chain didn't yield
+        # an identifier.
+
+    # C++ class/struct specifier and Go type_spec: name is the type_identifier.
+    if node.type in ("class_specifier", "struct_specifier", "type_spec"):
+        for child in node.children:
+            if child.type == "type_identifier":
+                return child
+
+    # Generic fallback: any identifier-like child. Kept last so it never
+    # shadows a more specific resolution above.
+    for child in node.children:
+        if child.type in ("identifier", "name", "property_identifier", "type_identifier"):
+            return child
+
+    return None
+
+
+def _kind_from_type_spec(node) -> str:
+    """For a Go type_spec node, return 'class' for struct, 'interface' for
+    interface, 'type' for any other type alias. Returns 'symbol' for any
+    other node type so callers can chain this after KIND_MAP.get()."""
+    if node.type != "type_spec":
+        return "symbol"
+    for child in node.children:
+        if child.type == "struct_type":
+            return "class"
+        if child.type == "interface_type":
+            return "interface"
+    return "type"
 
 
 def _walk_for_references(node, source: bytes, file_path: str, def_names: Set[str], symbols: FileSymbols) -> None:
