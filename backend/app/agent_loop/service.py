@@ -527,6 +527,7 @@ class AgentLoopService:
 
             # Build next message (tool results + budget guidance)
             next_msg_done = False
+            force_conclude = False
             async for event in self._build_next_message(
                 tool_outputs=tool_outputs,
                 response=response,
@@ -551,6 +552,13 @@ class AgentLoopService:
                     messages.append(event.data["message"])
                 elif event.kind == "_update_total_calls":
                     total_tool_calls = event.data["total_tool_calls"]
+                elif event.kind == "_force_conclude":
+                    # Budget exhausted mid-iteration. Drain the wrap-up call
+                    # to give the model one last chance to emit findings JSON.
+                    total_tool_calls = event.data["total_tool_calls"]
+                    force_conclude = True
+                    force_conclude_reason = event.data["reason"]
+                    break
                 elif event.kind in ("done", "error"):
                     yield event
                     next_msg_done = True
@@ -558,6 +566,23 @@ class AgentLoopService:
                 else:
                     yield event
             if next_msg_done:
+                return
+            if force_conclude:
+                async for ev in self._handle_budget_exhaustion(
+                    messages=messages,
+                    budget=budget,
+                    trace=trace,
+                    thinking_steps=thinking_steps,
+                    total_tool_calls=total_tool_calls,
+                    accumulated_text=accumulated_text,
+                    start=start,
+                    system=system,
+                    active_tools=active_tools,
+                    _sid=_sid,
+                    _LLM_TIMEOUT_SECONDS=_LLM_TIMEOUT_SECONDS,
+                    conclude_reason=force_conclude_reason,
+                ):
+                    yield ev
                 return
 
         # Exhausted all iterations — make one final judge call
@@ -1524,14 +1549,11 @@ class AgentLoopService:
 
         # Budget-driven convergence
         if budget_signal == BudgetSignal.FORCE_CONCLUDE:
-            answer = "\n\n".join(accumulated_text) if accumulated_text else ""
             conclude_reason = (
                 "Max iterations reached"
                 if budget.iteration_count >= budget.config.max_iterations
                 else "Token budget exhausted"
             )
-            # Enrich with collected file refs so the answer is still useful
-            answer = _enrich_answer_with_refs(answer, budget.files_accessed)
             logger.warning(
                 "Budget FORCE_CONCLUDE at iteration %d: %s (input tokens: %s/%s)",
                 iteration + 1,
@@ -1539,30 +1561,40 @@ class AgentLoopService:
                 budget.cumulative_input,
                 budget.config.max_input_tokens,
             )
-            trace.finish(answer=answer, error=conclude_reason, budget_summary=budget.summary())
-            await self._save_trace(trace)
+            # Append the pending tool results FIRST so the conversation has
+            # no orphaned toolUse blocks (Bedrock rejects unmatched tool_use).
+            # Then signal the caller to make the wrap-up LLM call instead of
+            # returning truncated accumulated_text — the wrap-up call gives
+            # the model one final chance to emit its findings JSON.
             yield AgentEvent(
-                kind="done",
+                kind="_append_message",
                 data={
-                    "answer": answer,
-                    "tool_calls_made": total_tool_calls,
-                    "iterations": iteration + 1,
-                    "duration_ms": (time.monotonic() - start) * 1000,
-                    "error": conclude_reason,
-                    "thinking_steps": thinking_steps,
-                    "budget_summary": budget.summary(),
+                    "message": self._tool_results_message_with_note(
+                        tool_results_content,
+                        budget.budget_context,
+                    ),
+                },
+            )
+            yield AgentEvent(
+                kind="_force_conclude",
+                data={
+                    "reason": conclude_reason,
+                    "iteration": iteration + 1,
+                    "total_tool_calls": total_tool_calls,
                 },
             )
             return
 
         if budget_signal == BudgetSignal.WARN_CONVERGE:
             guidance_notes.append(
-                f"⚠ BUDGET WARNING: {budget.budget_context} "
-                f"You MUST start converging NOW. Only verification tool calls "
-                f"are allowed (expand_symbol on already-identified symbols, "
-                f"read_file with specific line ranges). "
-                f"Do NOT start new searches (grep, find_symbol, module_summary). "
-                f"Summarize your findings and provide your answer."
+                f"🛑 BUDGET WARNING: {budget.budget_context} "
+                f"STOP investigating. Your next response MUST be your final "
+                f"answer in the exact output format your system prompt "
+                f"specifies (e.g. findings JSON for code review agents). "
+                f"Do NOT make any more tool calls — not even verification "
+                f"calls. Use what you already have. If you cannot produce "
+                f"your final answer in the next response, the budget "
+                f"controller will terminate this run with an empty result."
             )
 
         # Scatter detection: tighter threshold for high-level queries
@@ -1635,6 +1667,7 @@ class AgentLoopService:
         active_tools: List[Dict[str, Any]],
         _sid: str,
         _LLM_TIMEOUT_SECONDS: int,
+        conclude_reason: Optional[str] = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Make one final LLM call after iterations are exhausted.
 
@@ -1657,11 +1690,16 @@ class AgentLoopService:
                 "content": [
                     {
                         "text": (
-                            "You have used all tool-calling iterations. "
-                            "Provide your final answer now based on everything "
-                            "you have learned so far. Synthesize your findings into a "
-                            "clear, complete explanation. Do not request additional "
-                            "tool calls — give your best answer with what you have."
+                            "BUDGET EXHAUSTED — this is your final response. "
+                            "You cannot make any more tool calls. Output your "
+                            "final answer in the EXACT format your system "
+                            "prompt specifies. If your role is to produce "
+                            "structured findings (e.g. a JSON array of code "
+                            "review findings), output ONLY that JSON — no "
+                            "prose, no thinking, no markdown around it. If "
+                            "you have nothing to report, output an empty "
+                            "array `[]`. Use only what you've already "
+                            "investigated; do not invent evidence."
                         ),
                     }
                 ],
@@ -1698,19 +1736,19 @@ class AgentLoopService:
                 len(answer),
             )
 
-        trace.finish(answer=answer, error=None, budget_summary=budget.summary())
+        trace.finish(answer=answer, error=conclude_reason, budget_summary=budget.summary())
         await self._save_trace(trace)
-        yield AgentEvent(
-            kind="done",
-            data={
-                "answer": answer,
-                "tool_calls_made": total_tool_calls,
-                "iterations": self._max_iterations,
-                "duration_ms": (time.monotonic() - start) * 1000,
-                "thinking_steps": thinking_steps,
-                "budget_summary": budget.summary(),
-            },
-        )
+        done_data: Dict[str, Any] = {
+            "answer": answer,
+            "tool_calls_made": total_tool_calls,
+            "iterations": budget.iteration_count or self._max_iterations,
+            "duration_ms": (time.monotonic() - start) * 1000,
+            "thinking_steps": thinking_steps,
+            "budget_summary": budget.summary(),
+        }
+        if conclude_reason:
+            done_data["error"] = conclude_reason
+        yield AgentEvent(kind="done", data=done_data)
 
     async def _save_trace(self, trace: SessionTrace) -> None:
         """Persist the session trace if a writer is configured."""

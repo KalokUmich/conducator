@@ -23,8 +23,8 @@ class BudgetSignal(Enum):
 @dataclass
 class BudgetConfig:
     max_input_tokens: int = 1_000_000  # Total input token budget per session
-    warning_threshold: float = 0.7  # 70% — inject warning into prompt
-    critical_threshold: float = 0.9  # 90% — force conclusion
+    warning_threshold: float = 0.6  # 60% — inject warning into prompt (gives ~30% buffer to converge before FORCE_CONCLUDE)
+    critical_threshold: float = 0.9  # 90% — force conclusion (reserves ~10% headroom for the wrap-up LLM call)
     max_iterations: int = 50  # Hard iteration cap
     diminishing_returns_window: int = 3  # N iterations with no new info
 
