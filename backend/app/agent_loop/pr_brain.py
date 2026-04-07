@@ -376,21 +376,29 @@ class PRBrainOrchestrator:
             duration_ms,
         )
 
-        # Collect token usage from agent results
+        # Collect token usage AND files actually opened by review agents.
+        # files_reviewed is the union of (a) files changed in the PR diff and
+        # (b) every file any dispatched review agent opened via read_file /
+        # file_outline / compressed_view. Required by the eval scorer's
+        # context_depth metric so cross-file investigation gets credit.
         total_tokens = 0
         total_iterations = 0
+        files_reviewed_set: set[str] = {f.path for f in pr_context.files}
         for result in agent_results:
             if result.success and isinstance(result.data, dict):
                 total_iterations += result.data.get("iterations", 0)
                 total_tokens += result.data.get("total_input_tokens", 0)
                 total_tokens += result.data.get("total_output_tokens", 0)
+                for fp in result.data.get("files_accessed", []):
+                    if fp:
+                        files_reviewed_set.add(fp)
 
         yield WorkflowEvent(
             "done",
             {
                 "answer": synthesis or pr_summary,
                 "findings": [_finding_to_dict(f) for f in findings],
-                "files_reviewed": [f.path for f in pr_context.files],
+                "files_reviewed": sorted(files_reviewed_set),
                 "merge_recommendation": merge_rec,
                 "duration_ms": duration_ms,
                 "total_iterations": total_iterations,

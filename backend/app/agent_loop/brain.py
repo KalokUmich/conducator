@@ -86,8 +86,14 @@ def condense_result(result) -> Dict[str, Any]:
 
     # Build tools summary from thinking steps
     tools_summary = []
-    files_accessed = set()
+    files_accessed: set[str] = set()
     gaps = []
+
+    # Prefer the agent's authoritative read set (from BudgetController) — that's
+    # every file the agent opened via read_file/file_outline/compressed_view.
+    # Falls back to chunk-derived paths for older AgentResult instances.
+    if hasattr(result, "files_accessed") and result.files_accessed:
+        files_accessed.update(result.files_accessed)
 
     if hasattr(result, "thinking_steps"):
         for step in result.thinking_steps:
@@ -105,7 +111,7 @@ def condense_result(result) -> Dict[str, Any]:
                 short = summary[:_SUMMARY_TRUNCATE_LEN] + "..." if len(summary) > _SUMMARY_TRUNCATE_LEN else summary
                 tools_summary.append(f"{tool}: {short}")
 
-    # Extract files from context chunks
+    # Extract files from context chunks (union with budget-tracked set above)
     chunks_data = []
     if hasattr(result, "context_chunks"):
         for chunk in result.context_chunks:

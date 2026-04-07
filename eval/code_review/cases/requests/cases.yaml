@@ -97,17 +97,21 @@ cases:
   - id: requests-006
     patch: patches/006-unsafe-url-scheme.patch
     difficulty: medium
-    title: "No URL scheme validation — arbitrary scheme requests"
+    title: "Silent fallback in get_adapter() — InvalidSchema check removed"
     description: >
-      Removes scheme validation in PreparedRequest.prepare_url(), allowing
-      requests with arbitrary schemes (file://, ftp://, etc.) to be sent.
+      Replaces the `raise InvalidSchema(...)` in Session.get_adapter() with a
+      fallback that returns the last registered adapter for any URL scheme.
+      Requests for unsupported schemes (file://, ftp://, gopher://) are silently
+      routed through whichever adapter happens to be last in the dict instead of
+      surfacing an InvalidSchema error to the caller. Breaks the safety
+      guarantee that unknown schemes fail loudly.
     expected_findings:
-      - title_pattern: "scheme|url|valid|unsafe|missing.*schema"
-        file_pattern: "models\\.py"
-        line_range: [425, 445]
+      - title_pattern: "scheme|adapter|invalid.?schema|fallback|silent"
+        file_pattern: "sessions\\.py"
+        line_range: [785, 800]
         severity: warning
-        category: security
-        recommendation: "Restore URL scheme validation"
+        category: correctness
+        recommendation: "Restore the raise InvalidSchema for unsupported URL schemes in get_adapter"
 
   - id: requests-007
     patch: patches/007-cookie-jar-threading.patch

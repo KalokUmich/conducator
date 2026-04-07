@@ -109,6 +109,11 @@ class AgentResult:
     duration_ms: float = 0.0
     error: Optional[str] = None
     budget_summary: Optional[Dict[str, Any]] = None
+    # Files actually opened by the agent's tool calls (read_file, file_outline,
+    # compressed_view). Populated from budget.files_accessed at done time.
+    # Note: this is the raw read set — broader than context_chunks (which only
+    # captures files whose content was extracted as relevant).
+    files_accessed: List[str] = field(default_factory=list)
 
 
 class AgentLoopService:
@@ -210,6 +215,7 @@ class AgentLoopService:
                 result.iterations = event.data.get("iterations", 0)
                 result.duration_ms = event.data.get("duration_ms", 0.0)
                 result.budget_summary = event.data.get("budget_summary")
+                result.files_accessed = list(event.data.get("files_accessed", []))
                 # Collect thinking steps
                 raw_steps = event.data.get("thinking_steps", [])
                 result.thinking_steps = [
@@ -962,6 +968,7 @@ class AgentLoopService:
                     "iterations": iteration + 1,
                     "duration_ms": duration,
                     "budget_summary": budget.summary(),
+                    "files_accessed": sorted(budget.files_accessed),
                 },
             )
             return
@@ -1050,6 +1057,7 @@ class AgentLoopService:
                 "duration_ms": (time.monotonic() - start) * 1000,
                 "thinking_steps": thinking_steps,
                 "budget_summary": budget.summary(),
+                "files_accessed": sorted(budget.files_accessed),
             },
         )
 
@@ -1745,6 +1753,7 @@ class AgentLoopService:
             "duration_ms": (time.monotonic() - start) * 1000,
             "thinking_steps": thinking_steps,
             "budget_summary": budget.summary(),
+            "files_accessed": sorted(budget.files_accessed),
         }
         if conclude_reason:
             done_data["error"] = conclude_reason
