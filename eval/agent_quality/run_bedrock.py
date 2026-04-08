@@ -13,10 +13,10 @@ Usage:
     # Run a specific baseline
     python ../eval/agent_quality/run_bedrock.py --case abound_render_approval
 
-    # Run with workflow engine (multi-agent)
-    python ../eval/agent_quality/run_bedrock.py --workflow
+    # Run with the Brain orchestrator (multi-agent)
+    python ../eval/agent_quality/run_bedrock.py --brain
 
-    # Compare direct agent vs workflow
+    # Compare direct agent vs Brain
     python ../eval/agent_quality/run_bedrock.py --compare
 """
 from __future__ import annotations
@@ -192,60 +192,13 @@ async def run_brain(provider, workspace: str, question: str, explorer_provider=N
     }
 
 
-async def run_workflow(provider, workspace: str, question: str, explorer_provider=None) -> dict:
-    """Run full workflow engine."""
-    from app.workflow.loader import load_workflow
-    from app.workflow.engine import WorkflowEngine
-    from app.code_tools.executor import LocalToolExecutor
-
-    executor = LocalToolExecutor(workspace_path=workspace)
-    workflow = load_workflow("workflows/code_explorer.yaml")
-    engine = WorkflowEngine(
-        provider=provider,
-        explorer_provider=explorer_provider or provider,
-        tool_executor=executor,
+async def run_workflow(*_args, **_kwargs):
+    """Removed — the legacy workflow engine has been deleted. Use ``--brain`` instead."""
+    raise RuntimeError(
+        "The --workflow mode has been removed. The legacy workflow engine "
+        "(classifier_engine.py + code_explorer.yaml) was deleted. Use --brain "
+        "to run the Brain orchestrator instead."
     )
-
-    wf_context = {
-        "query_text": question,
-        "query": question,
-        "workspace_path": workspace,
-    }
-
-    start = time.time()
-    wf_result = await engine.run(workflow, wf_context)
-    elapsed_ms = (time.time() - start) * 1000
-
-    # Extract answer
-    stage_results = wf_result.get("_stage_results", {})
-    answer = ""
-    total_calls = 0
-
-    synth = stage_results.get("synthesize", {})
-    for _, result in synth.items():
-        if isinstance(result, dict) and result.get("answer"):
-            answer = result["answer"]
-            break
-
-    if not answer:
-        for stage_name in ("explore", "investigate"):
-            for _, result in stage_results.get(stage_name, {}).items():
-                if isinstance(result, dict) and result.get("answer"):
-                    answer = result["answer"]
-                    total_calls += result.get("tool_calls_made", 0)
-
-    for stage_name in ("explore", "investigate"):
-        for _, result in stage_results.get(stage_name, {}).items():
-            if isinstance(result, dict):
-                total_calls += result.get("tool_calls_made", 0)
-
-    return {
-        "answer": answer,
-        "tool_calls": total_calls,
-        "iterations": 0,
-        "duration_ms": elapsed_ms,
-        "error": None,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +245,8 @@ def print_report(case_id: str, mode: str, run_result: dict, scoring: dict):
 async def main():
     parser = argparse.ArgumentParser(description="Agent quality evaluation")
     parser.add_argument("--case", help="Run specific baseline case ID")
-    parser.add_argument("--workflow", action="store_true", help="Use workflow engine")
     parser.add_argument("--brain", action="store_true", help="Use Brain orchestrator")
-    parser.add_argument("--compare", action="store_true", help="Run both direct and workflow")
+    parser.add_argument("--compare", action="store_true", help="Run both direct and Brain")
     parser.add_argument("--haiku", action="store_true", help="Use Haiku as explorer, Sonnet as judge")
     args = parser.parse_args()
 
@@ -321,11 +273,9 @@ async def main():
 
         modes = []
         if args.compare:
-            modes = ["direct", "workflow", "brain"]
+            modes = ["direct", "brain"]
         elif args.brain:
             modes = ["brain"]
-        elif args.workflow:
-            modes = ["workflow"]
         else:
             modes = ["direct"]
 
@@ -335,11 +285,8 @@ async def main():
             if mode == "direct":
                 run_result = await run_direct_agent(provider, workspace, question)
                 label = mode
-            elif mode == "brain":
-                run_result = await run_brain(provider, workspace, question, explorer_provider=explorer_provider)
-                label = f"{mode} [haiku→sonnet]" if args.haiku else mode
             else:
-                run_result = await run_workflow(provider, workspace, question, explorer_provider=explorer_provider)
+                run_result = await run_brain(provider, workspace, question, explorer_provider=explorer_provider)
                 label = f"{mode} [haiku→sonnet]" if args.haiku else mode
 
             scoring = score_answer(run_result["answer"], required)

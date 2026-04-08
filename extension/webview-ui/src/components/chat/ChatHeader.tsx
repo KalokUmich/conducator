@@ -137,14 +137,6 @@ export function ChatHeader({ showUsers, onToggleUsers }: ChatHeaderProps) {
               </button>
             )}
 
-            {/* Workflow */}
-            <button className="icon-btn" onClick={() => send({ command: "showWorkflow" })} title="View Agent Workflows">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-                <circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/>
-                <line x1="7" y1="12" x2="17" y2="6"/><line x1="7" y1="12" x2="17" y2="18"/>
-              </svg>
-            </button>
-
             {/* Rebuild Index — clears cache, next AI query rebuilds lazily */}
             {isHosting && (workspaceReady || isLocalSession) && (
               <button className="icon-btn" onClick={() => setShowRebuildIndex(true)} title="Clear Code Index Cache" disabled={rebuildLoading}>

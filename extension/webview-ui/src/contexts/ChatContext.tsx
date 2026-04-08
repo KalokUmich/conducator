@@ -15,6 +15,7 @@ import type {
 } from "../types/messages";
 import { useCommand, useVSCode } from "./VSCodeContext";
 import { useSession } from "./SessionContext";
+import { QUERY_TYPE } from "../utils/slashCommands";
 
 // ============================================================
 // Chat state — messages, AI thinking, WebSocket
@@ -339,7 +340,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const askAI = useCallback(
     (query: string, codeContext?: Record<string, unknown>) => {
       if (!sessionState.session?.roomId) return;
-      const isPlanMode = /^\[query_type:issue_tracking\]\s*(create|investigate)/i.test(query)
+      const isPlanMode = new RegExp(`^\\[query_type:${QUERY_TYPE.ISSUE_TRACKING}\\]\\s*(create|investigate)`, "i").test(query)
         || /^\[jira\]/i.test(query); // TasksTab investigate sends [jira] prefix
       send({
         command: "askAI",

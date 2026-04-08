@@ -240,13 +240,18 @@ async def run_agent_traced(provider, workspace: str, question: str, executor) ->
 
 async def run_workflow_traced(provider, workspace: str, question: str, executor,
                               explorer_provider=None) -> dict:
-    """Run workflow engine with tracing."""
-    from app.workflow.loader import load_workflow
-    from app.workflow.engine import WorkflowEngine
-    from app.code_tools.executor import TracingToolExecutor
+    """Removed — the legacy workflow engine has been deleted. Use Brain instead."""
+    raise RuntimeError(
+        "The --workflow mode has been removed. The legacy workflow engine "
+        "(classifier_engine.py + code_explorer.yaml) was deleted. Update this "
+        "eval script to use the Brain orchestrator."
+    )
+
+    # --- Unreachable below — kept for reference until script is fully ported ---
+    from app.code_tools.executor import TracingToolExecutor  # noqa: F401
 
     tracing = TracingToolExecutor(executor)
-    workflow = load_workflow("workflows/code_explorer.yaml")
+    workflow = None
     engine = WorkflowEngine(
         provider=provider,
         explorer_provider=explorer_provider or provider,

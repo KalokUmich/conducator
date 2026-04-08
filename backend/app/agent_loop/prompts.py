@@ -6,8 +6,9 @@ For Brain-dispatched sub-agents (primary path):
   Layer 3: SKILLS_AND_GUIDELINES — shared project context (appended to system prompt)
   Layer 4: User message — query only, no role injection
 
-Legacy path (standalone / old workflow mode):
-  CORE_IDENTITY + STRATEGIES — kept for backward compatibility
+The standalone path (``build_system_prompt``) is used by the legacy
+non-Brain agent loop and shares ``CODE_REVIEW_STRATEGY`` with the
+sub-agent path.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+
+from .query_markers import QueryType
 
 logger = logging.getLogger(__name__)
 
@@ -1000,10 +1003,9 @@ def build_sub_agent_system_prompt(
             "the surrounding context, callers, callees, and dependencies."
         )
 
-    # Strategy — Layer 3 skill for structured output (e.g. code_review)
-    strategy = STRATEGIES.get(strategy_key or "", "")
-    if strategy:
-        prompt += "\n\n" + strategy
+    # Strategy — Layer 3 skill for structured output (only code_review needs one)
+    if strategy_key == QueryType.CODE_REVIEW.value:
+        prompt += "\n\n" + CODE_REVIEW_STRATEGY
 
     # Risk context — Layer 3 skill
     if risk_context:
@@ -1013,14 +1015,14 @@ def build_sub_agent_system_prompt(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LEGACY: Code review template (only query type that needs a structured prompt)
-# Used by CORE_IDENTITY path (standalone/workflow). Brain path uses
-# build_sub_agent_system_prompt() with strategy_key instead.
+# Code review strategy — the only query type that needs a structured prompt.
+# Injected into both ``build_sub_agent_system_prompt`` (Brain sub-agents)
+# and ``build_system_prompt`` (legacy standalone path) when the strategy
+# key matches ``QueryType.CODE_REVIEW``. For all other query types, no
+# strategy is injected — Claude reasons freely.
 # ═══════════════════════════════════════════════════════════════════════
 
-# For non-review queries, no strategy is injected — Claude reasons freely.
-STRATEGIES = {
-    "code_review": """\
+CODE_REVIEW_STRATEGY = """\
 ## Strategy: Code Review (PR/Diff)
 
 You are a **Google Senior Software Engineer** conducting a code review. \
@@ -1114,19 +1116,7 @@ Produce a structured review:
 [approve / request changes / needs discussion]
 ```
 
-Target: 15-30 iterations. Prioritize business-logic files. Skip generated/vendor files.""",
-    "recent_changes": """\
-## Strategy: Recent Changes / Git History
-1. **Start with git_log** to see recent commits (optionally filtered to a file or path).
-2. **Use git_show** on interesting commits to read the full commit message and diff.
-3. **Use git_diff** to compare specific refs (e.g. HEAD~5..HEAD) or branches.
-4. **Use git_blame** on specific files/lines to trace authorship.
-5. **Read affected code** with read_file to understand the context of changes.
-Target: 3-8 iterations. Answer with commit hashes, authors, dates, and what changed.""",
-}
-
-# Default strategy for unknown query types — empty (let Claude reason freely)
-_DEFAULT_STRATEGY = ""
+Target: 15-30 iterations. Prioritize business-logic files. Skip generated/vendor files."""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1376,7 +1366,7 @@ def build_system_prompt(
     workspace_layout: Optional[str] = None,
     project_docs: Optional[str] = None,
     max_iterations: int = 20,
-    query_type: Optional[str] = None,
+    strategy_key: Optional[str] = None,
     risk_context: Optional[str] = None,
     code_context: Optional[Dict[str, Any]] = None,
     interactive: bool = False,
@@ -1394,8 +1384,9 @@ def build_system_prompt(
         Pre-computed project documentation string.
     max_iterations:
         Maximum number of tool-calling iterations.
-    query_type:
-        Query type from classifier. Selects the Layer 2 strategy.
+    strategy_key:
+        Optional Layer 2 strategy key (e.g. ``QueryType.CODE_REVIEW.value``).
+        Currently only ``code_review`` triggers a structured prompt template.
     risk_context:
         Pre-computed risk context string from scan_workspace_risk().
     code_context:
@@ -1462,9 +1453,9 @@ def build_system_prompt(
             "the surrounding context, callers, callees, and dependencies."
         )
 
-    # Layer 2: Strategy (selected by query classifier)
-    strategy = STRATEGIES.get(query_type or "", _DEFAULT_STRATEGY)
-    prompt += "\n\n" + strategy
+    # Layer 2: Strategy — only code_review needs a structured prompt template
+    if strategy_key == QueryType.CODE_REVIEW.value:
+        prompt += "\n\n" + CODE_REVIEW_STRATEGY
 
     # Layer 3 (partial): Risk context — injected when available
     if risk_context:

@@ -7,6 +7,22 @@
 //   # — Context injection (#file:path, #symbol:name, #ticket:KEY)
 // ============================================================
 
+/**
+ * Query type markers — must stay in sync with the Python source of truth at
+ * `backend/app/agent_loop/query_markers.py` (`QueryType` enum). The marker
+ * is read by the Brain LLM as a routing hint via prompt context.
+ */
+export const QUERY_TYPE = {
+  CODE_REVIEW: "code_review",
+  ISSUE_TRACKING: "issue_tracking",
+  SUMMARY: "summary",
+  DIFF: "diff",
+} as const;
+
+export type QueryType = (typeof QUERY_TYPE)[keyof typeof QUERY_TYPE];
+
+const marker = (qt: QueryType) => `[query_type:${qt}]`;
+
 export interface SlashCommand {
   name: string;
   description: string;
@@ -20,10 +36,10 @@ export interface SlashCommand {
 
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/ask", description: "Ask AI a question", hint: "Type your question...", transform: (args) => args, isAI: true, category: "action" },
-  { name: "/pr", description: "Request a code review", hint: "Describe the PR or paste a link...", transform: (args) => `[query_type:code_review] ${args}`, isAI: true, category: "action" },
-  { name: "/jira", description: "Create or search Jira issues", hint: "Describe the task or search query...", transform: (args) => `[query_type:issue_tracking] ${args}`, isAI: true, category: "action" },
-  { name: "/summary", description: "Summarize chat decisions", hint: "Summarize recent discussion...", transform: (args) => `[query_type:summary] ${args || "Summarize the key decisions from this conversation"}`, isAI: true, category: "action" },
-  { name: "/diff", description: "Show workspace changes", hint: "Show recent code changes...", transform: (args) => `[query_type:diff] ${args || "Show the current workspace diff"}`, isAI: true, category: "action" },
+  { name: "/pr", description: "Request a code review", hint: "Describe the PR or paste a link...", transform: (args) => `${marker(QUERY_TYPE.CODE_REVIEW)} ${args}`, isAI: true, category: "action" },
+  { name: "/jira", description: "Create or search Jira issues", hint: "Describe the task or search query...", transform: (args) => `${marker(QUERY_TYPE.ISSUE_TRACKING)} ${args}`, isAI: true, category: "action" },
+  { name: "/summary", description: "Summarize chat decisions", hint: "Summarize recent discussion...", transform: (args) => `${marker(QUERY_TYPE.SUMMARY)} ${args || "Summarize the key decisions from this conversation"}`, isAI: true, category: "action" },
+  { name: "/diff", description: "Show workspace changes", hint: "Show recent code changes...", transform: (args) => `${marker(QUERY_TYPE.DIFF)} ${args || "Show the current workspace diff"}`, isAI: true, category: "action" },
   { name: "/help", description: "Show available commands", hint: "", transform: () => "", isAI: false, category: "action" },
 ];
 
@@ -31,7 +47,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 
 export const MENTION_COMMANDS: SlashCommand[] = [
   { name: "@AI", description: "Ask AI a question", hint: "Type your question...", transform: (args) => args, isAI: true, category: "agent" },
-  { name: "@review", description: "Code review specialist", hint: "Review this code...", transform: (args) => `[query_type:code_review] ${args}`, isAI: true, category: "agent" },
+  { name: "@review", description: "Code review specialist", hint: "Review this code...", transform: (args) => `${marker(QUERY_TYPE.CODE_REVIEW)} ${args}`, isAI: true, category: "agent" },
   { name: "@workspace", description: "Include workspace context", hint: "Search the codebase...", transform: (args) => `[context:workspace] ${args}`, isAI: true, category: "agent" },
 ];
 

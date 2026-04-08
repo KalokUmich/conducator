@@ -198,7 +198,6 @@ export function AIConfigModal({ open, onClose }: Props) {
             explorerModels={explorerModels}
             selectedExplorer={selectedExplorer}
             onExplorerChange={(v) => { setSelectedExplorer(v); send({ command: "setExplorer", explorer: v, enabled: true } as never); }}
-            onOpenDiagram={() => { send({ command: "showWorkflow" }); onClose(); }}
           />
         )}
 
@@ -236,14 +235,12 @@ function AgentSwarmTab({
   explorerModels,
   selectedExplorer,
   onExplorerChange,
-  onOpenDiagram,
 }: {
   backendUrl?: string;
   selectedModel: string;
   explorerModels: Array<{ id: string; provider: string; display_name: string }>;
   selectedExplorer: string;
   onExplorerChange: (v: string) => void;
-  onOpenDiagram: () => void;
 }) {
   const [swarms, setSwarms] = useState<SwarmData[]>([]);
   const [selectedSwarm, setSelectedSwarm] = useState("");
@@ -313,9 +310,6 @@ function AgentSwarmTab({
             </span>
             {" · "}{currentSwarm.mode || "pipeline"}{" · "}{currentSwarm.agents.length} agents{currentSwarm.arbitrator ? " + arbitrator" : ""}
           </p>
-          <button className="retry-link" style={{ marginTop: "12px" }} onClick={onOpenDiagram}>
-            View interactive diagram →
-          </button>
 
           {/* Agents */}
           {currentSwarm.agents.length > 0 && (

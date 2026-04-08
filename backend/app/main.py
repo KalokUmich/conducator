@@ -498,7 +498,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .policy.router import router as policy_router
     from .todos.router import router as todos_router
     from .workflow.router import brain_router
-    from .workflow.router import router as workflow_router
     from .workspace_files.router import router as workspace_files_router
 
     # Browser tools (optional — only available when playwright is installed)
@@ -521,7 +520,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(workspace_files_router)
     app.include_router(langextract_router)
     app.include_router(code_review_router)
-    app.include_router(workflow_router)
     app.include_router(brain_router)
     app.include_router(jira_router)
     app.include_router(azure_devops_router)

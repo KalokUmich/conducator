@@ -119,19 +119,18 @@ Open the VS Code extension and start a session. Then ask questions like:
 │  │ WebSocketService           │  │     │  └───────────────────────────────────┘  │
 │  │ CollabPanel + @AI commands │  │     │                                          │
 │  │ /ask, /pr slash menu       │  │     │  ┌───────────────────────────────────┐  │
-│  └────────────────────────────┘  │     │  │ WorkflowEngine                    │  │
-│                                  │     │  │  ClassifierEngine (risk/keyword)  │  │
-│  ┌────────────────────────────┐  │HTTP │  │  first_match / parallel routes    │  │
-│  │ WorkspaceClient            │◄─┼─────┼──│  AgentLoopService (explorers)     │  │
-│  │ WorkspacePanel (wizard)    │  │     │  │  provider.call_model() (judges)   │  │
-│  │ FileSystemProvider         │  │     │  │  Langfuse @observe decorators     │  │
-│  └────────────────────────────┘  │     │  └───────────────────────────────────┘  │
-│                                  │     │                                          │
-│  ┌────────────────────────────┐  │     │  ┌───────────────────────────────────┐  │
-│  │ WorkflowPanel              │  │     │  │ Brain Orchestrator                 │  │
-│  │ SVG graph visualization    │  │     │  │  dispatch_agent / dispatch_swarm  │  │
-│  │ agent detail sidebar       │  │     │  │  LLM ←→ 42 Code Tools            │  │
-│  └────────────────────────────┘  │     │  │  → BudgetController              │  │
+│  └────────────────────────────┘  │     │  │ Brain Orchestrator (strong)        │  │
+│                                  │     │  │  dispatch_agent / dispatch_swarm  │  │
+│  ┌────────────────────────────┐  │HTTP │  │  transfer_to_brain (PR Brain)     │  │
+│  │ WorkspaceClient            │◄─┼─────┼──│  ask_user (mid-loop clarify)      │  │
+│  │ WorkspacePanel (wizard)    │  │     │  │  Langfuse @observe decorators     │  │
+│  │ FileSystemProvider         │  │     │  └───────────────────────────────────┘  │
+│  └────────────────────────────┘  │     │                                          │
+│                                  │     │  ┌───────────────────────────────────┐  │
+│                                  │     │  │ AgentLoopService (sub-agents)     │  │
+│                                  │     │  │  4-layer system prompt            │  │
+│                                  │     │  │  LLM ←→ 42 Code Tools             │  │
+│                                  │     │  │  → BudgetController               │  │
 │                                  │     │  │  → EvidenceEvaluator → SSE stream │  │
 └──────────────────────────────────┘     │  └───────────────────────────────────┘  │
                                          │                                          │

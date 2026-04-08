@@ -26,13 +26,11 @@ backend/app/
 │   ├── service.py           # BrowserService — Chromium automation (Playwright)
 │   ├── tools.py             # browse_url, search_web, screenshot tool implementations
 │   └── router.py            # /api/browser/ endpoints
-├── workflow/                # Config-driven workflow engine
-│   ├── models.py            # Pydantic models: WorkflowConfig, AgentConfig, RouteConfig
-│   ├── loader.py            # load_workflow() + load_agent() — YAML + Markdown parser
-│   ├── classifier_engine.py # ClassifierEngine: risk_pattern + keyword_pattern
-│   ├── engine.py            # WorkflowEngine: run_stream(), first_match + parallel_all_matching
-│   ├── mermaid.py           # generate_mermaid() — auto-generate Mermaid diagrams
-│   ├── router.py            # /api/workflows/ endpoints
+├── workflow/                # Brain orchestrator host + agent/swarm config loading
+│   ├── models.py            # Pydantic models: AgentConfig, BrainConfig, SwarmConfig
+│   ├── loader.py            # load_agent() / load_brain_config() / load_swarm_registry() — YAML + Markdown
+│   ├── engine.py            # WorkflowEngine.run_brain_stream() — Brain orchestrator entry point
+│   ├── router.py            # /api/brain/swarms — Agent Swarm UI tab data source
 │   └── observability.py     # Langfuse @observe decorator (no-op when disabled)
 ├── code_review/             # Multi-agent PR review pipeline
 │   ├── service.py           # CodeReviewService — legacy 10-step review pipeline
@@ -127,7 +125,7 @@ Key design: The arbitrator is a **defense attorney** — it tries to rebut findi
 
 Tools also accessible via `python -m app.code_tools <tool> <workspace> '<json_params>'` (used by extension local mode).
 
-**Workflow API** (`/api/workflows/`): `GET` list/detail/mermaid/graph, `PUT /{name}/models`.
+**Brain Swarms API** (`/api/brain/swarms`): `GET` returns the agent + swarm composition (handoff targets reachable via `transfer_to_brain` / `dispatch_swarm`). Used by the Agent Swarm UI tab in the extension.
 
 ## Code Review Pipeline
 

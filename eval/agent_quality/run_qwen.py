@@ -164,13 +164,18 @@ async def run_direct_agent(explorer_provider, workspace: str, question: str) -> 
 
 
 async def run_workflow(explorer_provider, judge_provider, workspace: str, question: str) -> dict:
-    """Run full workflow engine with qwen-plus explorer and qwen-max judge."""
-    from app.workflow.loader import load_workflow
-    from app.workflow.engine import WorkflowEngine
-    from app.code_tools.executor import LocalToolExecutor
+    """Removed — the legacy workflow engine has been deleted. Use ``--brain`` instead."""
+    raise RuntimeError(
+        "The --workflow mode has been removed. The legacy workflow engine "
+        "(classifier_engine.py + code_explorer.yaml) was deleted. Update this "
+        "eval script to use the Brain orchestrator (see run_bedrock.py:run_brain)."
+    )
+
+    # --- Unreachable below — kept for reference until script is fully ported ---
+    from app.code_tools.executor import LocalToolExecutor  # noqa: F401
 
     executor = LocalToolExecutor(workspace_path=workspace)
-    workflow = load_workflow("workflows/code_explorer.yaml")
+    workflow = None
     engine = WorkflowEngine(
         provider=judge_provider,          # strong model: synthesizer / judge
         explorer_provider=explorer_provider,  # lightweight: explorer agents

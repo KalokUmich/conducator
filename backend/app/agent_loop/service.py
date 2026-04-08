@@ -140,8 +140,6 @@ class AgentLoopService:
         _is_sub_agent: bool = False,
         forced_tools: Optional[List[str]] = None,
         agent_identity: Optional[Dict[str, str]] = None,
-        workflow_config=None,
-        workflow_route_name: str = "",
     ) -> None:
         self._provider = provider
         self._tool_executor = tool_executor
@@ -163,8 +161,6 @@ class AgentLoopService:
                 is_sub_agent=_is_sub_agent,
                 forced_tools=forced_tools,
                 agent_identity=agent_identity,
-                workflow_config=workflow_config,
-                workflow_route_name=workflow_route_name,
             )
         self._config = config
 
@@ -178,8 +174,6 @@ class AgentLoopService:
         self._is_sub_agent = config.is_sub_agent
         self._forced_tools = config.forced_tools
         self._agent_identity = config.agent_identity  # 4-layer: per-agent identity from .md
-        self._workflow_config = config.workflow_config
-        self._workflow_route_name = config.workflow_route_name
         # interactive: Brain always forces True; sub-agents never interactive
         self._interactive = config.interactive and not config.is_sub_agent
 
@@ -281,7 +275,6 @@ class AgentLoopService:
                 system = event.data["_system"]
                 active_tools = event.data["_active_tools"]
                 messages = event.data["_messages"]
-                is_high_level = event.data["_is_high_level"]
                 # Strip private keys from the event before yielding to the client
                 public_data = {k: v for k, v in event.data.items() if not k.startswith("_")}
                 yield AgentEvent(kind="classify", data=public_data)
@@ -549,7 +542,6 @@ class AgentLoopService:
                 dirs_accessed=dirs_accessed,
                 _tool_history_for_verifier=_tool_history_for_verifier,
                 _tool_call_history=_tool_call_history,
-                is_high_level=is_high_level,
                 accumulated_text=accumulated_text,
                 start=start,
                 query=query,
@@ -641,8 +633,8 @@ class AgentLoopService:
           - Agent mode (Brain-dispatched or standalone): uses forced/all tools.
 
         Yields a single ``classify`` event whose ``data`` dict carries the
-        private keys ``_system``, ``_active_tools``,
-        ``_messages``, and ``_is_high_level`` so the caller can unpack them.
+        private keys ``_system``, ``_active_tools``, and ``_messages`` so
+        the caller can unpack them.
         """
         # Branch 0: Brain mode — use Brain meta-tools + prompt
         if self._is_brain:
@@ -677,20 +669,15 @@ class AgentLoopService:
                     "_system": system,
                     "_active_tools": active_tools,
                     "_messages": messages,
-                    "_is_high_level": False,
                 },
             )
             return
 
-        # Determine query type label for logging / prompt selection
-        query_type = "brain_dispatched" if self._forced_tools else (self._workflow_route_name or "general")
+        # Determine label for logging / classify event
+        query_type = "brain_dispatched" if self._forced_tools else "standalone"
         budget_level = "medium"
         if self._forced_tools:
             logger.info("Brain-dispatched agent: forced_tools=%d", len(self._forced_tools))
-        elif self._workflow_route_name:
-            logger.info("Workflow-driven agent: route=%s", self._workflow_route_name)
-
-        is_high_level = query_type in ("architecture_question", "business_flow_tracing")
 
         # Build system prompt
         if self._agent_identity:
@@ -713,13 +700,12 @@ class AgentLoopService:
             )
         else:
             # Legacy path: standalone / old workflow mode
-            effective_query_type = self._forced_strategy or query_type
             system = build_system_prompt(
                 workspace_path,
                 workspace_layout=layout,
                 project_docs=project_docs,
                 max_iterations=self._max_iterations,
-                query_type=effective_query_type,
+                strategy_key=self._forced_strategy or None,
                 risk_context=risk_context,
                 code_context=code_context,
                 interactive=self._interactive,
@@ -760,7 +746,6 @@ class AgentLoopService:
                 "_system": system,
                 "_active_tools": active_tools,
                 "_messages": messages,
-                "_is_high_level": is_high_level,
             },
         )
 
@@ -1333,7 +1318,6 @@ class AgentLoopService:
         dirs_accessed: Dict[str, int],
         _tool_history_for_verifier: List[Dict[str, Any]],
         _tool_call_history: Dict[str, int],
-        is_high_level: bool,
         accumulated_text: List[str],
         start: float,
         query: str = "",
@@ -1605,9 +1589,8 @@ class AgentLoopService:
                 f"controller will terminate this run with an empty result."
             )
 
-        # Scatter detection: tighter threshold for high-level queries
-        scatter_limit = 3 if is_high_level else 5
-        if len(dirs_accessed) >= scatter_limit:
+        # Scatter detection
+        if len(dirs_accessed) >= 5:
             top_dirs = sorted(dirs_accessed.keys())
             guidance_notes.append(
                 f"⚠ SCATTER WARNING: You have read files from {len(dirs_accessed)} "
@@ -1617,40 +1600,22 @@ class AgentLoopService:
                 f"chain. If you cannot find the answer, provide what you know so far."
             )
 
-        # Convergence checkpoints — earlier for high-level queries
-        if is_high_level and iteration + 1 >= 3 and iteration > 1:
+        # Halfway convergence checkpoint
+        half_budget = self._max_iterations // 2
+        if iteration + 1 == half_budget and iteration > 2:
             guidance_notes.append(
-                f"⚠ HIGH-LEVEL QUERY CHECKPOINT: You've used {iteration + 1} of "
-                f"{self._max_iterations} iterations on a high-level question. "
-                f"By now you should have found the orchestration layer. "
-                f"STOP and write your answer using what you've found. "
-                f"List the steps/flow with file paths and line numbers. "
-                f"Do NOT keep exploring implementation details."
+                f"⚠ HALFWAY CHECKPOINT: You've used {iteration + 1} of "
+                f"{self._max_iterations} iterations. Summarize what you've "
+                f"learned so far, identify what's missing, and decide: "
+                f"can you answer now? If not, make a focused 2-3 step plan "
+                f"for the remaining budget. Do not keep exploring broadly."
             )
-        elif not is_high_level:
-            half_budget = self._max_iterations // 2
-            if iteration + 1 == half_budget and iteration > 2:
-                guidance_notes.append(
-                    f"⚠ HALFWAY CHECKPOINT: You've used {iteration + 1} of "
-                    f"{self._max_iterations} iterations. Summarize what you've "
-                    f"learned so far, identify what's missing, and decide: "
-                    f"can you answer now? If not, make a focused 2-3 step plan "
-                    f"for the remaining budget. Do not keep exploring broadly."
-                )
 
         # Inject budget context + guidance notes into the conversation
         remaining = self._max_iterations - (iteration + 1)
         budget_note = budget.budget_context
-        low_threshold = 5 if is_high_level else 3
-        if remaining <= low_threshold:
-            if is_high_level:
-                budget_note += (
-                    " ⚠ URGENT: You are running low on iterations for a high-level question. "
-                    "You MUST provide your answer NOW. Summarize the flow/steps you've found "
-                    "with file paths and line numbers. Do NOT make any more exploratory tool calls."
-                )
-            else:
-                budget_note += " ⚠ Running low on iterations. Wrap up your investigation and provide your answer soon."
+        if remaining <= 3:
+            budget_note += " ⚠ Running low on iterations. Wrap up your investigation and provide your answer soon."
         if guidance_notes:
             budget_note += "\n" + "\n".join(guidance_notes)
 

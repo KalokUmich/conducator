@@ -182,7 +182,6 @@ export type OutgoingCommand =
   | { command: "renameLocalSession"; roomId: string; displayName: string }
   // External
   | { command: "openExternal"; url: string }
-  | { command: "showWorkflow" }
   | { command: "alert"; text: string }
   // Stack trace & test
   | { command: "shareStackTrace"; stackTrace: string }

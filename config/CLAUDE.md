@@ -9,7 +9,6 @@ config/
 ├── brain.yaml               # Brain orchestrator config (limits, core_tools, model)
 ├── brains/                  # Specialized Brain configs
 │   └── pr_review.yaml       # PR Brain config (agents, budget_weights, post_processing)
-├── workflows/               # pr_review.yaml (parallel_all_matching), code_explorer.yaml (first_match)
 ├── agents/                  # 19 agent .md files (YAML frontmatter + Markdown body)
 │   └── pr_arbitrator.md     # Defense attorney for PR review (challenges findings)
 ├── swarms/                  # Swarm presets (agent group + parallel/sequential)

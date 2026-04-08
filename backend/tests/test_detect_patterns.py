@@ -405,7 +405,7 @@ class TestBuildSystemPromptWithRisk:
             workspace_layout="(layout)",
             project_docs="",
             max_iterations=10,
-            query_type="root_cause_analysis",
+            strategy_key=None,
             risk_context=risk,
         )
         if risk:
@@ -417,7 +417,7 @@ class TestBuildSystemPromptWithRisk:
             workspace_layout="(layout)",
             project_docs="",
             max_iterations=10,
-            query_type="root_cause_analysis",
+            strategy_key=None,
             risk_context="",
         )
         assert "Risk signals detected" not in prompt
@@ -428,7 +428,7 @@ class TestBuildSystemPromptWithRisk:
             workspace_layout="(layout)",
             project_docs="",
             max_iterations=10,
-            query_type="root_cause_analysis",
+            strategy_key=None,
             risk_context=None,
         )
         assert "Risk signals detected" not in prompt

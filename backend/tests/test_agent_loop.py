@@ -896,14 +896,14 @@ class TestBuildSystemPrompt:
         assert "CUSTOM_LAYOUT_HERE" in prompt
 
     def test_code_review_strategy_injected(self, tmp_path: Path):
-        """Code review is the only query type that injects a strategy template."""
-        prompt = build_system_prompt(str(tmp_path), query_type="code_review")
+        """Code review is the only strategy key that injects a template."""
+        prompt = build_system_prompt(str(tmp_path), strategy_key="code_review")
         assert "Code Review" in prompt
 
     def test_non_review_queries_have_no_strategy(self, tmp_path: Path):
-        """Non-review queries should NOT inject prescriptive strategies."""
-        for qt in ("root_cause_analysis", "architecture_question", "business_flow_tracing"):
-            prompt = build_system_prompt(str(tmp_path), query_type=qt)
+        """Non-review strategy keys should NOT inject prescriptive strategies."""
+        for sk in ("issue_tracking", "summary", "diff", "unknown_value"):
+            prompt = build_system_prompt(str(tmp_path), strategy_key=sk)
             assert "## Strategy" not in prompt
             assert "## Goal" not in prompt
 

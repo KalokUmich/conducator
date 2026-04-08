@@ -59,14 +59,11 @@ class AgentLoopConfig:
             ``instructions``, ``skill`` (optional).  When present the
             loop builds a per-agent system prompt (Layer 1) from these
             values.
-        forced_strategy: Strategy key override (Layer 3, e.g.
-            ``"code_review"``).  Overrides the classifier's choice.
+        forced_strategy: Strategy key override (e.g.
+            ``QueryType.CODE_REVIEW.value``).  Selects the Layer 2/3
+            strategy template.
         forced_skill: Investigation-skill key override (Layer 3, e.g.
             ``"business_flow"``).
-        workflow_config: Workflow ``AgentConfig`` for workflow-driven
-            agents.  Used together with ``workflow_route_name``.
-        workflow_route_name: Route name that determines classification
-            when the agent runs inside a workflow.
     """
 
     # Core loop limits
@@ -88,10 +85,6 @@ class AgentLoopConfig:
     agent_identity: Optional[Dict[str, str]] = None
     forced_strategy: str = ""
     forced_skill: str = ""
-
-    # Workflow
-    workflow_config: Any = None
-    workflow_route_name: str = ""
 
 
 @dataclass

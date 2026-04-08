@@ -30,9 +30,8 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
   - `trace_variable` — data flow tracing with alias detection, argument→parameter mapping, sink/source patterns
   - Workspace reconnaissance — auto-scan project layout + project marker detection
   - `chat_with_tools()` on all 3 AI providers (Bedrock Converse, Anthropic Messages, OpenAI)
-  - `POST /api/context/query` — general code Q&A with agentic loop
+  - `POST /api/context/query/stream` — Brain orchestrator over SSE (general code Q&A + PR review via `transfer_to_brain`)
   - `POST /api/context/explain-rich` — deep code explanation via agent (replaces XML-prompt pipeline)
-  - SSE streaming (`POST /api/context/query/stream`, `/explain-rich/stream`) for real-time progress
 - **RepoMap (Graph-based Symbol Index)**:
   - tree-sitter AST parsing for symbol extraction (used by `find_symbol`, `file_outline`, dependency tools)
   - File dependency graph (networkx) with PageRank ranking
@@ -151,8 +150,7 @@ Conductor is a VS Code collaboration extension with a FastAPI backend. The proje
 - [x] Unified `ToolCall` / `ToolUseResponse` types across all providers
 
 ### 4.6.3 Context + Explanation Endpoints
-- [x] `POST /api/context/query` — general code Q&A with agentic loop
-- [x] `POST /api/context/query/stream` — SSE streaming with real-time progress events
+- [x] `POST /api/context/query/stream` — Brain orchestrator SSE stream (general code Q&A; transfers to PR Brain on `[query_type:code_review]`)
 - [x] `POST /api/context/explain-rich` — deep code snippet explanation via agent
 - [x] Extension `_callLlm` updated to call `/api/context/explain-rich` (agentic)
 
@@ -313,20 +311,14 @@ Standalone eval system in `eval/` for measuring `CodeReviewService` quality agai
 - [x] Timestamped JSON baselines for regression detection
 - [x] Excluded from Docker via `.dockerignore`
 
-#### Config-Driven Workflow Engine (COMPLETE)
-Extract hardcoded multi-agent orchestration into a config-driven engine with YAML workflow definitions and Markdown agent files.
-
-- [x] `workflow/models.py` — Pydantic models: `WorkflowConfig`, `AgentConfig`, `RouteConfig`, `ClassifierResult`, `StageConfig`, `BudgetDefaults`
-- [x] `workflow/loader.py` — `load_workflow()` + `load_agent()` — parse YAML + Markdown frontmatter, resolve delegate references, validate input/output ordering
-- [x] `workflow/classifier_engine.py` — generic `ClassifierEngine` with `risk_pattern` (file path regex → PR Review dimensions) and `keyword_pattern` (query text → Code Explorer routes)
-- [x] `workflow/engine.py` — `WorkflowEngine.run_stream()` — `first_match` mode (Code Explorer: best route) and `parallel_all_matching` mode (PR Review: all matching routes in parallel, then post_pipeline)
-- [x] `workflow/mermaid.py` — `generate_mermaid()` auto-generates Mermaid flowchart from any `WorkflowConfig` (different layout per route_mode)
-- [x] `workflow/router.py` — 5 REST endpoints: `GET /api/workflows`, `GET /api/workflows/{name}`, `GET /api/workflows/{name}/mermaid`, `GET /api/workflows/{name}/graph`, `PUT /api/workflows/{name}/models`
-- [x] Config files: `config/workflows/pr_review.yaml` (6 routes, parallel_all_matching), `config/workflows/code_explorer.yaml` (9 routes, first_match, includes `delegate` to pr_review)
-- [x] 18 agent `.md` files in `config/agents/` — 5 PR explorer agents, 2 PR judge agents, 3 code explorer multi-agent, 8 code explorer single-agent routes (incl. `explore_code_explanation`)
-- [x] 2 shared prompt templates in `config/prompts/` — `review_base.md`, `explorer_base.md`
-- [x] `workflow/observability.py` — Langfuse `@observe` decorator; zero overhead when disabled (no-op function wrapper)
-- [x] `main.py` — `init_langfuse()` at startup, `flush()` at shutdown, `workflow_router` registered
+#### Config-Driven Workflow Engine (SUPERSEDED)
+The keyword/risk-pattern classifier + YAML route system has been **removed**. All
+multi-agent orchestration now goes through the **Brain orchestrator** (see
+"Brain Orchestrator" milestone). Agent definitions live in `config/agents/*.md`,
+swarm presets in `config/swarms/*.yaml`, brain configs in `config/brain.yaml`
+and `config/brains/*.yaml`. The historical workflow engine modules
+(`classifier_engine.py`, `mermaid.py`, the `/api/workflows` REST endpoints, and
+`config/workflows/*.yaml`) were deleted.
 
 #### Langfuse Observability (COMPLETE)
 Self-hosted LLM tracing with nested execution trees, cost tracking, and latency analysis.
@@ -337,15 +329,12 @@ Self-hosted LLM tracing with nested execution trees, cost tracking, and latency 
 - [x] Traces nested as: workflow → route → agent → llm_call → tool
 - [x] Coexists with SessionTrace — Langfuse adds Web UI + team sharing; SessionTrace keeps tool params + thinking text
 
-#### Workflow Visualization Panel (COMPLETE)
-Interactive workflow graph in the VS Code extension WebView.
-- [x] `GET /api/workflows/{name}/graph` — React Flow-compatible JSON (nodes + edges with labels)
-- [x] `extension/media/workflow.html` — SVG graph rendered with dark glass theme; node types: explorer (violet), judge (indigo), classifier (diamond), group (dashed border)
-- [x] `extension/src/services/workflowPanel.ts` — singleton WebView panel class
-- [x] `conductor.showWorkflow` command registered in `extension.ts` and `package.json`
-- [x] Graph icon button in chat header opens the panel
-- [x] Node click shows agent detail sidebar (tools, budget, trigger conditions, prompt excerpt)
-- [x] Two tabs: PR Review and Code Explorer
+#### Workflow Visualization Panel (REMOVED)
+The standalone WebView graph (`workflow.html`, `workflowPanel.ts`,
+`conductor.showWorkflow` command, `/api/workflows/{name}/graph` endpoint) was
+removed when the legacy workflow engine was deleted. Brain swarm composition is
+now visualized via the AI Config Modal's Agent Swarm tab, which fetches from
+`GET /api/brain/swarms`.
 
 #### Slash Command System (COMPLETE)
 Cleaner `@AI` command format with floating menu and ghost text hints.

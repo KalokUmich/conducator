@@ -44,7 +44,6 @@ import {
 // workspaceIndexer removed — symbol extraction handled by treeSitterService
 import { RagClient, RagFileChange } from './services/ragClient';
 import { ConductorFileSystemProvider } from './services/conductorFileSystemProvider';
-import { WorkflowPanel } from './services/workflowPanel';
 import {
     JiraUriHandler,
     wrapJiraConnection,
@@ -362,13 +361,6 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.executeCommand('aiCollabView.focus');
     });
     context.subscriptions.push(disposable);
-
-    // Register command to open the workflow visualization panel
-    context.subscriptions.push(
-        vscode.commands.registerCommand('conductor.showWorkflow', () => {
-            WorkflowPanel.show(context.extensionUri, getBackendUrl());
-        })
-    );
 
     // Initialize Jira token store (SecretStorage + .conductor/jira.json)
     const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -1447,9 +1439,6 @@ class AICollabViewProvider implements vscode.WebviewViewProvider {
                     return;
                 case 'askAI':
                     await this._handleAskAI(message);
-                    return;
-                case 'showWorkflow':
-                    vscode.commands.executeCommand('conductor.showWorkflow');
                     return;
             }
         });

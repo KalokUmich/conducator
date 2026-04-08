@@ -11,7 +11,6 @@ extension/src/
 ├── services/
 │   ├── conductorStateMachine.ts        # FSM: Idle → ReadyToHost → Hosting → Joined
 │   ├── conductorController.ts          # FSM driver
-│   ├── workflowPanel.ts                # Workflow visualization WebView (singleton)
 │   ├── workspaceClient.ts              # /workspace/ HTTP client
 │   ├── conductorFileSystemProvider.ts  # conductor:// URI scheme
 │   ├── lspResolver.ts                  # VS Code LSP definition + references
@@ -44,7 +43,6 @@ extension/webview-ui/
 extension/media/
 ├── webview.js       # React WebView bundle (esbuild output)
 ├── webview.css      # React WebView styles (esbuild output)
-├── workflow.html    # Workflow visualization — SVG graph + agent detail panel
 ├── highlight.min.js    # Bundled Highlight.js 11.9.0 (no CDN dependency)
 └── github-dark.min.css # Highlight.js GitHub Dark theme
 

@@ -105,8 +105,6 @@ VS Code Extension
 │   ├── hooks/                 — useWebSocket、useReadReceipts、useHistoryPagination
 │   └── types/                 — postMessage 命令契约（commands.ts）
 ├── media/webview.js           — React WebView 编译产物（268KB）
-├── workflow.html              — 工作流可视化面板（SVG 图）
-├── workflowPanel.ts           — 面板控制器
 └── services/
     ├── localToolDispatcher.ts — 三级工具派发：子进程 → AST → 原生 TS
     ├── astToolRunner.ts       — 6 个 AST 工具（基于 web-tree-sitter）
@@ -207,14 +205,10 @@ INFO  Conductor startup complete.
 curl http://localhost:8000/health
 # → {"status": "ok"}
 
-# 列出可用工作流
-curl http://localhost:8000/api/workflows
-# → [{"name": "pr-review", ...}, {"name": "code-explorer", ...}]
-
-# 代码问答（同步接口，适合调试）
-curl -X POST http://localhost:8000/api/context/query \
+# 代码问答（SSE 流，Brain 编排器）
+curl -N -X POST http://localhost:8000/api/context/query/stream \
   -H "Content-Type: application/json" \
-  -d '{"query": "how does authentication work?", "workspace_path": "/path/to/repo"}'
+  -d '{"room_id": "demo", "query": "how does authentication work?"}'
 ```
 
 ### 2.7 运行测试
@@ -275,139 +269,111 @@ case 'askAI':
     }
 ```
 
-**第三步：Backend 路由到 Agent Loop**（`backend/app/agent_loop/router.py`）
+**第三步：Backend 路由到 Brain 编排器**（`backend/app/agent_loop/router.py`）
 
 ```python
 @router.post("/api/context/query/stream")
-async def query_stream(req: QueryRequest, request: Request):
-    workspace_path = _resolve_workspace(req, request)  # 从 room_id 或直接路径解析
+async def context_query_stream(req: ContextQueryRequest, ...):
+    # ... 鉴权、解析 worktree、构建 ToolExecutor ...
+    engine = WorkflowEngine(provider=agent_provider, explorer_provider=explorer_provider, ...)
+    brain_context = {"query": req.query, "workspace_path": str(worktree_path)}
 
-    # 加载工作流配置（code-explorer workflow）
-    workflow = load_workflow("workflows/code_explorer.yaml")
-    engine = WorkflowEngine(
-        provider=request.app.state.agent_provider,
-        explorer_provider=request.app.state.explorer_provider,
-    )
-
-    async def generate():
-        context = {"query": req.query, "workspace_path": workspace_path}
-        async for event in engine.run_stream(workflow, context):
-            yield f"data: {json.dumps(event.__dict__)}\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    async def event_generator():
+        async for event in engine.run_brain_stream(brain_context):
+            yield f"event: {event.kind}\ndata: {json.dumps(event.data)}\n\n"
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 ```
 
-**第四步：WorkflowEngine 分类并路由**（`backend/app/workflow/engine.py`）
+**第四步：Brain 决定 dispatch 谁**（`backend/app/agent_loop/brain.py`）
 
-```python
-async def run_stream(self, workflow, context):
-    # 1. 分类：用 keyword_pattern 匹配查询文本
-    engine = ClassifierEngine(workflow)
-    result = engine.classify({"query_text": context["query"]})
-    # "认证逻辑" → 命中 entry_point_discovery 路由（含 "where is" 关键词）
+Brain（强模型）跑自己的 LLM 循环，可调用 4 个 meta-tool：
 
-    # 2. 路由：first_match 模式，执行最匹配的那条路由
-    route = workflow.routes[result.best_route]
+- `dispatch_agent("agent_name", query)` — 单 agent 探索
+- `dispatch_swarm("preset_name", queries=[...])` — 并行多 agent
+- `transfer_to_brain("pr_review", params)` — 一次性切到专精 brain（如 PR review）
+- `ask_user(...)` — 中途向用户确认方向
 
-    # 3. 执行路由的 pipeline（每个 stage 里的 agent）
-    async for event in self._run_pipeline(route.pipeline, workflow, context, route.name):
-        yield event
-```
+例：用户问"认证逻辑"，Brain 看到这是简单单 agent 任务，调用 `dispatch_agent("entry_point_finder", "认证逻辑入口")`。
 
-**第五步：AgentLoopService 迭代探索**（`backend/app/agent_loop/service.py`）
+**第五步：被 dispatch 的子 agent 跑 AgentLoopService**（`backend/app/agent_loop/service.py`）
 
 ```python
 async def run_stream(self, query, workspace_path):
     messages = [{"role": "user", "content": query}]
-    system_prompt = build_system_prompt(query_type, workspace_layout)
+    system_prompt = build_sub_agent_system_prompt(
+        agent_name=self._agent_identity["name"],
+        agent_description=self._agent_identity["description"],
+        agent_instructions=self._agent_identity["instructions"],
+        strategy_key=self._forced_strategy or None,
+        ...
+    )
 
     for i in range(self.max_iterations):
-        # LLM 决定下一步用哪个工具
         response = provider.chat_with_tools(messages, tools=active_tools, system=system_prompt)
-
         if response.stop_reason == "end_turn":
-            # LLM 认为已经有足够信息，准备给出答案
             if evidence_ok(response.text, tool_calls_made):
                 return AgentResult(answer=response.text, ...)
-            else:
-                # 证据不足，注入反馈让 LLM 继续调查
-                messages.append(feedback_message("需要具体文件引用"))
-                continue
-
-        # 执行 LLM 选择的工具
+            messages.append(feedback_message("需要具体文件引用"))
+            continue
         for tool_call in response.tool_calls:
             result = execute_tool(tool_call.name, workspace_path, tool_call.input)
             messages.append(tool_result_block(tool_call.id, result))
-
-        # 检查预算
-        budget_signal = budget_controller.check(token_usage)
-        if budget_signal == FORCE_CONCLUDE:
-            messages.append(budget_note("请立即给出答案"))
 ```
 
 **整条链路：**
 ```
 用户输入 → ChatInput.tsx 解析 → useWebSocket/extension.ts SSE 请求 →
-agent_loop/router.py → WorkflowEngine.run_stream() →
-ClassifierEngine.classify() → _run_pipeline() →
-AgentLoopService.run_stream() → LLM ↔ execute_tool() 循环 →
+agent_loop/router.py → WorkflowEngine.run_brain_stream() →
+Brain LLM 循环 → dispatch_agent / dispatch_swarm / transfer_to_brain →
+子 agent AgentLoopService.run_stream() → LLM ↔ execute_tool() 循环 →
 SSE 事件流回 → ChatContext → ThinkingIndicator/MessageBubble 实时渲染
 ```
 
 ---
 
-### 3.2 场景 B：用户输入 `@AI /pr main...feature/auth`
+### 3.2 场景 B：用户输入 `/pr main...feature/auth`
 
-**第一步：Extension 解析并发送**（同上，`/pr` 的 transform 加前缀）
+**第一步：Extension 解析并发送**
 
-```javascript
-{ name: '/pr', transform: (args) => `do PR ${args}` }
-// "@AI /pr main...feature/auth" → query = "do PR main...feature/auth"
+`slashCommands.ts` 的 transform 把 `/pr X` 改写成带 marker 的查询：
+
+```typescript
+{ name: "/pr", transform: (args) => `${marker(QUERY_TYPE.CODE_REVIEW)} ${args}` }
+// "/pr main...feature/auth" → "[query_type:code_review] main...feature/auth"
 ```
 
-**第二步：WorkflowEngine 识别 PR 命令**（`code_explorer.yaml`）
+Marker 是给 Brain LLM 看的暗号，约定值集中在 `backend/app/agent_loop/query_markers.py`（`QueryType` enum），前端通过 `QUERY_TYPE` 常量手动同步。
 
-Code Explorer 工作流有一条 `code_review` 路由，`text_patterns` 匹配 `"review|pr review|do pr"`:
+**第二步：Brain 识别 marker，transfer 到 PR Brain**
 
-```yaml
-# config/workflows/code_explorer.yaml
-routes:
-  code_review:
-    text_patterns:
-      - "review|pr review|pull request|do pr|check the pr"
-    delegate: workflows/pr_review.yaml   # 委托给 PR Review 工作流
-```
-
-引擎识别到 `delegate`，加载 `pr_review.yaml` 并重新运行。
-
-**第三步：PR Review 工作流并行派发**（`pr_review.yaml`，`parallel_all_matching` 模式）
+Brain 在 prompt 中被教过 `[query_type:code_review]` 约定，看到 marker 后调用：
 
 ```python
-# engine.py — _run_parallel_all_matching()
-async def _run_parallel_all_matching(self, workflow, classify_result, context):
-    # 根据 git diff 的文件路径，用 risk_pattern 分类器识别涉及哪些维度
-    # 文件包含 auth/... → security: HIGH; 有 try/except → reliability: MEDIUM
-
-    active_routes = ["correctness", "security", "test_coverage"]  # always_run 的也激活
-
-    # 全部并行运行
-    await asyncio.gather(*[_run_one_route(rn) for rn in active_routes])
-
-    # 所有路由结束后，顺序执行 post_pipeline
-    # post_pipeline: 仲裁 (arbitrator.md) → 综合 (review_synthesizer.md)
-    for stage in workflow.post_pipeline:
-        await self._run_stage(stage, context)
+transfer_to_brain("pr_review", params={"workspace_path": ..., "diff_spec": "main...feature/auth"})
 ```
 
-**第四步：每个 Agent 独立运行 AgentLoopService**（同场景 A 的第五步，但每个 Agent 有自己的工具集和指令）
+`brain.py:_transfer_to_brain` 校验白名单（目前只允许 `pr_review`），然后启动 `PRBrainOrchestrator`。
+
+**第三步：PRBrainOrchestrator 6 阶段流水线**（`backend/app/agent_loop/pr_brain.py`）
+
+```
+Phase 1: 预计算（parse_diff、classify_risk、prefetch_diffs、impact_graph）
+Phase 2: 并行 dispatch review agents（correctness、security、reliability、concurrency、test_coverage）
+Phase 3: 后处理（evidence_gate → post_filter → dedup → score_and_rank）
+Phase 4: 对抗仲裁（pr_arbitrator 试图反驳每条 finding）
+Phase 5: Merge recommendation（确定性）
+Phase 6: 综合（Brain 作为最终评判，看到正方证据 + 反方反驳）
+```
+
+每个 review agent 的 `.md` frontmatter 有 `strategy: code_review`，会通过 `forced_strategy` 触发 `prompts.py` 里的 `CODE_REVIEW_STRATEGY` 模板（Google Senior Engineer review 风格）。
 
 **整条链路：**
 ```
-"do PR main...feature/auth" →
-WorkflowEngine → ClassifierEngine(risk_pattern, file paths) →
-asyncio.gather(correctness_agent, security_agent, test_coverage_agent) 并行 →
-各 Agent 独立跑 AgentLoopService →
-post_pipeline: arbitrator_agent → synthesizer_agent →
+"/pr main...feature/auth" →
+slashCommands.transform → "[query_type:code_review] main...feature/auth" →
+Brain LLM 看到 marker → transfer_to_brain("pr_review") →
+PRBrainOrchestrator 6 阶段 →
+parallel review agents → arbitration → synthesis →
 最终 ReviewResult
 ```
 
@@ -421,22 +387,23 @@ backend/
 │   ├── main.py                    # App 工厂、lifespan 启动/关闭
 │   ├── config.py                  # 从 YAML 读取 Settings + Secrets
 │   │
-│   ├── workflow/                  # ★ 配置驱动的工作流引擎（核心新模块）
-│   │   ├── models.py              # Pydantic 模型：WorkflowConfig、AgentConfig、StageConfig
-│   │   ├── loader.py              # 加载 YAML 工作流 + Markdown Agent 文件
-│   │   ├── classifier_engine.py   # 分类器：risk_pattern（PR Review）+ keyword_pattern（代码问答）
-│   │   ├── engine.py              # WorkflowEngine：first_match + parallel_all_matching
-│   │   ├── mermaid.py             # 从配置自动生成 Mermaid 流程图
-│   │   ├── router.py              # /api/workflows/ 接口（5 个端点）
+│   ├── workflow/                  # Brain 编排器宿主 + agent/swarm 配置加载
+│   │   ├── models.py              # Pydantic 模型：AgentConfig、BrainConfig、SwarmConfig
+│   │   ├── loader.py              # 加载 Markdown Agent 文件 + Brain/Swarm YAML
+│   │   ├── engine.py              # WorkflowEngine.run_brain_stream() — Brain 入口
+│   │   ├── router.py              # /api/brain/swarms — Agent Swarm UI 数据源
 │   │   └── observability.py       # Langfuse @observe 装饰器（禁用时零开销）
 │   │
-│   ├── agent_loop/                # LLM Agent 循环引擎
+│   ├── agent_loop/                # LLM Agent 循环引擎 + Brain 编排器
 │   │   ├── service.py             # AgentLoopService — LLM 循环 + 工具派发
+│   │   ├── brain.py               # AgentToolExecutor — dispatch_agent / dispatch_swarm / transfer_to_brain
+│   │   ├── pr_brain.py            # PRBrainOrchestrator — PR 评审专用确定性管线
+│   │   ├── query_markers.py       # QueryType enum + marker 解析（前后端共享约定）
 │   │   ├── budget.py              # BudgetController — token 预算三级信号
 │   │   ├── trace.py               # SessionTrace — JSON 追踪（离线分析用）
 │   │   ├── evidence.py            # EvidenceEvaluator — 答案质量门控
 │   │   ├── prompts.py             # 四层 System Prompt 构建 + 9 种 Investigation Skills
-│   │   └── router.py              # POST /api/context/query (+ /stream)
+│   │   └── router.py              # POST /api/context/query/stream（SSE）
 │   │
 │   ├── code_tools/                # 42 个工具（代码 + 文件编辑 + Jira + 浏览器）
 │   │   ├── tools.py               # 所有工具实现 + execute_tool() 调度器
@@ -499,16 +466,16 @@ backend/
 ├── config/
 │   ├── conductor.settings.yaml    # 非敏感设置（已提交）
 │   ├── conductor.secrets.yaml     # API 密钥等敏感信息（gitignore）
-│   ├── workflows/
-│   │   ├── pr_review.yaml         # PR 评审工作流：6 条路由，parallel_all_matching
-│   │   └── code_explorer.yaml     # 代码问答工作流：9 条路由，first_match
-│   ├── agents/                    # 18 个 Agent 定义文件（YAML 头部 + Markdown 正文）
-│   │   ├── security.md            # PR 探索 Agent：认证/注入/XSS
-│   │   ├── correctness.md         # PR 探索 Agent：逻辑/状态/持久化
-│   │   ├── ... (15 more)
+│   ├── brain.yaml                 # Brain 限制 + core_tools
+│   ├── brains/
+│   │   └── pr_review.yaml         # PR Brain 配置（review agents、budget weights、post_processing）
+│   ├── agents/                    # Agent 定义文件（YAML frontmatter + Markdown 正文）
+│   │   ├── security.md            # PR review agent：认证/注入/XSS
+│   │   ├── correctness.md         # PR review agent：逻辑/状态/持久化
+│   │   └── ... (more)
+│   ├── swarms/                    # Swarm 预设（agent 组 + parallel/sequential + synthesis_guide）
 │   └── prompts/
-│       ├── review_base.md         # 共享评审提示词
-│       └── explorer_base.md       # 共享探索提示词（CORE_IDENTITY）
+│       └── ... 共享提示词模板
 │
 ├── requirements.txt
 └── tests/                         # 1300+ 测试
@@ -590,138 +557,47 @@ Chrome 105+ 会阻止 `vscode-webview://` 来源向 localhost 发请求，除非
 
 ---
 
-## 6. 配置驱动的工作流引擎
+## 6. Brain 编排器
 
-这是最近加入的最重要的新模块，也是理解 Conductor 核心编排逻辑的关键。
+Brain 是 Conductor 的核心编排层。它是一个跑在强模型上的 LLM 循环，**自己**决定 dispatch 哪些专精子 agent —— 没有基于关键词的 classifier，没有 YAML 路由表。
 
 ### 6.1 核心抽象
 
-每个任务都遵循同一个模式：
-
 ```
-输入 → 分类器 → 路由 → Agent(s) → 聚合 → 输出
+Query → Brain (LLM 循环) → 选择 meta-tool → 子 agent / swarm / specialized brain → 结果 → Brain 综合
 ```
 
-只有两种路由模式，覆盖所有场景：
+Brain 在它的 prompt 里被告知所有可用的子 agent + swarm（来自 `config/agents/*.md` 和 `config/swarms/*.yaml`）。它通过下面 4 个 meta-tool 调度：
 
-| 模式 | 行为 | 用于 |
-|------|------|------|
-| `first_match` | 分类器选最匹配的路由，执行该路由的 pipeline | 代码问答（Code Explorer）|
-| `parallel_all_matching` | 所有匹配的路由并行执行，再顺序执行 `post_pipeline` | PR 评审 |
+| Meta-tool | 用途 |
+|---|---|
+| `dispatch_agent("name", query)` | 单个专精 agent 探索一个具体目标 |
+| `dispatch_swarm("preset", queries=[...])` | 用预设并行跑 3-6 个 agent |
+| `transfer_to_brain("pr_review", params)` | 一次性切换到专精 brain（目前只有 PR Brain） |
+| `ask_user(question, options)` | 中途向用户确认方向 |
 
-### 6.2 工作流配置文件解析
+### 6.2 Agent 定义文件解析
 
-**代码问答工作流** (`code_explorer.yaml`，`first_match` 模式)：
-
-```yaml
-name: code-explorer
-route_mode: first_match
-
-# 预算配置：整个工作流的 token 总量和迭代上限
-budget:
-  base_tokens: 500_000
-  base_iterations: 25
-
-# 分类器类型：keyword_pattern = 匹配查询文本中的关键词
-dispatch:
-  classifier:
-    type: keyword_pattern
-
-routes:
-  # 路由名 → 触发条件 + pipeline
-  business_flow_tracing:
-    text_patterns:
-      - "flow|process|trace|how does|what happens"
-    pipeline:
-      - stage: explore
-        parallel: true          # 两个 Agent 并行
-        agents:
-          - agents/explore_implementation.md
-          - agents/explore_usage.md
-      - stage: synthesize       # 等上面完成后执行
-        agents:
-          - agents/explore_synthesizer.md
-
-  root_cause_analysis:
-    text_patterns:
-      - "bug|error|fail|why|root cause"
-    pipeline:
-      - stage: investigate
-        agents: [agents/explore_root_cause.md]
-
-  # code_review 路由委托给另一个工作流
-  code_review:
-    text_patterns:
-      - "review|pr review|do pr"
-    delegate: workflows/pr_review.yaml
-```
-
-**PR 评审工作流** (`pr_review.yaml`，`parallel_all_matching` 模式)：
-
-```yaml
-name: pr-review
-route_mode: parallel_all_matching
-
-budget:
-  base_tokens: 800_000
-  base_iterations: 40
-  # PR 大小乘数：小 PR 用 0.5×，大 PR 用 2.0×
-  size_multiplier:
-    small:  { max_lines: 500,   factor: 0.5 }
-    large:  { max_lines: 5000,  factor: 1.5 }
-
-# 分类器类型：risk_pattern = 匹配 git diff 的文件路径
-dispatch:
-  classifier:
-    type: risk_pattern
-
-routes:
-  security:
-    file_patterns:
-      - "auth|login|session|token|jwt|oauth"
-      - "password|secret|credential|api.?key"
-    pipeline:
-      - stage: explore
-        agents: [agents/security.md]
-
-  test_coverage:
-    file_patterns: []   # 空 = 由 agent 的 always_run 控制
-    pipeline:
-      - stage: explore
-        agents: [agents/test_coverage.md]
-
-# 所有路由并行完成后，顺序执行这些阶段
-post_pipeline:
-  - stage: arbitrate
-    agents: [agents/arbitrator.md]    # 仲裁严重程度
-  - stage: synthesize
-    agents: [agents/review_synthesizer.md]  # 生成最终报告
-```
-
-### 6.3 Agent 定义文件解析
-
-每个 Agent 是一个 Markdown 文件，YAML 头部是元数据，正文是指令：
+每个 agent 是一个 Markdown 文件，YAML frontmatter 是元数据，正文是该 agent 的人格 + 指令：
 
 ```markdown
 ---
 name: security
-type: explorer          # explorer = 用 AgentLoopService；judge = 单次 LLM 调用
-model_role: explorer    # explorer（轻量模型）或 strong（强模型）
+description: 检查认证、注入、密钥泄漏等安全风险
+model: explorer          # explorer（轻量模型）或 strong（强模型）
 
-tools:
-  core: true            # 包含工作流的 core_tools（grep、read_file 等）
-  extra:                # 这个 Agent 额外使用的工具
-    - find_references
-    - get_callers
-    - trace_variable    # 数据流追踪，安全 Agent 必备
+tools:                   # 这个 agent 可用的工具
+  - grep
+  - read_file
+  - find_references
+  - get_callers
+  - trace_variable       # 数据流追踪，安全 agent 必备
 
-budget_weight: 1.0      # 相对预算权重（1.0 = 标准份额）
+strategy: code_review    # 触发 prompts.py 里的 CODE_REVIEW_STRATEGY 模板
 
-trigger:
-  always: false         # true = 无论分类结果如何都激活（test_coverage 使用 true）
-
-input: [diff_spec, workspace_path]
-output: findings
+limits:
+  max_iterations: 20
+  budget_tokens: 200000
 ---
 
 ## 安全审查策略
@@ -736,98 +612,48 @@ output: findings
    ...
 ```
 
-### 6.4 WorkflowEngine 执行流程
+### 6.3 Swarm 预设
 
-```python
-# workflow/engine.py
+`config/swarms/*.yaml` 定义"一组 agent 加并行/顺序模式 + 综合指南"，让 Brain 一次 dispatch 多个 agent：
 
-class WorkflowEngine:
-    async def run_stream(self, workflow: WorkflowConfig, context: dict):
-        # Step 1: 分类
-        engine = ClassifierEngine(workflow)
-        result = engine.classify(context)
-
-        # Step 2: 按模式派发
-        if workflow.route_mode == "first_match":
-            # 选最匹配的路由
-            route = workflow.routes[result.best_route]
-            if route.delegate:
-                # 委托：加载另一个工作流重新运行
-                delegate_wf = load_workflow(route.delegate)
-                async for event in self.run_stream(delegate_wf, context):
-                    yield event
-            else:
-                async for event in self._run_pipeline(route.pipeline, ...):
-                    yield event
-
-        elif workflow.route_mode == "parallel_all_matching":
-            # 所有匹配的路由并发运行
-            await asyncio.gather(*[_run_one_route(rn) for rn in active_routes])
-            # post_pipeline 顺序运行
-            for stage in workflow.post_pipeline:
-                await self._run_stage(stage, context)
-
-    async def _run_agent(self, agent: AgentConfig, ...):
-        if agent.type == "explorer":
-            # 启动完整的 AgentLoopService（多轮 LLM + 工具调用）
-            svc = AgentLoopService(provider=self._resolve_provider(agent.model_role), ...)
-            return await svc.run(query=query, workspace_path=workspace_path)
-        elif agent.type == "judge":
-            # 单次 LLM 调用，不使用工具
-            return await provider.call_model(prompt=prompt, max_tokens=agent.max_tokens)
+```yaml
+# config/swarms/business_flow.yaml
+name: business_flow
+description: 跨多角度并行追踪一个业务流程
+mode: parallel
+agents:
+  - explore_implementation
+  - explore_usage
+  - explore_data_flow
+synthesis_guide: |
+  按入口 → 主流程 → 数据/状态变更 → 副作用的顺序综合。
+  必须给出 file:line 引用。
 ```
 
-### 6.5 分类器引擎
+### 6.4 PR Brain — 唯一的专精 brain
 
-`classifier_engine.py` 实现两种分类器：
+`pr_review` 是唯一通过 `transfer_to_brain` 激活的专精 brain。它运行 `PRBrainOrchestrator`，是一个 6 阶段确定性流水线（pre-compute → dispatch review agents → post-process → arbitration → merge recommendation → synthesis），实现细节见 `backend/app/agent_loop/pr_brain.py`。
 
-**keyword_pattern**（代码问答）：
+### 6.5 Query Markers — 前后端共享约定
 
-```python
-# 对每条路由的 text_patterns 计分
-# 查询 "why does auth fail" → root_cause_analysis (bug|fail 匹配) 得分最高
-for route_name, route in workflow.routes.items():
-    score = sum(
-        len(re.findall(pattern, query_text, re.IGNORECASE))
-        for pattern in route.text_patterns
-    )
-    scores[route_name] = score
-best_route = max(scores, key=scores.get)
-```
+前端 slash 指令（`/pr`、`/jira`、`/summary`、`/diff`）会在 query 前面加 `[query_type:X]` marker，作为给 Brain LLM 的 routing 暗号。Marker 字符串集中定义在 `backend/app/agent_loop/query_markers.py` 的 `QueryType` enum，前端的 `extension/webview-ui/src/utils/slashCommands.ts` 用同名 `QUERY_TYPE` 常量手动同步（修改时两边都要改）。
 
-**risk_pattern**（PR 评审）：
+Marker **不被任何 Python 代码 parse** —— 它只是 prompt 上下文里的提示，让 Brain 在意图模糊时也能可靠地选对 dispatch 路径。
 
-```python
-# 对每个维度，统计 diff 中有多少文件路径匹配其 file_patterns
-for route_name, route in workflow.routes.items():
-    matched_files = [
-        f for f in changed_file_paths
-        if any(re.search(pat, f, re.IGNORECASE) for pat in route.file_patterns)
-    ]
-    level = _level_from_count(len(matched_files), route.thresholds)
-    result.matched_routes[route_name] = level   # "low" | "medium" | "high" | "critical"
-```
-
-### 6.6 工作流 API 接口
+### 6.6 Brain Swarms API
 
 ```bash
-# 列出所有可用工作流
-GET /api/workflows
-# → [{"name": "pr-review", "route_mode": "parallel_all_matching", "agent_count": 7}, ...]
-
-# 工作流详情（包含所有路由和 Agent 配置）
-GET /api/workflows/pr-review
-
-# Mermaid 流程图（可在 GitHub Markdown 中渲染）
-GET /api/workflows/pr-review/mermaid
-
-# React Flow 图（工作流可视化面板用）
-GET /api/workflows/code-explorer/graph
-
-# 更新 Explorer/Judge 模型配置
-PUT /api/workflows/pr-review/models
-{ "explorer": "claude-haiku-4-5", "judge": "claude-sonnet-4-6" }
+# 返回 Brain 可调度的所有专精 brain + swarm（含 agent 组成）
+GET /api/brain/swarms
+# → {
+#     "brain_model": "claude-sonnet-4-6",
+#     "core_tools": [...],
+#     "specialized_brains": [{ "name": "pr_review", "type": "brain", "mode": "pipeline", "agents": [...] }],
+#     "swarms": [{ "name": "business_flow", "type": "swarm", "mode": "parallel", "agents": [...] }]
+#   }
 ```
+
+供 extension 的 Agent Swarm UI tab 可视化 Brain 的 handoff 目标（`transfer_to_brain` 与 `dispatch_swarm`）。
 
 ---
 
@@ -1986,15 +1812,15 @@ langfuse:
 PR 评审的 Langfuse 追踪树示例：
 
 ```
-workflow: pr-review                      45.2s  $0.38
-├── classify: risk_pattern               0.1ms
-│   → correctness=HIGH, security=MEDIUM
-├── route: correctness                   35.2s  $0.12
+brain: pr_review                         45.2s  $0.38
+├── transfer_to_brain("pr_review")       0.1ms
+├── PRBrainOrchestrator phase 1: pre-compute (parse_diff, classify_risk, prefetch_diffs)
+├── dispatch agent: correctness          35.2s  $0.12
 │   └── agent: correctness (explorer)
 │       ├── llm_call (generation)         1.2s   →工具: grep
 │       ├── llm_call (generation)         0.9s   →工具: read_file
 │       └── ... (共 18 次工具调用)
-├── route: security                      32.8s  $0.09
+├── dispatch agent: security             32.8s  $0.09
 │   └── ...（与 correctness 并行）
 ├── stage: arbitrate                      3.8s  $0.08
 │   └── agent: arbitrator (judge)
@@ -2339,20 +2165,24 @@ def _configured_providers(self) -> list[tuple[str, AIProvider]]:
         yield "my_provider", MyProvider(self._config.ai_providers.my_provider)
 ```
 
-### 20.4 修改工作流路由的触发条件
+### 20.4 修改某个 agent 的工具集或人格
 
-直接编辑 `config/workflows/*.yaml`，不需要改 Python 代码：
+直接编辑 `config/agents/*.md`，不需要改 Python 代码：
 
-```yaml
-# config/workflows/code_explorer.yaml
-routes:
-  root_cause_analysis:
-    text_patterns:
-      - "bug|error|fail|why|root cause|debug|crash"
-      - "exception|broken|wrong|unexpected"   # 新增触发词
+```markdown
+---
+name: security
+tools: [grep, read_file, find_references, get_callers, trace_variable, db_schema]
+limits:
+  max_iterations: 25
+---
+
+## 安全审查策略
+- 新增：检查 SQLAlchemy raw SQL 拼接
+- ...
 ```
 
-修改后重启后端即可生效（工作流在每次请求时从文件加载）。
+修改后重启后端即可生效（agent 在每次 Brain 启动时从文件加载）。
 
 ### 20.5 调试 Agent Loop
 

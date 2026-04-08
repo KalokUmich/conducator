@@ -60,16 +60,6 @@ from .shared import (
     should_reject_pr as _should_reject_pr,
 )
 
-# Workflow engine (optional — used when workflow_config is provided)
-try:
-    from app.workflow.classifier_engine import ClassifierEngine  # noqa: F401
-    from app.workflow.engine import WorkflowEngine  # noqa: F401
-    from app.workflow.loader import load_workflow  # noqa: F401
-
-    _WORKFLOW_AVAILABLE = True
-except ImportError:
-    _WORKFLOW_AVAILABLE = False
-
 logger = logging.getLogger(__name__)
 
 
@@ -488,14 +478,12 @@ class CodeReviewService:
         provider: AIProvider,
         explorer_provider: Optional[AIProvider] = None,
         trace_writer=None,
-        workflow_config=None,
     ) -> None:
         self._provider = provider
         self._explorer_provider = explorer_provider
         # Sub-agents prefer the explorer model; fall back to the main one
         self._sub_agent_provider = explorer_provider or provider
         self._trace_writer = trace_writer
-        self._workflow_config = workflow_config
 
     @observe(name="code_review")
     async def review(

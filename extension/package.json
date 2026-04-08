@@ -57,10 +57,6 @@
         "title": "Conductor: Search Remote Workspace"
       },
       {
-        "command": "conductor.showWorkflow",
-        "title": "Conductor: View Agent Workflows"
-      },
-      {
         "command": "conductor.jiraConnect",
         "title": "Conductor: Connect to Jira"
       },

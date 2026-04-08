@@ -57,13 +57,6 @@ The extension drives all state through a finite state machine persisted in `glob
 - Ghost text hint overlay shows the expected argument format for each command
 - Backward compatible: bare `@AI xxx` and `@AI do PR ...` still work unchanged
 
-#### Workflow Visualization
-- `conductor.showWorkflow` command (graph icon in chat header) opens a side-panel
-- SVG graph of the active workflow (PR Review or Code Explorer) with dark glass theme
-- Nodes: explorer (violet border), judge (indigo border), classifier (diamond), group (dashed)
-- Click a node to see agent details: tool list, budget, trigger conditions, prompt excerpt
-- Two workflow tabs: PR Review and Code Explorer
-
 #### AI Workflows
 - Fetch provider status and switch active AI model
 - Summarize all or selected chat messages (`/ai/summarize`)
@@ -109,7 +102,7 @@ The extension drives all state through a finite state machine persisted in `glob
 ```text
 extension/
 ├─ src/
-│  ├─ extension.ts                        # Activation, command registration (incl. conductor.showWorkflow)
+│  ├─ extension.ts                        # Activation, command registration
 │  ├─ services/
 │  │  ├─ conductorStateMachine.ts         # FSM states and transitions
 │  │  ├─ conductorController.ts           # FSM driver (start/join/stop)
@@ -117,7 +110,6 @@ extension/
 │  │  ├─ workspacePanel.ts               # Git workspace 5-step wizard
 │  │  ├─ workspaceClient.ts              # /workspace/ HTTP client
 │  │  ├─ workspaceIndexer.ts             # AST symbol extraction + incremental indexing
-│  │  ├─ workflowPanel.ts               # WorkflowPanel singleton — workflow visualization WebView
 │  │  ├─ (explainWithContextPipeline.ts removed — merged into extension.ts _handleAskAI with codeContext)
 │  │  ├─ lspResolver.ts                 # VS Code LSP definition + references
 │  │  ├─ relevanceRanker.ts             # Hybrid structural + semantic relevance scoring
@@ -137,7 +129,6 @@ extension/
 ├─ media/
 │  ├─ webview.js                         # React WebView bundle (built from webview-ui/)
 │  ├─ webview.css                        # React WebView styles
-│  ├─ workflow.html                      # Workflow visualization WebView — SVG graph + agent details
 │  ├─ input.css
 │  └─ tailwind.css
 └─ package.json
