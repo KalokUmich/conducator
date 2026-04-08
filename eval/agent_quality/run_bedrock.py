@@ -59,13 +59,36 @@ logger = logging.getLogger("agent_eval")
 # ---------------------------------------------------------------------------
 
 def _create_provider(model_id: str = "eu.anthropic.claude-sonnet-4-6"):
-    """Create a Bedrock provider from conductor.secrets.yaml."""
+    """Create a Bedrock provider from conductor.secrets.yaml.
+
+    Reads ``conductor.secrets.yaml`` and deep-merges
+    ``conductor.secrets.local.yaml`` on top (same override convention as
+    the main backend ``app/config.py``), so locally-refreshed AWS SSO
+    tokens land here without editing the committed file.
+    """
     import yaml
     from app.ai_provider.claude_bedrock import ClaudeBedrockProvider
 
-    secrets_path = backend_dir.parent / "config" / "conductor.secrets.yaml"
-    with open(secrets_path) as f:
-        secrets = yaml.safe_load(f)
+    config_dir = backend_dir.parent / "config"
+    base_path = config_dir / "conductor.secrets.yaml"
+    local_path = config_dir / "conductor.secrets.local.yaml"
+
+    with open(base_path) as f:
+        secrets = yaml.safe_load(f) or {}
+
+    if local_path.is_file():
+        with open(local_path) as f:
+            local = yaml.safe_load(f) or {}
+
+        def _deep_merge(base: dict, override: dict) -> dict:
+            for k, v in override.items():
+                if isinstance(v, dict) and isinstance(base.get(k), dict):
+                    _deep_merge(base[k], v)
+                else:
+                    base[k] = v
+            return base
+
+        _deep_merge(secrets, local)
 
     bedrock = secrets["ai_providers"]["aws_bedrock"]
     provider = ClaudeBedrockProvider(
