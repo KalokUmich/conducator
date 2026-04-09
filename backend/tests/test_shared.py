@@ -315,7 +315,7 @@ class TestPostFilter:
 
     def test_post_filter_keeps_high_confidence(self):
         findings = [
-            _make_finding(confidence=0.75),  # exactly at boundary
+            _make_finding(confidence=0.80),  # exactly at MIN_CONFIDENCE boundary
             _make_finding(confidence=0.90),
         ]
         result = post_filter(findings)
@@ -526,7 +526,14 @@ class TestShouldRejectPr:
 
 class TestAgentCategories:
     def test_agent_categories_has_expected_keys(self):
-        expected = {"correctness", "concurrency", "security", "reliability", "test_coverage"}
+        expected = {
+            "correctness",
+            "correctness_b",
+            "concurrency",
+            "security",
+            "reliability",
+            "test_coverage",
+        }
         assert set(AGENT_CATEGORIES.keys()) == expected
 
     def test_agent_categories_values_are_finding_categories(self):
