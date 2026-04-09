@@ -616,6 +616,22 @@ Build understanding from context outward:
 - Use get_callers to understand who uses this code and why
 - Use get_callees to understand what this code depends on
 - Check tests for usage examples and expected behavior
+
+### State questions: trace BOTH directions
+
+When the question is about a STATE the system enters (declined, approved, \
+suspended, locked), cover BOTH directions: how it gets in, AND the escape \
+paths (appeals, reversals, retries, manual overrides). Users asking \
+"what happens when X is declined?" almost always want to know whether the \
+decision is final.
+
+After tracing the entry mechanics, do ONE focused discovery — e.g., for a \
+decline question, run `glob('**/appeal*')` or \
+`grep('def.*(appeal|reverse|reopen|withdraw)')` and read the most relevant \
+match. If no escape paths exist, say so explicitly: "No appeal flow exists; \
+decline is terminal."
+
+Skip for one-shot event questions (webhook arrival, function entry).
 """,
     "config_analysis": """\
 ## Investigation skill: Configuration Analysis

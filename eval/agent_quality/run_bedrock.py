@@ -67,6 +67,7 @@ def _create_provider(model_id: str = "eu.anthropic.claude-sonnet-4-6"):
     tokens land here without editing the committed file.
     """
     import yaml
+
     from app.ai_provider.claude_bedrock import ClaudeBedrockProvider
 
     config_dir = backend_dir.parent / "config"
@@ -157,8 +158,8 @@ def score_answer(answer: str, required_findings: list[dict]) -> dict:
 
 async def run_direct_agent(provider, workspace: str, question: str) -> dict:
     """Run direct AgentLoopService."""
-    from app.agent_loop.service import AgentLoopService
     from app.agent_loop.budget import BudgetConfig
+    from app.agent_loop.service import AgentLoopService
     from app.code_tools.executor import LocalToolExecutor
 
     executor = LocalToolExecutor(workspace_path=workspace)
@@ -180,8 +181,8 @@ async def run_direct_agent(provider, workspace: str, question: str) -> dict:
 
 async def run_brain(provider, workspace: str, question: str, explorer_provider=None) -> dict:
     """Run Brain orchestrator mode."""
-    from app.workflow.engine import WorkflowEngine
     from app.code_tools.executor import LocalToolExecutor
+    from app.workflow.engine import WorkflowEngine
 
     executor = LocalToolExecutor(workspace_path=workspace)
     engine = WorkflowEngine(
@@ -322,11 +323,18 @@ async def main():
 
         all_results[case_id] = case_results
 
-    # Save results
+    # Save results — write the latest-pointer file AND a timestamped snapshot
+    # so historical runs aren't lost the next time the eval runs. Useful for
+    # variance analysis and re-scoring with the LLM judge after the fact.
     out_file = EVAL_DIR / "results_bedrock.json"
     with open(out_file, "w") as f:
         json.dump(all_results, f, indent=2, default=str)
-    logger.info("Results saved to %s", out_file)
+
+    snapshot_file = EVAL_DIR / f"results_bedrock_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    with open(snapshot_file, "w") as f:
+        json.dump(all_results, f, indent=2, default=str)
+
+    logger.info("Results saved to %s (and snapshot %s)", out_file, snapshot_file.name)
 
     # Summary
     print(f"\n{'='*60}")
