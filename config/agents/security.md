@@ -2,7 +2,6 @@
 name: security
 description: "Detects injection vulnerabilities, auth bypass, secrets exposure, insecure defaults, and input validation gaps"
 model: explorer
-strategy: code_review
 skill: code_review_pr
 tools: [git_diff, git_show, git_log, trace_variable, find_references, git_blame, ast_search]
 limits:
@@ -31,10 +30,10 @@ Fix: Use parameterized query: `cursor.execute("SELECT * FROM applications WHERE 
 </example>
 
 <example>
-Finding: Auth header forwarded on redirect (warning)
+Finding: Auth header forwarded on redirect (medium)
 
 File: `http_client.py:205`
 Evidence: Redirect handler at line 205 follows 302 without stripping `Authorization` header. If the redirect target is a different domain, credentials leak.
-Severity: warning (code-provable risk, but trigger depends on whether cross-domain redirects actually occur in practice)
+Severity: medium (provable risk, but trigger depends on whether cross-domain redirects actually occur in practice)
 Fix: Strip `Authorization` header when redirect target has a different host than the original request.
 </example>

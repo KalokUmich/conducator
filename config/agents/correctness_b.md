@@ -2,7 +2,6 @@
 name: correctness_b
 description: "Defensive reviewer: null safety, error handling, edge cases, and contract violations in changed code"
 model: explorer
-strategy: code_review
 skill: code_review_pr
 tools: [git_diff, git_show, git_log, find_references, get_callers, get_dependencies, get_dependents]
 limits:
@@ -31,10 +30,10 @@ Fix: Add `if (response.getPaymentDetails() == null) return;` before line 312.
 </example>
 
 <example>
-Finding: Exception swallowed in fire-and-forget thread (warning)
+Finding: Exception swallowed in fire-and-forget thread (medium)
 
 File: `NotificationService.java:88`
 Evidence: `ThreadPool.submit(() -> sendEmail(...))` at line 88. The `sendEmail` method throws `MessagingException` but the `catch` block at line 95 only logs and returns. User sees "notification sent" but email never delivered.
-Severity: warning (code-provable trigger, but impact depends on whether email is critical path)
+Severity: medium (provable trigger, but impact depends on whether email is critical path)
 Fix: Add error tracking (DLQ or metric), or propagate failure to caller.
 </example>

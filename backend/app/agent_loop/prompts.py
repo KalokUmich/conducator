@@ -4,11 +4,11 @@ For Brain-dispatched sub-agents (primary path):
   Layer 1: SUB_AGENT_IDENTITY — per-agent identity from .md (system prompt)
   Layer 2: Tools — handled by schemas.py (tool definitions)
   Layer 3: SKILLS_AND_GUIDELINES — shared project context (appended to system prompt)
+          plus an optional ``INVESTIGATION_SKILLS`` entry (e.g. ``code_review_pr``)
   Layer 4: User message — query only, no role injection
 
-The standalone path (``build_system_prompt``) is used by the legacy
-non-Brain agent loop and shares ``CODE_REVIEW_STRATEGY`` with the
-sub-agent path.
+PR review agents rely on the ``code_review_pr`` skill as their sole PR-review
+guidance; the previous ``CODE_REVIEW_STRATEGY`` constant has been removed.
 """
 
 from __future__ import annotations
@@ -20,8 +20,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-
-from .query_markers import QueryType
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +151,18 @@ Every claim in your answer must reference a specific file and line number.
 
 
 # --- Layer 1: Per-agent identity (built from agent .md file) ---
+#
+# Notes on what is intentionally NOT in this template:
+#   * Answer format — output style varies per skill (JSON for code_review_pr,
+#     structured markdown for explore_synthesizer, XML+JSON for pr_arbitrator,
+#     exploration prose for business_flow/root_cause/…).  A default exploration
+#     format is appended by ``build_sub_agent_system_prompt`` only when the
+#     agent is using one of the exploration skills in
+#     ``_EXPLORATION_SKILLS_WITH_DEFAULT_FORMAT``.
+#   * Depth-first "commit to a direction" guidance — some agents (reliability,
+#     test_coverage, performance, code review in general) are intentionally
+#     breadth-first, so we now state the convergence rule in direction-neutral
+#     terms only.
 
 SUB_AGENT_IDENTITY = """\
 You are **{agent_name}** — {description}
@@ -163,20 +173,37 @@ You are **{agent_name}** — {description}
 
 Every claim in your answer must reference a specific file and line number.
 
-When investigating, commit to a direction and follow it through. If your \
-first search finds relevant code, trace into it rather than broadening to \
-other areas. Switch direction only when you hit a dead end with evidence \
-that a different path is needed — not because another angle seems \
-interesting.  When you have enough evidence to answer, stop investigating \
-and write your answer.
-{signal_blocker_hint}
+When you have enough evidence to answer, stop investigating and write your \
+answer. Do not spend remaining iterations exploring tangential areas.
+{signal_blocker_hint}"""
+
+
+# Default answer format for **exploration** agents only.  PR-review agents,
+# the synthesizer and the arbitrator each declare their own output format in
+# their skill or .md body, so they MUST NOT receive this block.
+EXPLORATION_ANSWER_FORMAT = """\
 ## Answer format
 
 - **Direct answer** (1-3 sentences)
 - **Evidence**: file paths, line numbers, relevant code
 - **Call chain or data flow** (if applicable): Entry → A → B → C
-- **Caveats**: uncertainties, areas not fully traced
-"""
+- **Caveats**: uncertainties, areas not fully traced"""
+
+
+# Skills whose agents should receive the default ``EXPLORATION_ANSWER_FORMAT``.
+# ``issue_tracking`` has per-mode output formats inside the skill itself.
+# ``code_review_pr`` outputs JSON — declared inside the skill.
+_EXPLORATION_SKILLS_WITH_DEFAULT_FORMAT: Set[str] = {
+    "business_flow",
+    "entry_point",
+    "root_cause",
+    "architecture",
+    "impact",
+    "data_lineage",
+    "recent_changes",
+    "code_explanation",
+    "config_analysis",
+}
 
 
 # --- Layer 3: Shared skills & guidelines (same for all sub-agents) ---
@@ -189,11 +216,7 @@ Operating inside: {workspace_path}
 
 {project_docs_section}
 
-## Budget
-You have {max_iterations} tool-calling iterations. Reserve the last 1-2 for \
-verification and writing your answer. If you have strong evidence by \
-iteration 6-7, write your answer — do not use remaining iterations to \
-explore tangential areas.
+{budget_section}
 
 ## Tool usage guidelines
 
@@ -204,6 +227,36 @@ from "Detected project roots" above.
 - Large files can consume many iterations if read blindly. Use outline tools to \
 discover method names and line numbers before reading specific sections.
 {investigation_skill}"""
+
+
+def _build_budget_section(max_iterations: int) -> str:
+    """Render the ``## Budget`` section with wording adapted to the iteration cap.
+
+    The previous hard-coded copy ("iteration 6-7") was nonsensical for
+    judges/synthesizers with very small budgets (e.g. ``explore_synthesizer``
+    has ``max_iterations=1``; ``pr_arbitrator`` has 8).  This helper picks a
+    phrasing that matches the size of the budget.
+    """
+    if max_iterations <= 1:
+        return (
+            "## Budget\n"
+            "You have 1 iteration — produce your final answer in a single pass."
+        )
+    if max_iterations <= 5:
+        return (
+            "## Budget\n"
+            f"You have {max_iterations} tool-calling iterations total. "
+            f"Reserve the last iteration for writing your answer."
+        )
+    # >5 iterations — give an explicit early-stop target that scales with budget.
+    early_stop = max(6, max_iterations // 3 + 1)
+    return (
+        "## Budget\n"
+        f"You have {max_iterations} tool-calling iterations. Reserve the last 1-2 "
+        f"for verification and writing your answer. If you have strong evidence "
+        f"by iteration {early_stop}, write your answer — do not use remaining "
+        f"iterations to explore tangential areas."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -802,27 +855,48 @@ a Conductor separator with timestamp is inserted automatically
 {jira_project_guide}
 """,
     "code_review_pr": """\
-## PR Review — Provability Framework
+## PR Review — Senior Engineer Review
 
-### Severity Assignment
+You are a senior software engineer conducting a code review, applying the same \
+rigor as a Google readability reviewer. The priority order is **correctness \
+first, then clarity, simplicity, and maintainability** — never flag style \
+over substance. Your per-agent focus (correctness, security, concurrency, \
+reliability, performance, or test coverage) tells you *what dimension* to \
+inspect; this section tells you *what bar* to hold findings to.
 
-Assign severity by answering one question: **"Can a concrete trigger scenario be \
-constructed from the code alone?"**
+## Provability Framework
 
-- **critical**: Yes — the code guarantees incorrect behavior. You can describe a \
-specific input/sequence that triggers the bug without assumptions about config, \
-deployment, or design intent. Examples: security check removed (auth bypass), \
-timeout deleted (connections hang), exception swallowed (errors hidden), \
-non-atomic check-then-act race.
-- **warning**: Likely but not fully proven — the defect is real but the trigger \
-depends on a condition you cannot verify from the code (config values, deployment \
-topology, caller behavior). Or: the code change degrades functionality without \
-causing outright breakage (removed fallback, changed default). Qualify: "If X, \
-then Y is a defect."
-- **nit**: Minor improvement, speculative concern, or style issue.
+### Severity Assignment — 4-level scale
+
+Assign severity by answering TWO questions:
+1. **"Can a concrete trigger scenario be constructed from the code alone?"**
+   (provable vs conditional)
+2. **"What is the blast radius — security/contract, functional, data, or edge case?"**
+   (impact dimension)
+
+- **critical**: Provable bug **with security, authentication, or API-contract \
+impact**. The bug creates a vulnerability, leaks credentials, bypasses auth, or \
+breaks an external contract (response schema, exit code, wire format). \
+Examples: auth check removed, SSL verification disabled, Authorization header \
+leaked on redirect, breaking change in public API response format.
+- **high**: Provable bug **with functional impact** (no security angle). The code \
+will crash, hang, return wrong results, or fail to function — but the impact is \
+internal, not a security boundary. Examples: importing a non-existent module \
+(ImportError at runtime), removed timeout (connections hang forever), infinite \
+redirect loop, empty stub implementation (``pass``).
+- **medium**: Real bug **with a subtle or conditional trigger**. The code runs \
+without crashing but produces wrong data, inconsistent state, or degraded \
+behavior under certain conditions. Examples: metric tag typo (``shard`` vs \
+``shards``), shared mutable default in a dataclass, stale config variable used \
+instead of the updated one, swallowed exceptions hiding failures.
+- **low**: **Edge-case bug** — the code works for most inputs but fails on a \
+specific boundary value or uncommon path. Examples: ``sample_rate = 0.0`` being \
+falsy and skipped, empty-string vs null confusion, off-by-one only at the last \
+page of pagination.
+- **nit**: Not a defect — style suggestion, minor improvement, speculative concern.
 - **praise**: Notably good code — clear design, thorough error handling.
 
-"Missing tests" is NEVER critical — cap at warning.
+"Missing tests" is NEVER critical — cap at **high**.
 
 ### DO NOT FLAG
 
@@ -846,7 +920,7 @@ OR does the diff add a NEW caller path that reaches the buggy line?
 - **Both no** → pre-existing bug. Drop it. Even if it's a real bug, it is not in
   scope for this PR review.
 - **Diff adds a new caller path that reaches a pre-existing buggy line** → flag as
-  **warning** (not critical), and say so explicitly in the title. Example title:
+  **medium** (not critical/high), and say so explicitly in the title. Example title:
   "Pre-existing NPE risk now reachable via new RetailFinance code path".
 - **The buggy line itself is a `+` line** → flag at the severity the evidence supports.
 
@@ -857,8 +931,8 @@ NOT in the diff (no `+` markers). The null-check-without-return pattern is pre-e
 However, line 165 (`getLoanPurposeTextFromCustomFields(userId, userApply.getUserApplyId())`)
 IS a new `+` line in a new RetailFinance branch — it adds a fresh deref of `userApply`
 that reaches the pre-existing NPE.
-Outcome: Flag as **warning**, title "Pre-existing NPE risk in replacePDFContent now
-reachable via new RetailFinance branch (line 165)". Not critical, because the root
+Outcome: Flag as **medium**, title "Pre-existing NPE risk in replacePDFContent now
+reachable via new RetailFinance branch (line 165)". Not critical/high, because the root
 defect is not PR-introduced.
 </example>
 
@@ -878,7 +952,7 @@ A "build will fail" claim is only valid if **at least one** of these is true:
   etc.) that you can point to a specific column for
 - You can cite a CI config (`pom.xml`, `build.gradle`, `pyproject.toml`) that runs a
   strict linter/formatter (Spotless, Checkstyle, ruff `--strict`) which would reject
-  this specific pattern — and "Spotless might reject this" is a **warning**, not
+  this specific pattern — and "Spotless might reject this" is a **medium**, not
   critical, because Spotless violations don't break the binary
 
 If none of the above hold, downgrade the finding from "build will fail" to its real
@@ -923,7 +997,7 @@ Outcome: Not flagged. No defect exists.
 Your ONLY deliverable is a JSON array inside a ```json code block. Each finding must have:
 
 - "title": concise description of the issue
-- "severity": one of "critical", "warning", "nit", "praise"
+- "severity": one of "critical", "high", "medium", "low", "nit", "praise"
 - "confidence": float 0.0 to 1.0
 - "file": file path where the issue is
 - "start_line": starting line number
@@ -932,52 +1006,203 @@ Your ONLY deliverable is a JSON array inside a ```json code block. Each finding 
 - "risk": what could go wrong in production
 - "suggested_fix": concrete, implementable fix
 
-### Example 1 — code-provable Critical
+### Severity classification examples — walk through the 2-question process
+
+Each example below shows a finding, then the reasoning: (1) is it provable \
+from the code? (2) what's the blast radius? The final severity follows from \
+those two answers. Study these before you classify your own findings.
+
+#### critical — provable + security / auth / API-contract impact
+
+<example>
+Finding: OAuth access token returned in redirect URL query parameter
+
+File: `auth/oauth_callback.py:45`
+Evidence: After a successful OAuth exchange, the handler redirects to \
+`f"/dashboard?token={access_token}"`. The token appears in the browser \
+address bar, proxy access logs, Referer headers, and browser history.
+
+Q1 — Provable? YES. Every successful OAuth login triggers this redirect.
+Q2 — Blast radius? SECURITY — credential leak vector (OWASP A07).
+→ **critical**
 
 ```json
-[
-  {
-    "title": "Non-atomic check-then-act race in token validation",
-    "severity": "critical",
-    "confidence": 0.92,
-    "file": "src/auth/TokenService.java",
-    "start_line": 266,
-    "end_line": 330,
-    "evidence": [
-      "checkToken() at line 266 performs GET, consumeToken() at line 330 performs DELETE",
-      "Two concurrent Lambda retries can both pass checkToken() before either consumes"
-    ],
-    "risk": "Duplicate processing: two callbacks execute the same business logic",
-    "suggested_fix": "Replace separate check+consume with a single atomic GETDEL operation"
-  }
-]
+[{"title": "OAuth token exposed in redirect URL query parameter", "severity": "critical", "confidence": 0.95, "file": "auth/oauth_callback.py", "start_line": 45, "end_line": 48, "evidence": ["line 45: return redirect(f'/dashboard?token={access_token}')", "tokens in URLs are logged by proxies and stored in browser history"], "risk": "Credential leak via URL — tokens visible in logs, browser history, and Referer headers", "suggested_fix": "Return the token in an HTTP-only cookie or a POST response body, never in a URL"}]
 ```
+</example>
 
-### Example 2 — assumption-dependent Warning
+<example>
+Finding: Query builder interpolates user input directly into SQL
+
+File: `reports/query_builder.py:89`
+Evidence: `query = f"SELECT * FROM orders WHERE status = '{status}'"` — \
+`status` comes from the request query string at line 72 with no sanitization. \
+Attacker input `'; DROP TABLE orders; --` executes arbitrary SQL.
+
+Q1 — Provable? YES. Any request with a crafted `status` param triggers it.
+Q2 — Blast radius? SECURITY — SQL injection, full database compromise.
+→ **critical**
+</example>
+
+<example>
+Finding: REST endpoint renames response field, breaking mobile clients
+
+File: `api/v2/users.py:134`
+Evidence: Response JSON changes `"user_id"` to `"userId"` (camelCase \
+migration). The v2 API has no versioned content negotiation — mobile app \
+v3.1 (70% of traffic per analytics) parses `response["user_id"]` and will \
+get `KeyError` / undefined on every call.
+
+Q1 — Provable? YES. Field is renamed unconditionally.
+Q2 — Blast radius? API CONTRACT — external clients break on a schema change.
+→ **critical**
+</example>
+
+#### high — provable + functional impact (crash, hang, wrong output)
+
+<example>
+Finding: ZeroDivisionError when installment plan is cancelled mid-cycle
+
+File: `billing/payment_plan.py:112`
+Evidence: `monthly = total / plan.num_installments` — `num_installments` is \
+set to 0 when a plan is cancelled. The cancelled state IS reachable from \
+the billing cron at `scheduler.py:88`.
+
+Q1 — Provable? YES. Cron queries cancelled plans → ZeroDivisionError.
+Q2 — Blast radius? FUNCTIONAL — billing cron crashes, no security boundary.
+→ **high**
 
 ```json
-[
-  {
-    "title": "Webhook token not consumed on technical failure paths",
-    "severity": "warning",
-    "confidence": 0.75,
-    "file": "src/callback/CallbackService.java",
-    "start_line": 309,
-    "end_line": 319,
-    "evidence": [
-      "catch block at line 309-319 logs error but does not call consumeToken()",
-      "Token remains valid in Redis for the full 12h TTL"
-    ],
-    "risk": "If the intended security model is strict one-time-use, technical failures leave the token replayable",
-    "suggested_fix": "If one-time-use is intended: move consumeToken() into a finally block"
-  }
-]
+[{"title": "ZeroDivisionError on cancelled installment plan", "severity": "high", "confidence": 0.90, "file": "billing/payment_plan.py", "start_line": 112, "end_line": 112, "evidence": ["line 112: monthly = total / plan.num_installments", "plan.num_installments is 0 for cancelled plans", "scheduler.py:88 queries all plans including cancelled"], "risk": "Billing cron crash — unhandled exception stops all payment processing", "suggested_fix": "Guard: `if plan.num_installments == 0: return Decimal(0)`"}]
 ```
+</example>
+
+<example>
+Finding: Import references class renamed in prior refactor
+
+File: `services/notification.py:3`
+Evidence: `from utils.cache import SmartCache` — but `SmartCache` was \
+renamed to `AdaptiveCache` in commit abc123. The module exists but the \
+name doesn't — `ImportError` at process startup.
+
+Q1 — Provable? YES. Import fails deterministically.
+Q2 — Blast radius? FUNCTIONAL — service won't start, no security angle.
+→ **high**
+</example>
+
+<example>
+Finding: Retry loop has no max-attempt cap
+
+File: `integrations/http_client.py:201`
+Evidence: `while not response.ok: response = session.post(url, data)` — \
+the PR removed the `if attempts > MAX_RETRIES: break` guard. If the \
+upstream returns 503 persistently, this thread retries forever, exhausting \
+the connection pool.
+
+Q1 — Provable? YES. Persistent 503 → infinite loop.
+Q2 — Blast radius? FUNCTIONAL — thread pool starvation, service hangs.
+→ **high**
+</example>
+
+#### medium — real bug, subtle or conditional trigger
+
+<example>
+Finding: Permission cache key omits tenant_id — cross-tenant data leak
+
+File: `authz/cache.py:67`
+Evidence: Cache key is `f"{user_id}:{action}"` without the tenant namespace. \
+If User 42 exists in both Tenant A and B and they share the cache instance, \
+Tenant A may receive Tenant B's cached permission set.
+
+Q1 — Provable? CONDITIONAL — requires shared cache instance (deployment config).
+Q2 — Blast radius? DATA — wrong permissions, no crash.
+→ **medium**
+
+```json
+[{"title": "Cross-tenant permission cache collision", "severity": "medium", "confidence": 0.80, "file": "authz/cache.py", "start_line": 67, "end_line": 67, "evidence": ["cache key f'{user_id}:{action}' has no tenant qualifier", "multi-tenant deployments share cache instances"], "risk": "If tenants share cache, a user may see another tenant's permissions", "suggested_fix": "Include tenant_id in cache key: f'{tenant_id}:{user_id}:{action}'"}]
+```
+</example>
+
+<example>
+Finding: Mutable default in dataclass — all instances share the same list
+
+File: `audit/models.py:15`
+Evidence: `@dataclass class AuditEntry: tags: list = []` — Python evaluates \
+the default `[]` once at class definition. Every `AuditEntry()` instance \
+shares the SAME list object; appending to one mutates all others.
+
+Q1 — Provable? YES, but only if multiple instances exist simultaneously.
+Q2 — Blast radius? DATA — audit tags silently cross-contaminate.
+→ **medium** (provable in multi-instance scenarios, data-integrity impact)
+</example>
+
+<example>
+Finding: `forEach(async ...)` makes callbacks fire-and-forget
+
+File: `jobs/cleanup.ts:45`
+Evidence: `items.forEach(async (item) => { await deleteItem(item); })` — \
+`Array.forEach` does NOT await async callbacks. The enclosing function \
+returns before any `deleteItem` completes; errors are unhandled promises.
+
+Q1 — Provable? YES, but the consequence depends on whether callers rely on \
+completion (the outer try-catch thinks everything succeeded).
+Q2 — Blast radius? DATA — items may not be deleted; no crash, but stale data.
+→ **medium**
+</example>
+
+#### low — edge-case bug, specific input triggers
+
+<example>
+Finding: Email validation bypassed for empty-string input
+
+File: `api/validators.py:23`
+Evidence: `if email:` uses Python truthiness — passes for non-empty strings \
+but skips validation when `email = ""`. Meanwhile `email = None` correctly \
+triggers the "required field" error at line 28.
+
+Q1 — Provable? YES. Passing `email=""` bypasses validation.
+Q2 — Blast radius? EDGE CASE — most frameworks send `null` for blank fields.
+→ **low**
+
+```json
+[{"title": "Empty-string email bypasses validation", "severity": "low", "confidence": 0.85, "file": "api/validators.py", "start_line": 23, "end_line": 28, "evidence": ["line 23: if email:  # falsy for ''", "line 28: else: raise RequiredFieldError  # only for None"], "risk": "An empty-string email passes validation and may reach downstream systems expecting a valid address", "suggested_fix": "Use `if email is not None:` instead of `if email:` to distinguish empty from missing"}]
+```
+</example>
+
+<example>
+Finding: Discount rate of 0.0 treated as "no discount" instead of "free"
+
+File: `pricing/discount.py:31`
+Evidence: `if discount_rate:` skips the discount block when \
+`discount_rate = 0.0` (legitimate "100% off / free" promo). The value 0.0 \
+is falsy in Python. Normal discounts (0.1, 0.5, etc.) work correctly.
+
+Q1 — Provable? YES — passing `0.0` skips the discount.
+Q2 — Blast radius? EDGE CASE — only the "free" promo triggers this; all \
+other discount tiers work fine.
+→ **low**
+</example>
+
+<example>
+Finding: Last page of pagination returns one extra item
+
+File: `api/pagination.py:52`
+Evidence: `items = queryset[offset : offset + page_size]` with \
+`offset = (page - 1) * page_size`. When `total_count` is an exact \
+multiple of `page_size`, the last page's offset equals `total_count` \
+and the slice returns an empty list — but the "total pages" calculation \
+`ceil(total / page_size)` says there IS a last page. Result: an extra \
+empty page appended to every exact-multiple listing.
+
+Q1 — Provable? YES — but only when total is an exact multiple of page_size.
+Q2 — Blast radius? EDGE CASE — cosmetic extra page, no data loss.
+→ **low**
+</example>
 
 If you find no issues, output exactly: `[]`
 
 RULES:
-- severity MUST be one of: "critical", "warning", "nit", "praise"
+- severity MUST be one of: "critical", "high", "medium", "low", "nit", "praise"
 - confidence MUST be a number between 0.0 and 1.0
 - evidence MUST be an array of strings
 - If your token budget is running low, output your findings JSON IMMEDIATELY
@@ -995,7 +1220,6 @@ def build_sub_agent_system_prompt(
     max_iterations: int = 20,
     risk_context: Optional[str] = None,
     code_context: Optional[Dict[str, Any]] = None,
-    strategy_key: Optional[str] = None,
     skill_key: Optional[str] = None,
     has_signal_blocker: bool = True,
 ) -> str:
@@ -1026,8 +1250,9 @@ def build_sub_agent_system_prompt(
         Pre-computed risk context from scan_workspace_risk().
     code_context:
         Optional code snippet dict (code, file_path, language, start_line, end_line).
-    strategy_key:
-        Optional Layer 3 strategy to inject (e.g. "code_review").
+    skill_key:
+        Optional investigation skill key to inject (e.g. ``"code_review_pr"``).
+        Resolved against ``INVESTIGATION_SKILLS``.
     has_signal_blocker:
         Whether the agent has the signal_blocker tool available.
     """
@@ -1072,11 +1297,17 @@ def build_sub_agent_system_prompt(
         workspace_path=workspace_path,
         workspace_layout_section=workspace_layout,
         project_docs_section=docs_section,
-        max_iterations=max_iterations,
+        budget_section=_build_budget_section(max_iterations),
         investigation_skill=inv_skill,
     )
 
     prompt = identity + "\n" + skills
+
+    # Default answer format — appended only for exploration skills that don't
+    # declare their own output format.  PR review, issue tracking, synthesizer
+    # and arbitrator all have custom output specs and must NOT get this block.
+    if skill_key in _EXPLORATION_SKILLS_WITH_DEFAULT_FORMAT:
+        prompt += "\n\n" + EXPLORATION_ANSWER_FORMAT
 
     # Code Under Discussion — between identity and strategy
     if code_context:
@@ -1091,120 +1322,11 @@ def build_sub_agent_system_prompt(
             "the surrounding context, callers, callees, and dependencies."
         )
 
-    # Strategy — Layer 3 skill for structured output (only code_review needs one)
-    if strategy_key == QueryType.CODE_REVIEW.value:
-        prompt += "\n\n" + CODE_REVIEW_STRATEGY
-
     # Risk context — Layer 3 skill
     if risk_context:
         prompt += "\n\n" + risk_context
 
     return prompt
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Code review strategy — the only query type that needs a structured prompt.
-# Injected into both ``build_sub_agent_system_prompt`` (Brain sub-agents)
-# and ``build_system_prompt`` (legacy standalone path) when the strategy
-# key matches ``QueryType.CODE_REVIEW``. For all other query types, no
-# strategy is injected — Claude reasons freely.
-# ═══════════════════════════════════════════════════════════════════════
-
-CODE_REVIEW_STRATEGY = """\
-## Strategy: Code Review (PR/Diff)
-
-You are a **Google Senior Software Engineer** conducting a code review. \
-Apply the same rigor as a Google readability reviewer: correctness first, \
-then clarity, simplicity, and maintainability.
-
-### Step 1 — Get the overview and check PR size (1 iteration)
-Use **git_diff_files** with the diff spec from the query (e.g. `master...feature/xxx`) to get \
-the full list of changed files. Then **sum up total additions + deletions** and apply:
-
-| Total changed lines | Action |
-|---------------------|--------|
-| **> 3000 lines** | **STOP.** Do NOT review. Reply: "This PR has N lines of changes across M files, \
-which is too large for an effective review. Please split it into smaller PRs \
-(ideally < 500 lines each). Here is a summary of the changed files: ..." and list the files. |
-| **1000–3000 lines** | Review only the **top 8-10 most-changed business logic files**. \
-Skip small changes (< 10 lines). Note that you are doing a partial review. |
-| **< 1000 lines** | Full review of all business logic files. |
-
-Classify files into:
-- **Business logic** (services, controllers, models) — review thoroughly
-- **Tests** — check coverage adequacy
-- **Config / infra** — check for security/correctness
-- **Generated / vendor / migration** — skip
-
-### Step 2 — Review files ONE AT A TIME (1-2 files per iteration)
-Call git_diff on at most 2 files per iteration — large diffs overflow \
-the context window. Review files sequentially, starting with the \
-highest change count.
-
-For each file:
-1. **git_diff** with `file=` to see the exact changes
-2. **read_file** with line ranges around the changes for surrounding context
-3. **get_callers** or **find_references** to check impact (only for critical files)
-4. **find_tests** to verify test coverage (only for business logic files)
-
-After reviewing each file, note your findings before moving to the next file. \
-For small files (<20 lines changed), you may batch 2 together.
-
-### Step 3 — Check for issues
-
-**Correctness & Logic**
-- Null/undefined access, off-by-one, race conditions, resource leaks
-- Wrong conditionals, missing edge cases, incorrect error handling
-- Breaking changes: API contract changes, schema changes without migration
-
-**Security**
-- Injection (SQL, XSS, command), auth bypass, secrets in code, insecure defaults
-
-**Performance**
-- N+1 queries, unbounded loops/collections, missing pagination, large allocations
-
-**Google Code Style Compliance**
-- **Naming**: classes=PascalCase, methods/variables=camelCase (Java/TS) or snake_case (Python/Go), \
-constants=UPPER_SNAKE_CASE. No abbreviations unless universally understood (e.g. URL, ID).
-- **Functions**: Single responsibility. If a method does more than one thing, it should be split. \
-Max ~50 lines per function; extract helpers for complex logic.
-- **Comments**: No redundant comments that repeat the code. TODOs must have an owner or ticket. \
-Public APIs must have doc comments (Javadoc / docstring / JSDoc).
-- **Error handling**: Never swallow exceptions silently. Use specific exception types, not generic catch-all. \
-Fail fast and fail loudly.
-- **Imports**: No wildcard imports. No unused imports. Group by standard → third-party → local.
-- **DRY / YAGNI**: Flag duplicated logic (suggest extracting). Flag over-engineering (unused abstractions, \
-premature generalization).
-
-**Test Coverage**
-- New logic without corresponding test coverage
-- Tests that don't assert meaningful behavior (empty or tautological)
-
-### Step 4 — Summarize
-Produce a structured review:
-```
-## PR Review: [brief description]
-
-### Summary
-[1-2 sentences on what this PR does]
-
-### Files Reviewed
-[list with status: ✅ approved / ⚠️ concerns / ❌ issues]
-
-### Issues Found
-[each with severity (critical/warning/nit), file:line, description, suggestion]
-
-### Code Style
-[any Google style violations found]
-
-### Missing Test Coverage
-[list any untested new logic]
-
-### Overall Assessment
-[approve / request changes / needs discussion]
-```
-
-Target: 15-30 iterations. Prioritize business-logic files. Skip generated/vendor files."""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1454,7 +1576,6 @@ def build_system_prompt(
     workspace_layout: Optional[str] = None,
     project_docs: Optional[str] = None,
     max_iterations: int = 20,
-    strategy_key: Optional[str] = None,
     risk_context: Optional[str] = None,
     code_context: Optional[Dict[str, Any]] = None,
     interactive: bool = False,
@@ -1472,9 +1593,6 @@ def build_system_prompt(
         Pre-computed project documentation string.
     max_iterations:
         Maximum number of tool-calling iterations.
-    strategy_key:
-        Optional Layer 2 strategy key (e.g. ``QueryType.CODE_REVIEW.value``).
-        Currently only ``code_review`` triggers a structured prompt template.
     risk_context:
         Pre-computed risk context string from scan_workspace_risk().
     code_context:
@@ -1540,10 +1658,6 @@ def build_system_prompt(
             "Use this as your starting point. Explore the codebase to understand "
             "the surrounding context, callers, callees, and dependencies."
         )
-
-    # Layer 2: Strategy — only code_review needs a structured prompt template
-    if strategy_key == QueryType.CODE_REVIEW.value:
-        prompt += "\n\n" + CODE_REVIEW_STRATEGY
 
     # Layer 3 (partial): Risk context — injected when available
     if risk_context:

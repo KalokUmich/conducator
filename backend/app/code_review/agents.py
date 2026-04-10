@@ -356,12 +356,12 @@ commentary before or after.
 ]
 ```
 
-### Example 2 — assumption-dependent Warning
+### Example 2 — conditional-trigger Medium
 ```json
 [
   {{
     "title": "Webhook token not consumed on technical failure paths",
-    "severity": "warning",
+    "severity": "medium",
     "confidence": 0.75,
     "file": "src/callback/CallbackService.java",
     "start_line": 309,
@@ -379,7 +379,7 @@ commentary before or after.
 If you find no issues, output exactly: `[]`
 
 RULES:
-- severity MUST be one of: "critical", "warning", "nit", "praise"
+- severity MUST be one of: "critical", "high", "medium", "low", "nit", "praise"
 - confidence MUST be a number between 0.0 and 1.0
 - evidence MUST be an array of strings
 - If your token budget is running low, output your findings JSON IMMEDIATELY"""

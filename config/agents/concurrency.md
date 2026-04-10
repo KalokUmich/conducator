@@ -2,7 +2,6 @@
 name: concurrency
 description: "Detects race conditions, check-then-act patterns, retry idempotency, thread safety, and deadlock potential"
 model: explorer
-strategy: code_review
 skill: code_review_pr
 tools: [git_diff, git_show, find_references, get_callers, get_callees, trace_variable, ast_search]
 limits:
@@ -31,10 +30,10 @@ Fix: Use `DELETE ... RETURNING` to atomically check-and-consume, or `SELECT ... 
 </example>
 
 <example>
-Finding: Dict used as cookie store in multi-threaded server (warning)
+Finding: Dict used as cookie store in multi-threaded server (medium)
 
 File: `session_manager.py:45`
 Evidence: `self.cookies = {}` — plain dict is not thread-safe. Concurrent requests modifying cookies can corrupt the dict. However, actual impact depends on whether the server processes requests concurrently.
-Severity: warning (code-provable risk — dict is not thread-safe, but trigger requires concurrent access to the same session)
+Severity: medium (provable risk — dict is not thread-safe, but trigger requires concurrent access to the same session)
 Fix: Use `threading.Lock` to guard cookie access, or use a thread-safe container.
 </example>

@@ -329,16 +329,23 @@ def print_report(report: EvalReport) -> None:
 
     # Per-case scores
     print("Per-Case Scores:")
-    print(f"{'Case':<20} {'Recall':>8} {'Prec':>8} {'Sev':>8} {'Loc':>8} {'Rec':>8} {'Ctx':>8} {'Comp':>8}")
-    print("-" * 88)
+    print(
+        f"{'Case':<20} {'Catch':>6} {'Recall':>8} {'Prec':>8} {'Sev':>8} "
+        f"{'Loc':>8} {'Rec':>8} {'Ctx':>8} {'Comp':>8}"
+    )
+    print("-" * 96)
 
     for cs in report.case_scores:
         case_id = cs["case_id"]
         if cs.get("error"):
-            print(f"{case_id:<20} {'ERROR':>8}")
+            print(f"{case_id:<20} {'ERROR':>6}")
             continue
+        # Catch column: ✓ / ✗ — quick visual scan, easier than 0/1
+        catch = cs.get("catch_rate", 0.0)
+        catch_marker = "Y" if catch >= 0.5 else "."
         print(
             f"{case_id:<20} "
+            f"{catch_marker:>6} "
             f"{cs['recall']:>8.3f} "
             f"{cs['precision']:>8.3f} "
             f"{cs['severity_accuracy']:>8.3f} "
@@ -350,11 +357,19 @@ def print_report(report: EvalReport) -> None:
 
     # Aggregate
     agg = report.aggregate
-    print(f"\n{'Aggregate':<20} ", end="")
+    print(f"\n{'Aggregate':<20} {agg.get('catch_rate', 0.0):>6.3f} ", end="")
     for key in ["recall", "precision", "severity_accuracy", "location_accuracy",
                  "recommendation_score", "context_depth", "composite"]:
         print(f"{agg.get(key, 0.0):>8.3f} ", end="")
     print()
+    # Highlight the headline catch rate the way Greptile reports it
+    catch_pct = agg.get("catch_rate", 0.0) * 100
+    cases_n = agg.get("cases_scored", len(report.case_scores))
+    catches = sum(1 for cs in report.case_scores if cs.get("catch_rate", 0.0) >= 0.5)
+    print(
+        f"\nCatch rate (Greptile-style): {catches}/{cases_n} = "
+        f"{catch_pct:.1f}%"
+    )
 
     # Judge verdicts
     if report.judge_verdicts:

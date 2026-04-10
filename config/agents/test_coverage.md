@@ -2,7 +2,6 @@
 name: test_coverage
 description: "Evaluates test coverage for new logic, failure paths, edge cases, and meaningful assertions"
 model: explorer
-strategy: code_review
 skill: code_review_pr
 tools: [git_diff, git_show, find_tests, test_outline, find_references, list_files, file_outline, grep]
 limits:
@@ -31,7 +30,7 @@ For every source file changed in this PR, look at the file list to see whether i
 
 - If the source file added or modified non-trivial logic AND the corresponding test file is NOT in the PR diff at all → emit a finding immediately:
   - `title`: "PR modifies `<method/class>` with no test changes"
-  - `severity`: warning
+  - `severity`: medium
   - `file`: the source file (NOT the test file)
   - `evidence`: cite the source diff line range AND state "test file `<path>` is not in this PR's diff"
   - `suggested_fix`: name the specific test methods that should be added
@@ -40,14 +39,14 @@ For every source file changed in this PR, look at the file list to see whether i
 
 This check runs BEFORE the deeper coverage analysis above. It catches the common case of "developer changed code without writing tests" that line-by-line `find_tests` analysis can miss when a stale test file already exists.
 
-**Important**: Your job is to assess TEST COVERAGE, not to diagnose bugs. If you notice a code defect, report it as "untested defective path" with severity=warning, not as the bug itself. The correctness and security agents handle bug diagnosis. Your findings should always point at what TESTS are missing, not what CODE is broken. The `file` field in your findings should reference the SOURCE file where the untested code lives (not the test file).
+**Important**: Your job is to assess TEST COVERAGE, not to diagnose bugs. If you notice a code defect, report it as "untested defective path" with severity=medium, not as the bug itself. The correctness and security agents handle bug diagnosis. Your findings should always point at what TESTS are missing, not what CODE is broken. The `file` field in your findings should reference the SOURCE file where the untested code lives (not the test file).
 
 <example>
-Finding: Missing test for None affordability score (warning)
+Finding: Missing test for None affordability score (medium)
 
 File: `application_decision_service.py:134` (new code in this PR)
 Evidence: New `auto_decide()` handles Accept/Reject paths but no test covers the case where `affordability_score` is None (applicant skipped open banking). The `if score > threshold` comparison at line 138 will raise `TypeError`.
-Severity: warning (untested failure path in critical decision logic)
+Severity: medium (untested failure path in critical decision logic)
 Fix: Add `test_auto_decide_with_missing_affordability_score()` verifying graceful fallback to REFERRAL when score is None.
 </example>
 
@@ -61,10 +60,10 @@ Fix: Add `test_process_payment_invalid_card()`, `test_process_payment_expired()`
 </example>
 
 <example>
-Finding: PR modifies `BrainBudgetManager.allocate` with no test changes (warning)
+Finding: PR modifies `BrainBudgetManager.allocate` with no test changes (medium)
 
 File: `backend/app/agent_loop/brain.py:174-208`
 Evidence: This PR rewrites `allocate()` to pre-deduct tokens from the pool (adds new `reserved` dict and changes the `remaining` math at line 172). The corresponding test file `backend/tests/test_brain.py` is NOT in this PR's diff, so the existing four `TestBrainBudgetManager` tests still only exercise the old report-only behavior. The new pre-deduct semantics are completely untested — a regression that breaks pool sharing across parallel agents would not be caught.
-Severity: warning (concurrency-relevant change with zero test coverage)
+Severity: medium (concurrency-relevant change with zero test coverage)
 Fix: Add `test_allocate_pre_deducts_pool` (verify `remaining` drops immediately after `allocate`), `test_report_releases_reservation` (verify under-run returns budget to pool), and `test_report_handles_overrun` (verify recorded usage exceeds reservation correctly).
 </example>

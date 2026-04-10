@@ -34,7 +34,7 @@ For EACH finding:
   - 0.3-0.5: Finding has merit but is overstated or missing context
   - 0.6-0.8: Finding is questionable — counter-evidence is strong
   - 0.9-1.0: Finding is wrong — code is actually correct
-- **suggested_severity**: Your recommended severity after challenge (critical/warning/nit/drop)
+- **suggested_severity**: Your recommended severity after challenge (critical/high/medium/low/nit/drop)
 - **reason**: One-line rationale
 
 ## Output Format
@@ -48,7 +48,7 @@ Finding 1: "cookie jar replaced with dict" — The dict breaks CookieJar API (ex
 </reasoning>
 <result>
 [{"index": 0, "counter_evidence": [], "rebuttal_confidence": 0.1, "suggested_severity": "critical", "reason": "code-provable: timeout unconditionally removed, no fallback"},
- {"index": 1, "counter_evidence": ["thread-safety impact depends on whether server is multi-threaded, which cannot be determined from code alone"], "rebuttal_confidence": 0.4, "suggested_severity": "warning", "reason": "API breakage is real (verified merge_cookies call), but thread-safety claim is assumption-dependent"}]
+ {"index": 1, "counter_evidence": ["thread-safety impact depends on whether server is multi-threaded, which cannot be determined from code alone"], "rebuttal_confidence": 0.4, "suggested_severity": "medium", "reason": "API breakage is real (verified merge_cookies call), but thread-safety claim is assumption-dependent"}]
 </result>
 </example>
 

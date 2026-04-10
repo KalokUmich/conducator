@@ -28,6 +28,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -202,49 +203,122 @@ def create_provider(provider_name: str, model: str = None):
 
 
 def load_cases(eval_dir: Path, filter_str: str = None) -> list:
-    """Load all case configs from repos.yaml and per-repo cases.yaml files.
+    """Load all case configs from ``repos.yaml`` and per-repo ``cases.yaml`` files.
+
+    Two case styles are supported:
+
+    1. **Repo-level source_dir** (legacy): each entry in ``repos.yaml`` declares
+       a single ``source_dir``; every case in that repo's ``cases.yaml`` shares
+       it. This is how the original ``requests`` cases work.
+
+    2. **Per-case source_dir** (Greptile-style): an individual case may set its
+       own ``source_dir`` field, which overrides the repo-level one. The
+       Greptile importer uses this because every PR in the benchmark has its
+       own pre-materialized base-branch snapshot under
+       ``repos/greptile_bases/{target}/{pr_num}/``.
+
+    Cases dirs that have NO entry in ``repos.yaml`` are ALSO loaded — this
+    is how greptile_{target} dirs are picked up without us having to keep
+    repos.yaml in sync.
 
     Args:
         eval_dir: Path to the ``eval/code_review/`` directory.
-        filter_str: Optional substring filter applied to case IDs; only cases
-            whose ID contains this string are returned.
+        filter_str: Optional substring filter applied to case IDs.
 
     Returns:
-        List of ``(CaseConfig, source_dir, patch_dir)`` tuples for each
-        matching case across all configured repos.
+        List of ``(CaseConfig, source_dir, patch_dir)`` tuples.
     """
     repos_path = eval_dir / "repos.yaml"
     with open(repos_path) as f:
         repos_config = yaml.safe_load(f)
 
     all_cases = []
+    cases_root = eval_dir / "cases"
+
+    # 1) Repos declared in repos.yaml — they get a default source_dir
+    seen_dirs: set = set()
     for repo_name, repo_info in repos_config.get("repos", {}).items():
-        cases_path = eval_dir / "cases" / repo_name / "cases.yaml"
+        cases_path = cases_root / repo_name / "cases.yaml"
+        seen_dirs.add(repo_name)
         if not cases_path.exists():
             print(f"WARNING: No cases.yaml for repo '{repo_name}'", file=sys.stderr)
             continue
 
+        default_source = str(eval_dir / repo_info["source_dir"])
+        patch_dir = str(cases_root / repo_name)
+
         with open(cases_path) as f:
             cases_data = yaml.safe_load(f)
+        all_cases.extend(_build_case_tuples(cases_data, default_source, patch_dir, eval_dir))
 
-        source_dir = str(eval_dir / repo_info["source_dir"])
-        patch_dir = str(eval_dir / "cases" / repo_name)
-
-        for case_def in cases_data.get("cases", []):
-            case = CaseConfig(
-                id=case_def["id"],
-                patch=case_def["patch"],
-                difficulty=case_def["difficulty"],
-                title=case_def["title"],
-                description=case_def["description"],
-                expected_findings=case_def.get("expected_findings", []),
-            )
-            all_cases.append((case, source_dir, patch_dir))
+    # 2) Auto-discover any cases dir that doesn't have a repos.yaml entry
+    #    (e.g. cases/greptile_sentry/). Each case MUST set its own source_dir.
+    #    Each dir may also contain ``manual_cases.yaml`` — hand-annotated
+    #    cases that the importer never touches. Both files are loaded if
+    #    present and merged into the same case list.
+    for cases_dir in sorted({p.parent for p in cases_root.glob("*/cases.yaml")}
+                            | {p.parent for p in cases_root.glob("*/manual_cases.yaml")}):
+        dir_name = cases_dir.name
+        if dir_name in seen_dirs:
+            continue
+        if dir_name == "greptile_raw":
+            # Internal scraper artefact, never holds runnable cases
+            continue
+        patch_dir = str(cases_dir)
+        # Auto-imported cases (cases.yaml)
+        cases_yaml = cases_dir / "cases.yaml"
+        if cases_yaml.exists():
+            with open(cases_yaml) as f:
+                cases_data = yaml.safe_load(f) or {}
+            all_cases.extend(_build_case_tuples(cases_data, None, patch_dir, eval_dir))
+        # Hand-annotated cases (manual_cases.yaml)
+        manual_yaml = cases_dir / "manual_cases.yaml"
+        if manual_yaml.exists():
+            with open(manual_yaml) as f:
+                manual_data = yaml.safe_load(f) or {}
+            all_cases.extend(_build_case_tuples(manual_data, None, patch_dir, eval_dir))
 
     if filter_str:
         all_cases = [(c, s, p) for c, s, p in all_cases if filter_str in c.id]
 
     return all_cases
+
+
+def _build_case_tuples(cases_data: dict, default_source: Optional[str],
+                       patch_dir: str, eval_dir: Path) -> list:
+    """Convert raw cases.yaml dicts into ``(CaseConfig, source_dir, patch_dir)`` tuples.
+
+    Resolves per-case ``source_dir`` overrides relative to ``eval_dir``.
+    Cases without a ``source_dir`` field fall back to ``default_source``;
+    if that is also missing, the case is dropped with a warning.
+    """
+    out = []
+    for case_def in cases_data.get("cases", []):
+        case_source = case_def.get("source_dir")
+        if case_source:
+            resolved = str(eval_dir / case_source)
+        else:
+            resolved = default_source
+        if not resolved:
+            print(
+                f"WARNING: case {case_def.get('id', '?')!r} has no source_dir and "
+                f"its directory has no repos.yaml entry — skipping",
+                file=sys.stderr,
+            )
+            continue
+        case = CaseConfig(
+            id=case_def["id"],
+            patch=case_def["patch"],
+            difficulty=case_def["difficulty"],
+            title=case_def["title"],
+            description=case_def["description"],
+            expected_findings=case_def.get("expected_findings", []),
+            source_dir=case_source,
+            base_ref=case_def.get("base_ref"),
+            head_ref=case_def.get("head_ref"),
+        )
+        out.append((case, resolved, patch_dir))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +388,8 @@ async def run_single_case(
                     f"sev={m.severity_match} rec={m.recommendation_match}"
                 )
 
-    # LLM judge
+    # LLM judge — pass `case_score` so the judge can see the deterministic
+    # match table and apply qualitative scoring on top of it.
     judge_verdict = None
     if use_judge and judge_provider and review:
         print(f"    Judging {case.id}... ", end="", flush=True)
@@ -325,6 +400,7 @@ async def run_single_case(
             expected_findings=case.expected_findings,
             findings=findings,
             synthesis=review.synthesis,
+            case_score=score,
         )
         judge_verdict = verdict.to_dict()
         judge_verdict["case_id"] = case.id
@@ -403,7 +479,8 @@ async def run_single_gold_case(
     if trace and trace.files_read:
         print(f"    Files read: {len(trace.files_read)}")
 
-    # LLM judge
+    # LLM judge — pass `case_score` so the judge can see the deterministic
+    # match table and apply qualitative scoring on top of it.
     judge_verdict = None
     if use_judge and judge_provider and review:
         print(f"    Judging {case.id}... ", end="", flush=True)
@@ -414,6 +491,7 @@ async def run_single_gold_case(
             expected_findings=case.expected_findings,
             findings=findings,
             synthesis=review.synthesis,
+            case_score=score,
         )
         judge_verdict = verdict.to_dict()
         judge_verdict["case_id"] = case.id

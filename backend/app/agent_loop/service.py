@@ -179,7 +179,6 @@ class AgentLoopService:
 
         self._temperature = None  # set per-agent via forced_tools dispatch
         self._quality_config = None  # set per-agent via brain dispatch
-        self._forced_strategy = config.forced_strategy  # strategy key override (Layer 3 strategy)
         self._forced_skill = config.forced_skill  # investigation skill override (Layer 3 skill)
 
     @observe(name="agent_loop")
@@ -694,7 +693,6 @@ class AgentLoopService:
                 max_iterations=self._max_iterations,
                 risk_context=risk_context,
                 code_context=code_context,
-                strategy_key=self._forced_strategy or None,
                 skill_key=self._forced_skill or self._agent_identity.get("skill") or None,
                 has_signal_blocker=bool(self._forced_tools),
             )
@@ -705,7 +703,6 @@ class AgentLoopService:
                 workspace_layout=layout,
                 project_docs=project_docs,
                 max_iterations=self._max_iterations,
-                strategy_key=self._forced_strategy or None,
                 risk_context=risk_context,
                 code_context=code_context,
                 interactive=self._interactive,

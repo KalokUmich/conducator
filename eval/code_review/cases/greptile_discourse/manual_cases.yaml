@@ -1,0 +1,37 @@
+# Hand-annotated Greptile-benchmark cases for discourse — see
+# greptile_sentry/manual_cases.yaml for the rationale and convention.
+
+cases:
+  - id: greptile-discourse-005
+    patch: patches/005.patch
+    difficulty: medium
+    title: Optimize header layout performance with flexbox mixins
+    description: |
+      Greptile bot only left 3 ``style:`` comments on this PR (spacing,
+      indentation), suggesting it failed to spot the planted bug. The
+      PR refactors header CSS from float positioning to flexbox via
+      newly-introduced mixins; the bug is somewhere in the mixin
+      definitions or their application.
+    source_dir: repos/greptile_bases/discourse/005
+    base_sha: 98fa098e6fade3097a11fe7f99a98a4e6ffb4728
+    base_ref: header-layout-optimization-pre
+    head_ref: header-layout-optimization-post
+    quality: human
+    expected_findings:
+      - title_pattern: small-action|topic-avatar|float|flexbox|padding|layout
+        file_pattern: app/assets/stylesheets/common/base/topic-post\.scss
+        line_range: [261, 295]
+        severity: warning
+        category: correctness
+        recommendation: |
+          The PR adds ``@include flexbox()`` to ``.small-action`` but its
+          child ``.topic-avatar`` still has ``float: left``. Floats are
+          silently ignored on flex children — the avatar becomes a flex
+          item laid out in source order, not floated. Compounding this,
+          ``.small-action-desc`` padding changes from ``0.5em 0 0.5em 4em``
+          (a 4em left reserve for the floated avatar) to ``0 1.5%``,
+          removing the space the avatar used to clear. The result is the
+          avatar and description will overlap or be misaligned visually.
+          Either drop the flexbox include and keep floats, or remove
+          ``float: left`` from ``.topic-avatar`` and use flex ordering /
+          a fixed-width avatar item instead.

@@ -2,7 +2,6 @@
 name: correctness
 description: "Finds logic errors, null access, off-by-one, wrong conditionals, missing edge cases, and state machine violations"
 model: strong
-strategy: code_review
 skill: code_review_pr
 tools: [git_diff, git_show, git_log, find_references, get_callers, get_callees, trace_variable, get_dependencies]
 limits:
@@ -31,10 +30,10 @@ Fix: `offset = (page - 1) * page_size` at line 87.
 </example>
 
 <example>
-Finding: Missing null check on optional config (warning)
+Finding: Missing null check on optional config (medium)
 
 File: `PaymentService.java:142`
 Evidence: `config.getRetryPolicy().getMaxAttempts()` — `getRetryPolicy()` returns null when no policy is configured. Whether this path is reachable depends on deployment config.
-Severity: warning (assumption-dependent — if retry policy is always configured in prod, this is safe)
+Severity: medium (conditional — whether this path is reachable depends on deployment config)
 Fix: Add null check: `if (config.getRetryPolicy() != null)` before accessing max attempts.
 </example>

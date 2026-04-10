@@ -105,7 +105,10 @@ def _merge_pair(primary: ReviewFinding, secondary: ReviewFinding) -> ReviewFindi
             existing.add(e)
 
     # Keep higher severity
-    severity_order = [Severity.NIT, Severity.PRAISE, Severity.WARNING, Severity.CRITICAL]
+    severity_order = [
+        Severity.NIT, Severity.PRAISE, Severity.LOW, Severity.MEDIUM,
+        Severity.WARNING, Severity.HIGH, Severity.CRITICAL,
+    ]
     if severity_order.index(secondary.severity) > severity_order.index(primary.severity):
         primary.severity = secondary.severity
 

@@ -42,6 +42,9 @@ class CaseScore:
     location_accuracy: float = 0.0
     recommendation_score: float = 0.0
     context_depth: float = 0.0
+    catch_rate: float = 0.0       # 1.0 if ANY expected finding was matched on
+                                  # title+file+line, else 0.0 — Greptile-style
+                                  # binary "did the reviewer catch the bug"
     composite: float = 0.0
     matches: List[FindingMatch] = field(default_factory=list)
     expected_count: int = 0
@@ -57,6 +60,7 @@ class CaseScore:
             "location_accuracy": round(self.location_accuracy, 3),
             "recommendation_score": round(self.recommendation_score, 3),
             "context_depth": round(self.context_depth, 3),
+            "catch_rate": round(self.catch_rate, 3),
             "composite": round(self.composite, 3),
             "expected_count": self.expected_count,
             "actual_count": self.actual_count,
@@ -107,6 +111,16 @@ def score_case(case: CaseConfig, findings: list, files_reviewed: list) -> CaseSc
     # Recall: fraction of expected findings that were matched
     matched_expected = set(m.expected_index for m in matches)
     score.recall = len(matched_expected) / len(expected)
+
+    # Catch rate (Greptile-style): 1.0 if AT LEAST ONE expected finding was
+    # matched with a real line-level pointer (title + file + line), else 0.0.
+    # Severity / category mismatches do NOT zero out the catch — Greptile's
+    # rubric is: "did the reviewer leave an explicit line-level PR comment
+    # that points to the faulty code". A finding that points at the right
+    # file:line counts even if the title is generic.
+    score.catch_rate = 1.0 if any(
+        m.file_match and m.line_match for m in matches
+    ) else 0.0
 
     # Precision: fraction of actual findings that matched an expected finding
     # Findings that don't match any expected finding are considered false positives,
@@ -198,6 +212,7 @@ def compute_aggregate(scores: List[CaseScore]) -> Dict[str, float]:
         "location_accuracy": round(sum(s.location_accuracy for s in valid) / n, 3),
         "recommendation_score": round(sum(s.recommendation_score for s in valid) / n, 3),
         "context_depth": round(sum(s.context_depth for s in valid) / n, 3),
+        "catch_rate": round(sum(s.catch_rate for s in valid) / n, 3),
         "composite": round(sum(s.composite for s in valid) / n, 3),
         "cases_total": len(scores),
         "cases_scored": n,
@@ -286,10 +301,18 @@ def _evaluate_match(exp_idx: int, act_idx: int, expected: dict, finding) -> Find
         act_end = finding.end_line if finding.end_line > 0 else finding.start_line
         m.line_match = act_start <= exp_end and act_end >= exp_start
 
-    # Severity match
-    exp_severity = expected.get("severity", "")
+    # Severity match — handles the 4-level scale AND the deprecated "warning"
+    # alias.  warning ≈ medium, so finding.severity=WARNING matches
+    # expected="medium" and vice versa.
+    exp_severity = expected.get("severity", "").lower()
     if exp_severity and hasattr(finding, "severity"):
-        m.severity_match = finding.severity.value.lower() == exp_severity.lower()
+        act_severity = finding.severity.value.lower()
+        # Exact match
+        m.severity_match = act_severity == exp_severity
+        # Also accept warning ≈ medium equivalence
+        if not m.severity_match:
+            equiv = {"warning": "medium", "medium": "warning"}
+            m.severity_match = equiv.get(act_severity) == exp_severity
 
     # Category match
     exp_category = expected.get("category", "")

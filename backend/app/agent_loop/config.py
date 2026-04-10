@@ -59,11 +59,8 @@ class AgentLoopConfig:
             ``instructions``, ``skill`` (optional).  When present the
             loop builds a per-agent system prompt (Layer 1) from these
             values.
-        forced_strategy: Strategy key override (e.g.
-            ``QueryType.CODE_REVIEW.value``).  Selects the Layer 2/3
-            strategy template.
         forced_skill: Investigation-skill key override (Layer 3, e.g.
-            ``"business_flow"``).
+            ``"business_flow"`` or ``"code_review_pr"``).
     """
 
     # Core loop limits
@@ -83,7 +80,6 @@ class AgentLoopConfig:
     is_sub_agent: bool = False
     forced_tools: Optional[List[str]] = None
     agent_identity: Optional[Dict[str, str]] = None
-    forced_strategy: str = ""
     forced_skill: str = ""
 
 

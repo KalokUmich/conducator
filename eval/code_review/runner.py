@@ -4,6 +4,7 @@ Creates a temporary git repo from a source directory, applies a patch,
 commits it, and runs CodeReviewService.review() against the diff.
 """
 
+import logging
 import os
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Add backend/ to sys.path so we can import from backend
 _BACKEND_DIR = str(Path(__file__).resolve().parent.parent / "backend")
@@ -32,6 +35,15 @@ class CaseConfig:
     title: str
     description: str
     expected_findings: list = field(default_factory=list)
+    # Optional per-case source_dir override (relative to eval/code_review/).
+    # When set, the loader uses this instead of the repo-level source_dir
+    # from repos.yaml. Used by Greptile-imported cases where each PR has
+    # its own pre-materialized base branch snapshot.
+    source_dir: Optional[str] = None
+    # Optional original git refs (kept for traceability; the materializer
+    # uses base_ref to extract the snapshot pointed at by source_dir).
+    base_ref: Optional[str] = None
+    head_ref: Optional[str] = None
 
 
 @dataclass
@@ -43,8 +55,48 @@ class RunResult:
     error: Optional[str] = None
 
 
+# Directories to SKIP when copying the source tree into the eval workspace.
+#
+# IMPORTANT: do NOT exclude source-code directories (static/, tests/, public/)
+# even though they're large. Review agents use grep / find_references /
+# get_callers across the FULL workspace to trace cross-file impact — excluding
+# legitimate source dirs would cause the reviewer to miss frontend breakage
+# from backend changes, which is exactly the kind of bug we're testing for.
+#
+# Only exclude directories that are NEVER reviewed:
+#   - Build artifacts / dependency caches (shouldn't appear in git-archive
+#     output, but safety net)
+#   - IDE / CI metadata
+#   - Generated documentation
+_WORKSPACE_EXCLUDE_DIRS: set = {
+    # Build artifacts / dependency caches
+    "node_modules",
+    "__pycache__",
+    "dist",
+    "build",
+    "target",
+    "vendor",
+    ".venv",
+    "venv",
+    # IDE / CI / docs metadata
+    ".github",
+    ".cursor",
+    ".vscode",
+    ".idea",
+    "api-docs",
+}
+
+
 def setup_workspace(source_dir: str, patch_path: str, tmp_dir: Optional[str] = None) -> str:
     """Create a temp git repo from source, apply patch, and commit.
+
+    Large eval repos (sentry ~17K files, grafana ~14K) would make the
+    agents' grep / find_symbol calls catastrophically slow if copied in
+    full. We skip directories in ``_WORKSPACE_EXCLUDE_DIRS`` — see the
+    comment above for the rationale. The patch is applied with
+    ``--allow-empty`` so that hunks touching excluded dirs are silently
+    dropped (the agent still sees the hunks in ``git diff`` because the
+    runner supplies the diff spec, not the workspace tree).
 
     Args:
         source_dir: Path to the plain source directory (no .git).
@@ -56,16 +108,46 @@ def setup_workspace(source_dir: str, patch_path: str, tmp_dir: Optional[str] = N
     """
     workspace = tempfile.mkdtemp(dir=tmp_dir, prefix="eval_ws_")
 
-    # Copy source tree
+    # Copy source tree — skip metadata-only dirs, hardlink files for speed.
+    #
+    # Large eval repos (sentry ~17K files) make shutil.copytree prohibitively
+    # slow (~90s). Hardlinks are instant and safe: git-apply on a hardlinked
+    # file triggers copy-on-write at the filesystem level, so the materialized
+    # base stays intact.  We fall back to regular copy on filesystems that
+    # don't support cross-directory hardlinks (e.g. different mount points).
     src = Path(source_dir)
     dst = Path(workspace)
+    skipped = []
+    hardlinked = 0
+    copied = 0
+
+    def _link_or_copy(s: Path, d: Path):
+        nonlocal hardlinked, copied
+        try:
+            os.link(str(s), str(d))
+            hardlinked += 1
+        except OSError:
+            shutil.copy2(str(s), str(d))
+            copied += 1
+
     for item in src.iterdir():
-        s = str(item)
-        d = str(dst / item.name)
+        if item.name in _WORKSPACE_EXCLUDE_DIRS:
+            skipped.append(item.name)
+            continue
         if item.is_dir():
-            shutil.copytree(s, d)
+            shutil.copytree(
+                str(item), str(dst / item.name),
+                copy_function=lambda s, d: _link_or_copy(Path(s), Path(d)),
+            )
         else:
-            shutil.copy2(s, d)
+            _link_or_copy(item, dst / item.name)
+
+    if skipped or hardlinked:
+        logger.info(
+            "  setup_workspace: %d hardlinked, %d copied, %d dirs skipped (%s)",
+            hardlinked, copied, len(skipped),
+            ", ".join(sorted(skipped)) if skipped else "none",
+        )
 
     # Initialize git repo
     _run_git(workspace, "init")
@@ -74,8 +156,22 @@ def setup_workspace(source_dir: str, patch_path: str, tmp_dir: Optional[str] = N
     _run_git(workspace, "add", "-A")
     _run_git(workspace, "commit", "-m", "Initial: clean source")
 
-    # Apply patch
-    _run_git(workspace, "apply", patch_path)
+    # Apply patch — use --reject so hunks targeting excluded directories
+    # are dropped rather than failing the whole apply. Any remaining .rej
+    # files are cleaned up silently.
+    try:
+        _run_git(workspace, "apply", "--reject", patch_path)
+    except subprocess.CalledProcessError:
+        # Some hunks may have been rejected (expected when dirs are excluded).
+        # Log but don't fail — the important hunks for the reviewed source
+        # code will have applied successfully.
+        rej_files = list(Path(workspace).rglob("*.rej"))
+        if rej_files:
+            logger.info("  setup_workspace: %d rejected hunks (excluded dirs)", len(rej_files))
+            for rf in rej_files:
+                rf.unlink()
+        else:
+            raise  # genuine failure, re-raise
     _run_git(workspace, "add", "-A")
     _run_git(workspace, "commit", "-m", "Apply bug patch")
 

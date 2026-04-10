@@ -105,10 +105,28 @@ class RiskProfile:
 
 
 class Severity(str, Enum):
-    CRITICAL = "critical"
-    WARNING = "warning"
-    NIT = "nit"
-    PRAISE = "praise"  # positive feedback
+    """4-level defect severity aligned with Greptile's benchmark scale.
+
+    The 4 defect levels (critical → high → medium → low) replace the old
+    3-level scale (critical / warning / nit).  ``WARNING`` is kept as a
+    **deprecated alias** that the parser maps to ``MEDIUM`` so existing
+    agent output and test fixtures keep working during the transition.
+
+    Non-defect levels (``NIT``, ``PRAISE``) are retained: ``NIT`` is for
+    style / improvement suggestions that the ``DO NOT FLAG`` list allows
+    through, and ``PRAISE`` is for positive feedback.
+
+    See ``code_review_pr`` skill rubric in ``prompts.py`` for the full
+    definitions with examples.
+    """
+
+    CRITICAL = "critical"   # provable bug + security / auth / API contract impact
+    HIGH = "high"           # provable bug + functional impact (crash, wrong behavior)
+    MEDIUM = "medium"       # real bug + subtle / conditional trigger
+    LOW = "low"             # edge-case bug, specific input triggers
+    WARNING = "warning"     # deprecated → mapped to MEDIUM by _SEVERITY_MAP
+    NIT = "nit"             # not a defect — style, minor improvement
+    PRAISE = "praise"       # positive feedback
 
 
 class FindingCategory(str, Enum):

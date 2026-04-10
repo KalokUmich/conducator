@@ -1,0 +1,45 @@
+# Hand-annotated Greptile-benchmark cases for cal.com — see
+# greptile_sentry/manual_cases.yaml for the rationale and convention.
+
+cases:
+  - id: greptile-cal_com-002
+    patch: patches/002.patch
+    difficulty: hard
+    title: Async import of the appStore packages
+    description: |
+      Converts cal.com's app store package loading from sync to async
+      (dynamic import) across 12 files spanning calendar/video/booking
+      handlers. Greptile bot only flagged style nits ("consider try-catch
+      around await"). The actual planted bug is likely a missed await,
+      a default-import vs named-import mismatch, or an order-of-operation
+      issue in handleCancelBooking.
+    source_dir: repos/greptile_bases/cal_com/002
+    base_sha: bff28e5d6fef42b4e7c036c688f0bad4410b42a2
+    base_ref: appstore-sync-refactor-base
+    head_ref: appstore-async-improvements
+    quality: human
+    expected_findings:
+      - title_pattern: forEach|async|await|fire-and-forget|forEach.*async|reschedule
+        file_pattern: packages/app-store/vital/lib/reschedule\.ts
+        line_range: [120, 135]
+        severity: critical
+        category: correctness
+        recommendation: |
+          ``Array.prototype.forEach`` does NOT await async callbacks. The PR
+          changes ``bookingRefsFiltered.forEach((bookingRef) => {...})`` to
+          ``bookingRefsFiltered.forEach(async (bookingRef) => { ... await
+          getCalendar(...) ... })``. The outer Reschedule function returns
+          before the async callbacks finish, so calendar deletes are
+          fire-and-forget — errors are unhandled and there's no guarantee
+          events are gone before the next rescheduling step runs. Replace
+          with ``for (const bookingRef of bookingRefsFiltered) { ... }`` or
+          ``await Promise.all(bookingRefsFiltered.map(async (bookingRef) =>
+          {...}))`` so the awaits are observed.
+      - title_pattern: forEach|async|await|fire-and-forget|forEach.*async|reschedule
+        file_pattern: packages/app-store/wipemycalother/lib/reschedule\.ts
+        line_range: [120, 135]
+        severity: critical
+        category: correctness
+        recommendation: |
+          Same ``forEach(async (bookingRef) => ...)`` anti-pattern as in
+          ``vital/lib/reschedule.ts`` — see that finding for the fix.

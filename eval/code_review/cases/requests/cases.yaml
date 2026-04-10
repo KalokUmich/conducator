@@ -11,7 +11,7 @@
 #     - title_pattern:   Regex the finding title should match (case-insensitive)
 #       file_pattern:    Regex the finding file path should match
 #       line_range:      [start, end] inclusive — the finding should overlap this range
-#       severity:        Expected severity: critical | warning | nit
+#       severity:        Expected severity: critical | high | medium | low | nit
 #       category:        Expected category (correctness, security, reliability, etc.)
 #       requires_context: Optional list of files the agent should have explored
 #       recommendation:  Short description of the expected fix suggestion
@@ -28,7 +28,7 @@ cases:
       - title_pattern: "timeout|hang|block"
         file_pattern: "adapters\\.py"
         line_range: [471, 483]
-        severity: critical
+        severity: high
         category: reliability
         recommendation: "Restore timeout handling with TimeoutSauce"
 
@@ -43,7 +43,7 @@ cases:
       - title_pattern: "swallow|silent|suppress|connection.?error|return.*none"
         file_pattern: "adapters\\.py"
         line_range: [498, 505]
-        severity: critical
+        severity: high
         category: correctness
         recommendation: "Re-raise ConnectionError instead of returning None"
 
@@ -58,7 +58,7 @@ cases:
       - title_pattern: "encoding|charset|apparent|fallback|text"
         file_pattern: "models\\.py"
         line_range: [926, 930]
-        severity: warning
+        severity: medium
         category: correctness
         recommendation: "Restore apparent_encoding fallback when encoding is None"
 
@@ -73,7 +73,7 @@ cases:
       - title_pattern: "content.?length|header|body|missing"
         file_pattern: "models\\.py"
         line_range: [549, 580]
-        severity: warning
+        severity: medium
         category: correctness
         recommendation: "Restore Content-Length header computation"
 
@@ -109,7 +109,7 @@ cases:
       - title_pattern: "scheme|adapter|invalid.?schema|fallback|silent"
         file_pattern: "sessions\\.py"
         line_range: [785, 800]
-        severity: warning
+        severity: medium
         category: correctness
         recommendation: "Restore the raise InvalidSchema for unsupported URL schemes in get_adapter"
 
@@ -124,7 +124,7 @@ cases:
       - title_pattern: "cookie|thread|dict|jar|unsafe"
         file_pattern: "sessions\\.py"
         line_range: [440, 448]
-        severity: warning
+        severity: high
         category: concurrency
         recommendation: "Use RequestsCookieJar instead of plain dict"
 
@@ -139,7 +139,7 @@ cases:
       - title_pattern: "chunk|transfer.?encoding|invert|logic"
         file_pattern: "adapters\\.py"
         line_range: [468, 470]
-        severity: warning
+        severity: high
         category: correctness
         recommendation: "Fix the inverted boolean logic for chunked encoding"
 
@@ -171,7 +171,7 @@ cases:
       - title_pattern: "redirect|infinite|loop|max_redirect|limit"
         file_pattern: "sessions\\.py"
         line_range: [185, 195]
-        severity: critical
+        severity: high
         category: reliability
         requires_context:
           - "requests/sessions.py"
@@ -206,7 +206,7 @@ cases:
       - title_pattern: "hook|swallow|suppress|exception|silent"
         file_pattern: "hooks\\.py|sessions\\.py"
         line_range: [27, 35]
-        severity: warning
+        severity: medium
         category: correctness
         requires_context:
           - "requests/hooks.py"

@@ -358,14 +358,14 @@ transfer_to_brain("pr_review", params={"workspace_path": ..., "diff_spec": "main
 
 ```
 Phase 1: 预计算（parse_diff、classify_risk、prefetch_diffs、impact_graph）
-Phase 2: 并行 dispatch review agents（correctness、security、reliability、concurrency、test_coverage）
+Phase 2: 并行 dispatch review agents（correctness、correctness_b、concurrency、security、reliability、performance、test_coverage）
 Phase 3: 后处理（evidence_gate → post_filter → dedup → score_and_rank）
 Phase 4: 对抗仲裁（pr_arbitrator 试图反驳每条 finding）
 Phase 5: Merge recommendation（确定性）
 Phase 6: 综合（Brain 作为最终评判，看到正方证据 + 反方反驳）
 ```
 
-每个 review agent 的 `.md` frontmatter 有 `strategy: code_review`，会通过 `forced_strategy` 触发 `prompts.py` 里的 `CODE_REVIEW_STRATEGY` 模板（Google Senior Engineer review 风格）。
+每个 review agent 的 `.md` frontmatter 都声明 `skill: code_review_pr`，会通过 `forced_skill` 把 `prompts.py` 里的 `INVESTIGATION_SKILLS["code_review_pr"]` 注入 Layer 3。这个 skill 是 PR review 的单一来源：包含 senior engineer persona、provability framework、DO NOT FLAG 列表、PR-introduced 验证规则和 JSON 输出格式。
 
 **整条链路：**
 ```
@@ -593,7 +593,7 @@ tools:                   # 这个 agent 可用的工具
   - get_callers
   - trace_variable       # 数据流追踪，安全 agent 必备
 
-strategy: code_review    # 触发 prompts.py 里的 CODE_REVIEW_STRATEGY 模板
+skill: code_review_pr    # 注入 prompts.py 里的 code_review_pr skill（senior engineer review 风格）
 
 limits:
   max_iterations: 20

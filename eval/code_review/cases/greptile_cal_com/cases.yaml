@@ -1,0 +1,464 @@
+cases:
+- id: greptile-cal_com-003
+  patch: patches/003.patch
+  difficulty: hard
+  title: 'feat: 2fa backup codes'
+  description: "Test 3\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/features/auth/lib/next-auth-options.ts:141]\
+    \ logic: JSON.parse could throw if backup codes are corrupted - should wrap in try-catch block\n\n```suggestion\n    \
+    \    let backupCodes;\n        try {\n          backupCodes = JSON.parse(\n            symme\n  - [apps/web/playwright/login.2fa.e2e.ts:53]\
+    \ logic: This FIXME indicates a real test reliability issue. The `isChecked()` assertion may pass incorrectly. Consider\
+    \ using the same pattern as line 127 with `data-state=\"checked\"`.\n\n```suggestion\n   \n  - [apps/web/components/settings/TwoFactorAuthAPI.ts:25]\
+    \ logic: Sending empty/undefined backup codes in the request body may cause issues. Consider only including non-empty\
+    \ values in the JSON payload."
+  source_dir: repos/greptile_bases/cal_com/003
+  base_sha: efa6d464a38e60ceeeb88f40668c1c4ac4bfaf54
+  base_ref: enhance-two-factor-security-foundation
+  head_ref: improve-two-factor-authentication-features
+  expected_findings:
+  - title_pattern: JSON|CALENDSO_ENCRYPTION_KEY|Failed|Error
+    file_pattern: packages/features/auth/lib/next\-auth\-options\.ts
+    line_range:
+    - 136
+    - 146
+    severity: critical
+    category: concurrency
+    recommendation: "JSON.parse could throw if backup codes are corrupted - should wrap in try-catch block\n\n```suggestion\n\
+      \        let backupCodes;\n        try {\n          backupCodes = JSON.parse(\n            symmetricDec"
+  - title_pattern: This|FIXME|Consider
+    file_pattern: apps/web/playwright/login\.2fa\.e2e\.ts
+    line_range:
+    - 48
+    - 58
+    severity: warning
+    category: correctness
+    recommendation: This FIXME indicates a real test reliability issue.
+  - title_pattern: Sending|Consider|JSON
+    file_pattern: apps/web/components/settings/TwoFactorAuthAPI\.ts
+    line_range:
+    - 20
+    - 30
+    severity: critical
+    category: correctness
+    recommendation: Sending empty/undefined backup codes in the request body may cause issues.
+  - title_pattern: TwoFactor|Should|BackupCode
+    file_pattern: apps/web/components/auth/BackupCode\.tsx
+    line_range:
+    - 2
+    - 12
+    severity: warning
+    category: correctness
+    recommendation: Function name 'TwoFactor' doesn't match the component's purpose or file name.
+  - title_pattern: Validation|XXXXX|Consider
+    file_pattern: apps/web/components/auth/BackupCode\.tsx
+    line_range:
+    - 18
+    - 28
+    severity: warning
+    category: correctness
+    recommendation: Validation logic is flawed.
+  - title_pattern: Blob
+    file_pattern: apps/web/components/settings/EnableTwoFactorModal\.tsx
+    line_range:
+    - 90
+    - 100
+    severity: critical
+    category: correctness
+    recommendation: "calls formatBackupCode before it's defined (line 163), causing a reference error\n\n```suggestion\n \
+      \       const formatBackupCode = (code: string) => `${code.slice(0, 5)}-${code.slice(5, 10)}`;\n        c"
+- id: greptile-cal_com-004
+  patch: patches/004.patch
+  difficulty: hard
+  title: 'fix: handle collective multiple host on destinationCalendar'
+  description: "Test 4\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/app-store/googlecalendar/lib/CalendarService.ts:256]\
+    \ logic: Logic error: when `externalCalendarId` is provided, you're searching for a calendar where `externalId === externalCalendarId`,\
+    \ but this will always fail since you're looking for a calendar that\n  - [packages/app-store/googlecalendar/lib/CalendarService.ts:317]\
+    \ logic: Same logic error as in updateEvent: searching for calendar with `externalId === externalCalendarId` will not\
+    \ work as intended\n  - [packages/core/EventManager.ts:119] logic: Potential null reference if `mainHostDestinationCalendar`\
+    \ is undefined when array is empty\n\n```suggestion\n    if (evt.location === MeetLocationType && mainHostDestinationCalendar?.integration\
+    \ !"
+  source_dir: repos/greptile_bases/cal_com/004
+  base_sha: 500bfb4d82c53c42e7f53250c6715f5fb474dc2b
+  base_ref: enhance-collective-scheduling-foundation
+  head_ref: fix/handle-collective-multiple-host-destinations
+  expected_findings:
+  - title_pattern: Logic|Should
+    file_pattern: packages/app\-store/googlecalendar/lib/CalendarService\.ts
+    line_range:
+    - 251
+    - 261
+    severity: critical
+    category: security
+    recommendation: 'Logic error: when `externalCalendarId` is provided, you''re searching for a calendar where `externalId
+      === externalCalendarId`, but this will always fail since you''re looking for a calendar that matche'
+  - title_pattern: Same
+    file_pattern: packages/app\-store/googlecalendar/lib/CalendarService\.ts
+    line_range:
+    - 312
+    - 322
+    severity: critical
+    category: correctness
+    recommendation: 'Same logic error as in updateEvent: searching for calendar with `externalId === externalCalendarId` will
+      not work as intended'
+  - title_pattern: Potential|MeetLocationType|google_calendar
+    file_pattern: packages/core/EventManager\.ts
+    line_range:
+    - 114
+    - 124
+    severity: critical
+    category: correctness
+    recommendation: "Potential null reference if `mainHostDestinationCalendar` is undefined when array is empty\n\n```suggestion\n\
+      \    if (evt.location === MeetLocationType && mainHostDestinationCalendar?.integration !== \"goo"
+  - title_pattern: Third
+    file_pattern: packages/core/EventManager\.ts
+    line_range:
+    - 365
+    - 375
+    severity: warning
+    category: reliability
+    recommendation: Third parameter `destination.externalId` is passed but the fallback calls without this parameter - inconsistent
+      usage
+- id: greptile-cal_com-005
+  patch: patches/005.patch
+  difficulty: medium
+  title: 'feat: convert InsightsBookingService to use Prisma.sql raw queries'
+  description: "Test 5\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/lib/server/service/insightsBooking.ts:73]\
+    \ logic: SQL condition composition logic doesn't handle the case where authConditions could be NOTHING_CONDITION - this\
+    \ may result in invalid SQL like `(1=0) AND (other_condition)`"
+  source_dir: repos/greptile_bases/cal_com/005
+  base_sha: 202d248ae45f8f2f01324b0d8eb5914e9154112f
+  base_ref: insights-query-foundation
+  head_ref: insights-performance-optimization
+  expected_findings:
+  - title_pattern: NOTHING_CONDITION|other_condition
+    file_pattern: packages/lib/server/service/insightsBooking\.ts
+    line_range:
+    - 68
+    - 78
+    severity: warning
+    category: security
+    recommendation: SQL condition composition logic doesn't handle the case where authConditions could be NOTHING_CONDITION
+      - this may result in invalid SQL like `(1=0) AND (other_condition)`
+- id: greptile-cal_com-006
+  patch: patches/006.patch
+  difficulty: hard
+  title: Comprehensive workflow reminder management for booking lifecycle events
+  description: "Test 6\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/features/ee/workflows/api/scheduleEmailReminders.ts:54]\
+    \ syntax: Incorrect type definition. Should be `Promise<WorkflowReminder>[]` instead of the Prisma client type\n\n```suggestion\n\
+    \    const workflowRemindersToDelete: Promise<WorkflowReminder>[] = [];\n```\n  - [packages/features/ee/workflows/api/scheduleEmailReminders.ts:64]\
+    \ logic: Missing null check for `reminder.referenceId` - this will cause SendGrid API errors if referenceId is null\n\
+    \  - [packages/trpc/server/routers/viewer/workflows.tsx:580] logic: Using `forEach` with async functions can cause race\
+    \ conditions and doesn't wait for completion. Consider using `Promise.all()` with `map()` or a `for...of` loop to ensure\
+    \ proper async handling."
+  source_dir: repos/greptile_bases/cal_com/006
+  base_sha: 235ec0e906a189ceb0843cfa7af585b1d46f699f
+  base_ref: workflow-queue-base
+  head_ref: workflow-queue-enhanced
+  expected_findings:
+  - title_pattern: Incorrect|Should|Promise|WorkflowReminder
+    file_pattern: packages/features/ee/workflows/api/scheduleEmailReminders\.ts
+    line_range:
+    - 49
+    - 59
+    severity: warning
+    category: correctness
+    recommendation: Incorrect type definition.
+  - title_pattern: Missing|SendGrid
+    file_pattern: packages/features/ee/workflows/api/scheduleEmailReminders\.ts
+    line_range:
+    - 59
+    - 69
+    severity: critical
+    category: correctness
+    recommendation: Missing null check for `reminder.referenceId` - this will cause SendGrid API errors if referenceId is
+      null
+  - title_pattern: Using|Consider|Promise|WorkflowMethods
+    file_pattern: packages/trpc/server/routers/viewer/workflows\.tsx
+    line_range:
+    - 575
+    - 585
+    severity: warning
+    category: concurrency
+    recommendation: Using `forEach` with async functions can cause race conditions and doesn't wait for completion.
+  - title_pattern: This|Promise|WorkflowMethods|EMAIL
+    file_pattern: packages/trpc/server/routers/viewer/workflows\.tsx
+    line_range:
+    - 213
+    - 223
+    severity: warning
+    category: correctness
+    recommendation: The `forEach` calls to delete reminders are not awaited, which could lead to the workflow being deleted
+      before all reminders are properly cancelled.
+  - title_pattern: When|SendGrid|This
+    file_pattern: packages/features/ee/workflows/lib/reminders/emailReminderManager\.ts
+    line_range:
+    - 217
+    - 227
+    severity: warning
+    category: correctness
+    recommendation: When `immediateDelete` is true, only the SendGrid cancellation happens but the database record remains.
+- id: greptile-cal_com-007
+  patch: patches/007.patch
+  difficulty: medium
+  title: Advanced date override handling and timezone compatibility improvements
+  description: "Test 7\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/trpc/server/routers/viewer/slots.ts:142]\
+    \ logic: Bug: `end` should use `slotEndTime` instead of `slotStartTime`. This will incorrectly validate working hours\
+    \ as both start and end use the same time.\n\n```suggestion\n        const end = slotEndT\n  - [packages/trpc/server/routers/viewer/slots.ts:114]\
+    \ logic: Potential issue: Using `===` for dayjs comparison may not work as expected. Consider using `.isSame()` method\
+    \ instead.\n\n```suggestion\n        if (dayjs(date.start).add(utcOffset, \"minutes\").isS"
+  source_dir: repos/greptile_bases/cal_com/007
+  base_sha: c4fe69d8265ba632c10f3a90ea05e4a74ff14c85
+  base_ref: date-algorithm-base
+  head_ref: date-algorithm-enhanced
+  expected_findings:
+  - title_pattern: This
+    file_pattern: packages/trpc/server/routers/viewer/slots\.ts
+    line_range:
+    - 137
+    - 147
+    severity: warning
+    category: correctness
+    recommendation: 'Bug: `end` should use `slotEndTime` instead of `slotStartTime`.'
+  - title_pattern: Potential|Using|Consider
+    file_pattern: packages/trpc/server/routers/viewer/slots\.ts
+    line_range:
+    - 109
+    - 119
+    severity: warning
+    category: correctness
+    recommendation: 'Potential issue: Using `===` for dayjs comparison may not work as expected.'
+- id: greptile-cal_com-008
+  patch: patches/008.patch
+  difficulty: hard
+  title: OAuth credential sync and app integration enhancements
+  description: "Test 8\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/app-store/hubspot/lib/CalendarService.ts:189]\
+    \ logic: The `refreshOAuthTokens` wrapper now handles credential sync routing, but the return type may not match the expected\
+    \ `HubspotToken`. The utility returns a raw fetch Response when using the sync\n  - [packages/app-store/salesforce/lib/CalendarService.ts:96]\
+    \ syntax: Missing import for `prisma`. Add `import prisma from \"@calcom/prisma\";` to the imports section.\n\n```suggestion\n\
+    \    import type { TokenResponse } from \"jsforce\";\nimport jsforce from \"jsforce\";\n\n  - [packages/app-store/zoho-bigin/lib/CalendarService.ts:93]\
+    \ logic: Parameter mismatch: `refreshOAuthTokens` expects `userId` but receives `credentialId`. Check other integrations\
+    \ - Google Calendar passes `credential.userId`."
+  source_dir: repos/greptile_bases/cal_com/008
+  base_sha: bc89fe00ea84d20bedcec782f0701b9711dc8201
+  base_ref: oauth-security-base
+  head_ref: oauth-security-enhanced
+  expected_findings:
+  - title_pattern: HubspotToken|Response
+    file_pattern: packages/app\-store/hubspot/lib/CalendarService\.ts
+    line_range:
+    - 184
+    - 194
+    severity: critical
+    category: security
+    recommendation: The `refreshOAuthTokens` wrapper now handles credential sync routing, but the return type may not match
+      the expected `HubspotToken`.
+  - title_pattern: Missing|TokenResponse|RRule|CalEventParser
+    file_pattern: packages/app\-store/salesforce/lib/CalendarService\.ts
+    line_range:
+    - 91
+    - 101
+    severity: critical
+    category: security
+    recommendation: Missing import for `prisma`.
+  - title_pattern: Check|Google|Calendar
+    file_pattern: packages/app\-store/zoho\-bigin/lib/CalendarService\.ts
+    line_range:
+    - 88
+    - 98
+    severity: warning
+    category: security
+    recommendation: 'Parameter mismatch: `refreshOAuthTokens` expects `userId` but receives `credentialId`.'
+  - title_pattern: Invalid|Computed|Assume|Allow
+    file_pattern: packages/app\-store/_utils/oauth/parseRefreshTokenResponse\.ts
+    line_range:
+    - 5
+    - 15
+    severity: critical
+    category: correctness
+    recommendation: Invalid Zod schema syntax.
+  - title_pattern: AES256|Base64|Should
+    file_pattern: \.env\.example
+    line_range:
+    - 238
+    - 248
+    severity: warning
+    category: security
+    recommendation: The encryption key generation command suggests 24 bytes (`openssl rand -base64 24`) but the comment states
+      32 bytes are required for AES256.
+  - title_pattern: Missing|HTTP|DELETE|CSRF
+    file_pattern: apps/web/pages/api/webhook/app\-credential\.ts
+    line_range:
+    - 12
+    - 22
+    severity: warning
+    category: security
+    recommendation: 'Missing HTTP method validation - any HTTP method is accepted including GET, PUT, DELETE which could expose
+      this endpoint to CSRF attacks
+
+
+      ```suggestion
+
+      export default async function handler(req: NextA'
+  - title_pattern: Direct
+    file_pattern: apps/web/pages/api/webhook/app\-credential\.ts
+    line_range:
+    - 22
+    - 32
+    severity: critical
+    category: security
+    recommendation: Direct string comparison is vulnerable to timing attacks - use `crypto.timingSafeEqual()` for webhook
+      secret validation
+  - title_pattern: Missing|JSON
+    file_pattern: apps/web/pages/api/webhook/app\-credential\.ts
+    line_range:
+    - 54
+    - 64
+    severity: critical
+    category: correctness
+    recommendation: Missing error handling for `JSON.parse()` and `symmetricDecrypt()` - malformed data will cause runtime
+      errors
+  - title_pattern: Using
+    file_pattern: apps/web/pages/api/webhook/app\-credential\.ts
+    line_range:
+    - 53
+    - 63
+    severity: critical
+    category: reliability
+    recommendation: Using empty string fallback for encryption key defeats the security check on line 19 - should throw error
+      if key is missing
+- id: greptile-cal_com-009
+  patch: patches/009.patch
+  difficulty: medium
+  title: SMS workflow reminder retry count tracking
+  description: "Test 9\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/features/ee/workflows/api/scheduleSMSReminders.ts:42]\
+    \ logic: This condition deletes reminders with retryCount &gt; 1, meaning reminders are deleted after just one retry attempt.\
+    \ This seems too aggressive - consider if this should be a higher threshold li\n  - [packages/features/ee/workflows/api/scheduleSMSReminders.ts:184]\
+    \ logic: No maximum retry limit is enforced. Without a cap (e.g., retryCount &lt; 5), reminders could be retried indefinitely,\
+    \ potentially causing performance issues over time."
+  source_dir: repos/greptile_bases/cal_com/009
+  base_sha: 917c7b0764f4c6bfdca95db2c5f73dbfdbe11757
+  base_ref: sms-retry-base
+  head_ref: sms-retry-enhanced
+  expected_findings:
+  - title_pattern: This
+    file_pattern: packages/features/ee/workflows/api/scheduleSMSReminders\.ts
+    line_range:
+    - 37
+    - 47
+    severity: warning
+    category: reliability
+    recommendation: This condition deletes reminders with retryCount &gt; 1, meaning reminders are deleted after just one
+      retry attempt.
+  - title_pattern: Without
+    file_pattern: packages/features/ee/workflows/api/scheduleSMSReminders\.ts
+    line_range:
+    - 179
+    - 189
+    severity: warning
+    category: reliability
+    recommendation: No maximum retry limit is enforced.
+- id: greptile-cal_com-010
+  patch: patches/010.patch
+  difficulty: medium
+  title: Add guest management functionality to existing bookings
+  description: "Test 10\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/trpc/server/routers/viewer/bookings/_router.tsx:79]\
+    \ logic: Using `authedProcedure` instead of `bookingsProcedure` means this endpoint bypasses the existing booking authorization\
+    \ middleware in `util.ts`. This creates inconsistent security patterns compa\n  - [packages/emails/templates/organizer-add-guests-email.ts:28]\
+    \ logic: Unsafe array access - `calEvent.attendees[0]` will throw if attendees array is empty. Add validation or use optional\
+    \ chaining.\n  - [packages/ui/form/MultiEmail.tsx:14] logic: Mutating props directly can cause unexpected behavior. Use\
+    \ a derived state or default value instead.\n\n```suggestion\n  const emails = value || [];\n```"
+  source_dir: repos/greptile_bases/cal_com/010
+  base_sha: b004587262e8221083bafbe9a0c515e7becaa7b3
+  base_ref: guest-management-base
+  head_ref: guest-management-enhanced
+  expected_findings:
+  - title_pattern: Using|This
+    file_pattern: packages/trpc/server/routers/viewer/bookings/_router\.tsx
+    line_range:
+    - 74
+    - 84
+    severity: warning
+    category: security
+    recommendation: Using `authedProcedure` instead of `bookingsProcedure` means this endpoint bypasses the existing booking
+      authorization middleware in `util.ts`.
+  - title_pattern: Unsafe
+    file_pattern: packages/emails/templates/organizer\-add\-guests\-email\.ts
+    line_range:
+    - 23
+    - 33
+    severity: warning
+    category: correctness
+    recommendation: Unsafe array access - `calEvent.attendees[0]` will throw if attendees array is empty.
+  - title_pattern: Mutating
+    file_pattern: packages/ui/form/MultiEmail\.tsx
+    line_range:
+    - 9
+    - 19
+    severity: warning
+    category: correctness
+    recommendation: Mutating props directly can cause unexpected behavior.
+  - title_pattern: Using|React|Consider
+    file_pattern: packages/ui/form/MultiEmail\.tsx
+    line_range:
+    - 21
+    - 31
+    severity: warning
+    category: correctness
+    recommendation: Using array index as React key can cause rendering issues when items are reordered.
+  - title_pattern: Button
+    file_pattern: packages/ui/form/MultiEmail\.tsx
+    line_range:
+    - 77
+    - 87
+    severity: warning
+    category: correctness
+    recommendation: The `variant="button"` prop may not be valid for Button component based on the component's interface.
+  - title_pattern: Case
+    file_pattern: packages/trpc/server/routers/viewer/bookings/addGuests\.handler\.ts
+    line_range:
+    - 67
+    - 77
+    severity: warning
+    category: correctness
+    recommendation: "Case sensitivity issue: blacklisted emails are converted to lowercase but guest emails aren't, potentially\
+      \ allowing blacklisted emails through\n\n```suggestion\n  const uniqueGuests = guests.filter(\n    "
+- id: greptile-cal_com-011
+  patch: patches/011.patch
+  difficulty: hard
+  title: 'feat: add calendar cache status and actions (#22532)'
+  description: "Test 1\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [packages/features/calendar-cache/calendar-cache.repository.ts:180]\
+    \ logic: The `updatedAt` field is referenced but may not exist in the CalendarCache table. The Prisma schema shows the\
+    \ table has `createdAt` but no `updatedAt` field. This will cause a runtime error.\n  - [packages/app-store/googlecalendar/lib/CalendarService.ts:1024]\
+    \ logic: Method `updateManyByCredentialId` does not exist in `SelectedCalendarRepository`. This will throw a runtime error.\n\
+    \  - [scripts/test-gcal-webhooks.sh:68] logic: macOS-specific sed syntax with empty string after `-i` flag will fail on\
+    \ Linux systems\n\n```suggestion\n  sed -i -E \"s|^GOOGLE_WEBHOOK_URL=.*|GOOGLE_WEBHOOK_URL=$TUNNEL_URL|\" \"$ENV_FILE\"\
+    \n```"
+  source_dir: repos/greptile_bases/cal_com/011
+  base_sha: 3784421f025afc3a595fbb4e222916785cc6de0c
+  base_ref: calendar-cache-foundation
+  head_ref: introduce-cache-key-overflow
+  expected_findings:
+  - title_pattern: CalendarCache|Prisma|This
+    file_pattern: packages/features/calendar\-cache/calendar\-cache\.repository\.ts
+    line_range:
+    - 175
+    - 185
+    severity: critical
+    category: correctness
+    recommendation: The `updatedAt` field is referenced but may not exist in the CalendarCache table.
+  - title_pattern: SelectedCalendarRepository|This
+    file_pattern: packages/app\-store/googlecalendar/lib/CalendarService\.ts
+    line_range:
+    - 1019
+    - 1029
+    severity: critical
+    category: security
+    recommendation: Method `updateManyByCredentialId` does not exist in `SelectedCalendarRepository`.
+  - title_pattern: Linux|GOOGLE_WEBHOOK_URL|TUNNEL_URL|ENV_FILE
+    file_pattern: scripts/test\-gcal\-webhooks\.sh
+    line_range:
+    - 63
+    - 73
+    severity: critical
+    category: correctness
+    recommendation: "macOS-specific sed syntax with empty string after `-i` flag will fail on Linux systems\n\n```suggestion\n\
+      \  sed -i -E \"s|^GOOGLE_WEBHOOK_URL=.*|GOOGLE_WEBHOOK_URL=$TUNNEL_URL|\" \"$ENV_FILE\"\n```"

@@ -471,7 +471,9 @@ class TestSubAgentSystemPrompt:
         assert "security" in prompt
         assert "Detects vulnerabilities" in prompt
 
-    def test_includes_strategy_when_specified(self, tmp_path):
+    def test_includes_code_review_skill_when_specified(self, tmp_path):
+        """PR review agents inject the ``code_review_pr`` skill, which now
+        carries the senior-engineer persona and provability framework."""
         from app.agent_loop.prompts import build_sub_agent_system_prompt
 
         prompt = build_sub_agent_system_prompt(
@@ -479,11 +481,13 @@ class TestSubAgentSystemPrompt:
             agent_description="Finds logic errors",
             agent_instructions="Check correctness.",
             workspace_path=str(tmp_path),
-            strategy_key="code_review",
+            skill_key="code_review_pr",
         )
-        assert "Code Review" in prompt
+        assert "Senior Engineer Review" in prompt
+        assert "Provability Framework" in prompt
+        assert "senior software engineer" in prompt
 
-    def test_no_strategy_when_not_specified(self, tmp_path):
+    def test_no_skill_injection_when_not_specified(self, tmp_path):
         from app.agent_loop.prompts import build_sub_agent_system_prompt
 
         prompt = build_sub_agent_system_prompt(
@@ -491,9 +495,10 @@ class TestSubAgentSystemPrompt:
             agent_description="Traces user flows",
             agent_instructions="Find usage patterns.",
             workspace_path=str(tmp_path),
-            strategy_key=None,
+            skill_key=None,
         )
-        assert "## Strategy" not in prompt
+        assert "Senior Engineer Review" not in prompt
+        assert "Provability Framework" not in prompt
 
     def test_includes_signal_blocker_hint(self, tmp_path):
         from app.agent_loop.prompts import build_sub_agent_system_prompt

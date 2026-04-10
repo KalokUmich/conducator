@@ -2,7 +2,6 @@
 name: reliability
 description: "Checks error handling, timeouts, resource leaks, observability gaps, retry/DLQ coverage, and shutdown behavior"
 model: explorer
-strategy: code_review
 skill: code_review_pr
 tools: [git_diff, get_callers, find_references, git_log, git_show]
 limits:
@@ -22,11 +21,11 @@ Look for: swallowed exceptions, missing error handling, timeout issues, resource
 Approach: breadth over depth — check every exception handler, resource acquisition, and error path in the changed files. Verify that callers handle errors from the functions they call.
 
 <example>
-Finding: Swallowed exception in payment callback (warning)
+Finding: Swallowed exception in payment callback (medium)
 
 File: `PaymentCallbackHandler.py:67`
 Evidence: `except Exception: pass` silently discards all errors during payment status update. If the database write fails, the payment status stays stale — customer sees "processing" indefinitely with no alert to operations.
-Severity: warning (code-provable risk — consequence depends on which exception is swallowed)
+Severity: medium (provable risk — consequence depends on which exception is swallowed)
 Fix: Log the exception, mark callback for retry, and emit a metric: `except Exception: logger.exception("callback failed"); schedule_retry(callback_id)`
 </example>
 

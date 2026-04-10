@@ -1265,6 +1265,34 @@ Scope each review agent's diff context to only the files relevant to its focus a
 - [ ] Update `_build_agent_query` / `build_diffs_section` to accept file filter per agent
 - [ ] Combined with prompt caching (9.11): estimated total cost reduction from ~$1.89 to ~$0.50 per review
 
+### 9.13 PR Brain v2 — Detect/Classify Separation (PLANNED)
+
+Architectural refactor separating bug **detection** (sub-agents) from severity **classification** (Brain). Inspired by Claude Code's coordinator→worker→coordinator pattern where workers are generic detectors and the coordinator synthesises + classifies.
+
+**Current**: each sub-agent detects bugs AND assigns severity → 12 severity examples × 7 agents = ~15K tokens of redundant rubric, plus 7 independent Haiku instances making inconsistent severity calls.
+
+**New flow**:
+```
+Phase 1: Brain dispatches sub-agents → each outputs findings WITHOUT severity
+Phase 2: Brain dedup — same bug from multiple agents → merge, tag which dimensions found it
+Phase 3: Brain dispatches Arbitrator per finding WITH dimension context
+         "Found by correctness + security. For EACH dimension, valid or not?"
+         Arbitrator answers per-dimension (e.g. correctness=confirmed, security=rebutted)
+Phase 4: Brain final verdict — sees all findings + per-dimension arbitration
+         → decides keep/drop, assigns severity with 2-question rubric,
+           informed by which dimensions survived
+```
+
+**Per-dimension arbitration**: when correctness and security both flag the same NPE, the arbitrator is told: "This finding was independently found by two dimensions. For each one, is the evidence valid?" The arbitrator can rebut one dimension while confirming another → Brain uses the surviving dimensions to classify severity (security survived → critical; only correctness survived → high).
+
+- [ ] Remove severity from sub-agent output schema (make optional / detection-only)
+- [ ] Remove severity rubric + 12 examples from `code_review_pr` skill (~2,168 tokens saved ×7 agents)
+- [ ] Add severity rubric + 2-question examples to Brain synthesis prompt (Phase 4, 1× only)
+- [ ] Refactor dedup to preserve `found_by: {dimension: {evidence, confidence}}` tags
+- [ ] Refactor Arbitrator to accept per-dimension evidence and rebut per-dimension
+- [ ] Brain synthesis assigns severity AFTER seeing arbitration verdicts + dimension context
+- [ ] Eval: compare severity_accuracy before/after on 12 requests cases + Greptile cases
+
 ### Reference Study Process
 For each sub-phase:
 1. **Read** the reference files listed above (deep study, not skim)
@@ -1498,6 +1526,7 @@ Bridge the gap between AI Summaries and actionable outcomes. Applies to both Ext
 | Phase 8.6: 美学 UI/UX Overhaul (A-G) | ✅ Complete | Sprint 13 |
 | Phase 8.6H: Interaction Expansion 交互性拓展 | 🟡 Planned | — |
 | Phase 9: Claude Code Pattern Adoption + Competitive Analysis | 🟢 In Progress | Sprint 13+ (ongoing) |
+| **Phase 9.10: PR Brain v2 — Detect/Classify Separation** | **🟡 Planned** | **Sprint 17** |
 | Phase 10: Companion & Developer Experience | 🟡 Planned | — |
 | Phase 11: Engineering Infrastructure | 🟡 Planned | — |
 | **Phase 12: Team Knowledge Base** | **🔴 Next Up** | **Sprint 14–15** |

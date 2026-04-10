@@ -1,0 +1,569 @@
+cases:
+- id: greptile-discourse-001
+  patch: patches/001.patch
+  difficulty: hard
+  title: 'FEATURE: automatically downsize large images'
+  description: "Test 1\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [app/models/optimized_image.rb:151] logic: Duplicate\
+    \ method definition - this `downsize` method will override the previous one on lines 145-147, breaking the API that expects\
+    \ separate max_width and max_height parameters\n\n```suggestion\n \n  - [app/assets/javascripts/discourse/lib/utilities.js:182]\
+    \ logic: Hardcoding file size limits bypasses site settings and breaks configurability. Consider using a larger site setting\
+    \ or removing frontend validation for images since backend now handles downsizi\n  - [app/controllers/uploads_controller.rb:69]\
+    \ logic: Potential infinite loop if `OptimizedImage.downsize` fails to reduce file size. The loop only decrements `attempt`\
+    \ but doesn't verify size reduction occurred."
+  source_dir: repos/greptile_bases/discourse/001
+  base_sha: 3f71fa15c93bb0b751bb92abae1b5dc9a21bd4ca
+  base_ref: image-processing-optimization
+  head_ref: large-image-processing
+  expected_findings:
+  - title_pattern: Duplicate|downsize_with_dimensions
+    file_pattern: app/models/optimized_image\.rb
+    line_range:
+    - 146
+    - 156
+    severity: warning
+    category: correctness
+    recommendation: "Duplicate method definition - this `downsize` method will override the previous one on lines 145-147,\
+      \ breaking the API that expects separate max_width and max_height parameters\n\n```suggestion\n  def se"
+  - title_pattern: Hardcoding|Consider
+    file_pattern: app/assets/javascripts/discourse/lib/utilities\.js
+    line_range:
+    - 177
+    - 187
+    severity: critical
+    category: correctness
+    recommendation: Hardcoding file size limits bypasses site settings and breaks configurability.
+  - title_pattern: Potential|OptimizedImage
+    file_pattern: app/controllers/uploads_controller\.rb
+    line_range:
+    - 64
+    - 74
+    severity: critical
+    category: performance
+    recommendation: Potential infinite loop if `OptimizedImage.downsize` fails to reduce file size.
+  - title_pattern: Using|Refresh|respond_to|actual_size
+    file_pattern: app/controllers/uploads_controller\.rb
+    line_range:
+    - 67
+    - 77
+    severity: warning
+    category: correctness
+    recommendation: Using potentially stale `tempfile.size` after downsizing operations.
+- id: greptile-discourse-002
+  patch: patches/002.patch
+  difficulty: hard
+  title: 'FEATURE: per-topic unsubscribe option in emails'
+  description: "Test 2\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [app/assets/javascripts/discourse/controllers/topic-unsubscribe.js.es6:5]\
+    \ syntax: Typo: 'stopNotificiationsText' should be 'stopNotificationsText' (missing 'a' in 'Notifications')\n\n```suggestion\n\
+    \  stopNotificationsText: function() {\n```\n  - [app/assets/javascripts/discourse/templates/topic/unsubscribe.hbs:3]\
+    \ syntax: Typo in property name: 'stopNotificiationsText' should be 'stopNotificationsText' (missing 'n' in 'Notifications')\n\
+    \n```suggestion\n    {{{stopNotificationsText}}}\n```\n  - [app/controllers/topics_controller.rb:105] logic: Potential\
+    \ nil pointer exception - if no TopicUser record exists, `tu` will be nil and calling methods on it will crash\n\n```suggestion\n\
+    \    tu = TopicUser.find_by(user_id: current_user.id, topic_"
+  source_dir: repos/greptile_bases/discourse/002
+  base_sha: 56abd247e1829cb6de82dfcc8ce04deb5f0d1e91
+  base_ref: email-notifications-enhancement
+  head_ref: topic-email-management
+  expected_findings:
+  - title_pattern: Typo|Notifications
+    file_pattern: app/assets/javascripts/discourse/controllers/topic\-unsubscribe\.js\.es6
+    line_range:
+    - 1
+    - 10
+    severity: warning
+    category: correctness
+    recommendation: "Typo: 'stopNotificiationsText' should be 'stopNotificationsText' (missing 'a' in 'Notifications')\n\n\
+      ```suggestion\n  stopNotificationsText: function() {\n```"
+  - title_pattern: Typo|Notifications
+    file_pattern: app/assets/javascripts/discourse/templates/topic/unsubscribe\.hbs
+    line_range:
+    - 1
+    - 8
+    severity: warning
+    category: correctness
+    recommendation: "Typo in property name: 'stopNotificiationsText' should be 'stopNotificationsText' (missing 'n' in 'Notifications')\n\
+      \n```suggestion\n    {{{stopNotificationsText}}}\n```"
+  - title_pattern: Potential|TopicUser|current_user|topic_id
+    file_pattern: app/controllers/topics_controller\.rb
+    line_range:
+    - 100
+    - 110
+    severity: critical
+    category: correctness
+    recommendation: "Potential nil pointer exception - if no TopicUser record exists, `tu` will be nil and calling methods\
+      \ on it will crash\n\n```suggestion\n    tu = TopicUser.find_by(user_id: current_user.id, topic_id: par"
+  - title_pattern: Authentication
+    file_pattern: app/controllers/topics_controller\.rb
+    line_range:
+    - 23
+    - 33
+    severity: warning
+    category: security
+    recommendation: Authentication concern - email unsubscribe links typically work without login, but this requires authentication
+  - title_pattern: previous_discussion
+    file_pattern: app/views/email/notification\.html\.erb
+    line_range:
+    - 5
+    - 15
+    severity: critical
+    category: correctness
+    recommendation: "CSS selector syntax error: '.previous-discussion' should not have a leading dot in the class attribute\n\
+      \n```suggestion\n    <h4 class='previous-discussion'><%= t \"user_notifications.previous_discussion\""
+- id: greptile-discourse-003
+  patch: patches/003.patch
+  difficulty: medium
+  title: Add comprehensive email validation for blocked users
+  description: "Test 3\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [spec/models/blocked_email_spec.rb:30] logic:\
+    \ Custom matcher `be_within_one_second_of` is not defined. Need to implement this matcher or use built-in alternatives\
+    \ like `be_within(1.second).of(Time.zone.now)`\n\n```suggestion\n          expect\n  - [lib/validators/email_validator.rb:22]\
+    \ logic: ReDoS vulnerability: `setting` input is passed directly to regex construction without sanitization. Malicious\
+    \ settings could cause catastrophic backtracking.\n  - [lib/validators/email_validator.rb:8] logic: Using `elsif` prevents\
+    \ both whitelist and blacklist from being applied simultaneously - this may not be the intended behavior for security\
+    \ restrictions."
+  source_dir: repos/greptile_bases/discourse/003
+  base_sha: e25638dab0d4b98f99c8fe8976ccaae8f4fb9db3
+  base_ref: blocked-email-validation-pre
+  head_ref: blocked-email-validation-post
+  expected_findings:
+  - title_pattern: Custom|be_within_one_second_of|Need|Time
+    file_pattern: spec/models/blocked_email_spec\.rb
+    line_range:
+    - 25
+    - 35
+    severity: warning
+    category: concurrency
+    recommendation: Custom matcher `be_within_one_second_of` is not defined.
+  - title_pattern: ReDoS|Malicious
+    file_pattern: lib/validators/email_validator\.rb
+    line_range:
+    - 17
+    - 27
+    severity: warning
+    category: correctness
+    recommendation: 'ReDoS vulnerability: `setting` input is passed directly to regex construction without sanitization.'
+  - title_pattern: Using
+    file_pattern: lib/validators/email_validator\.rb
+    line_range:
+    - 3
+    - 13
+    severity: warning
+    category: correctness
+    recommendation: Using `elsif` prevents both whitelist and blacklist from being applied simultaneously - this may not be
+      the intended behavior for security restrictions.
+  - title_pattern: Regex|Regexp
+    file_pattern: lib/validators/email_validator\.rb
+    line_range:
+    - 15
+    - 25
+    severity: warning
+    category: correctness
+    recommendation: Regex pattern `@(#{domains})` only matches domain suffixes, not full domains.
+  - title_pattern: This
+    file_pattern: app/models/blocked_email\.rb
+    line_range:
+    - 14
+    - 24
+    severity: warning
+    category: concurrency
+    recommendation: This method has side effects during a read operation - it updates statistics even when just checking if
+      an email should be blocked.
+  - title_pattern: The|increment|and|save|operations
+    file_pattern: app/models/blocked_email\.rb
+    line_range:
+    - 11
+    - 21
+    severity: warning
+    category: concurrency
+    recommendation: The increment and save operations should use `increment!` or be wrapped in a transaction to prevent race
+      conditions when multiple requests check the same email simultaneously.
+- id: greptile-discourse-004
+  patch: patches/004.patch
+  difficulty: hard
+  title: Enhance embed URL handling and validation system
+  description: "Test 4\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [db/migrate/20131223171005_create_top_topics.rb:3]\
+    \ logic: Adding `force: true` makes this migration destructive - it will drop and recreate the table if it exists, potentially\
+    \ causing data loss in production\n\n```suggestion\n    create_table :top_topics\n  - [app/views/embed/best.html.erb:6]\
+    \ syntax: Unusual `end if` syntax - should be just `end`\n\n```suggestion\n  <%- end %>\n```\n  - [app/models/topic_embed.rb:48]\
+    \ logic: Using `open()` is deprecated and creates security vulnerabilities (command injection, SSRF). Use `Net::HTTP`,\
+    \ `HTTParty`, or similar safe HTTP libraries instead.\n\n```suggestion\n    doc = Readab"
+  source_dir: repos/greptile_bases/discourse/004
+  base_sha: 62db063e1e1abe691313ab42682a68f796d63769
+  base_ref: embed-url-handling-pre
+  head_ref: embed-url-handling-post
+  expected_findings:
+  - title_pattern: Adding|create_table
+    file_pattern: db/migrate/20131223171005_create_top_topics\.rb
+    line_range:
+    - 1
+    - 8
+    severity: warning
+    category: correctness
+    recommendation: "Adding `force: true` makes this migration destructive - it will drop and recreate the table if it exists,\
+      \ potentially causing data loss in production\n\n```suggestion\n    create_table :top_topics do |t|"
+  - title_pattern: Unusual
+    file_pattern: app/views/embed/best\.html\.erb
+    line_range:
+    - 1
+    - 11
+    severity: warning
+    category: correctness
+    recommendation: "Unusual `end if` syntax - should be just `end`\n\n```suggestion\n  <%- end %>\n```"
+  - title_pattern: Using|SSRF|HTTP|HTTParty
+    file_pattern: app/models/topic_embed\.rb
+    line_range:
+    - 43
+    - 53
+    severity: warning
+    category: security
+    recommendation: Using `open()` is deprecated and creates security vulnerabilities (command injection, SSRF).
+  - title_pattern: Incorrect|require_dependency|process_post
+    file_pattern: spec/jobs/poll_feed_spec\.rb
+    line_range:
+    - 1
+    - 7
+    severity: warning
+    category: correctness
+    recommendation: Incorrect require_dependency path - should be 'jobs/scheduled/poll_feed' not 'jobs/regular/process_post'
+  - title_pattern: SSRF
+    file_pattern: app/models/topic_embed\.rb
+    line_range:
+    - 6
+    - 16
+    severity: warning
+    category: correctness
+    recommendation: URL validation is insufficient - allows access to internal services (localhost, 192.168.x.x, etc).
+  - title_pattern: Potential|HTML
+    file_pattern: app/models/topic_embed\.rb
+    line_range:
+    - 8
+    - 18
+    severity: warning
+    category: security
+    recommendation: Potential XSS vulnerability - URL should be HTML-escaped before embedding in HTML content.
+  - title_pattern: Security|Using|Consider|embeddable_host
+    file_pattern: app/views/layouts/embed\.html\.erb
+    line_range:
+    - 6
+    - 16
+    severity: warning
+    category: correctness
+    recommendation: 'Security concern: Using `request.referer` as postMessage target origin could be vulnerable to header
+      spoofing.'
+  - title_pattern: SiteSetting|embed_by_username|User|username_lower
+    file_pattern: lib/topic_retriever\.rb
+    line_range:
+    - 44
+    - 54
+    severity: critical
+    category: correctness
+    recommendation: "No error handling if SiteSetting.embed_by_username is nil or empty string\n\n```suggestion\n      user\
+      \ = User.where(username_lower: SiteSetting.embed_by_username&.downcase).first\n```"
+  - title_pattern: Using|Consider
+    file_pattern: db/migrate/20131217174004_create_topic_embeds\.rb
+    line_range:
+    - 1
+    - 8
+    severity: warning
+    category: correctness
+    recommendation: 'Using `force: true` will drop the table if it exists, potentially causing data loss in production.'
+  - title_pattern: Missing
+    file_pattern: app/assets/javascripts/embed\.js
+    line_range:
+    - 1
+    - 11
+    severity: critical
+    category: correctness
+    recommendation: "Missing validation - if `comments` element doesn't exist, `appendChild` will throw uncaught error\n\n\
+      ```suggestion\n  var comments = document.getElementById('discourse-comments'),\n      iframe = document"
+  - title_pattern: Critical|JavaScript
+    file_pattern: app/assets/javascripts/embed\.js
+    line_range:
+    - 2
+    - 12
+    severity: warning
+    category: security
+    recommendation: Critical XSS vulnerability - `discourseUrl` is not validated and could contain malicious JavaScript.
+  - title_pattern: Host|SiteSetting|embeddable_host
+    file_pattern: app/controllers/embed_controller\.rb
+    line_range:
+    - 21
+    - 31
+    severity: warning
+    category: reliability
+    recommendation: Host validation can be bypassed if `request.referer` is nil - the `|| ''` fallback makes `URI('').host`
+      return nil, which could equal `SiteSetting.embeddable_host` if it's also nil
+  - title_pattern: Security
+    file_pattern: app/assets/javascripts/embed\.js
+    line_range:
+    - 12
+    - 22
+    severity: warning
+    category: correctness
+    recommendation: Security flaw - `indexOf` allows subdomain attacks.
+  - title_pattern: Setting|Frame|Options|ALLOWALL
+    file_pattern: app/controllers/embed_controller\.rb
+    line_range:
+    - 23
+    - 33
+    severity: warning
+    category: correctness
+    recommendation: Setting X-Frame-Options to 'ALLOWALL' permits embedding from any domain, potentially enabling clickjacking
+      attacks from malicious sites
+  - title_pattern: Security|SSRF|SiteSetting|feed_polling_url
+    file_pattern: app/jobs/scheduled/poll_feed\.rb
+    line_range:
+    - 24
+    - 34
+    severity: critical
+    category: correctness
+    recommendation: "Security vulnerability: using `open` without URL validation allows potential SSRF attacks and local file\
+      \ access\n\n```suggestion\n      require 'net/http'\n      require 'uri'\n      \n      uri = URI.parse"
+- id: greptile-discourse-006
+  patch: patches/006.patch
+  difficulty: medium
+  title: 'UX: show complete URL path if website domain is same as instance domain'
+  description: "Test 6\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [app/serializers/user_serializer.rb:149] logic:\
+    \ String concatenation with `<<` modifies the original string. Use `+` or string interpolation to avoid mutating `Discourse.current_hostname`\n\
+    \n```suggestion\n      discourse_host.ends_with?(\".\" + "
+  source_dir: repos/greptile_bases/discourse/006
+  base_sha: 7a5fbae060bd0d3e29f3a4b5c6f2bfd8b2914dc7
+  base_ref: url-handling-pre
+  head_ref: url-handling-post
+  expected_findings:
+  - title_pattern: String|Discourse|current_hostname|discourse_host
+    file_pattern: app/serializers/user_serializer\.rb
+    line_range:
+    - 144
+    - 154
+    severity: warning
+    category: correctness
+    recommendation: String concatenation with `<<` modifies the original string.
+- id: greptile-discourse-007
+  patch: patches/007.patch
+  difficulty: medium
+  title: scale-color $lightness must use $secondary for dark themes
+  description: "Test 7\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [app/assets/stylesheets/mobile/topic-post.scss:182]\
+    \ logic: Lightness value changed from 20% to 50% - this may affect visual hierarchy as h3 headings will now have the same\
+    \ color intensity as buttons and other UI elements"
+  source_dir: repos/greptile_bases/discourse/007
+  base_sha: 7554b5e3c458dc79b591d5e874e79ab10cf30c2f
+  base_ref: theme-color-scheme-pre
+  head_ref: theme-color-scheme-post
+  expected_findings:
+  - title_pattern: Lightness
+    file_pattern: app/assets/stylesheets/mobile/topic\-post\.scss
+    line_range:
+    - 177
+    - 187
+    severity: warning
+    category: correctness
+    recommendation: Lightness value changed from 20% to 50% - this may affect visual hierarchy as h3 headings will now have
+      the same color intensity as buttons and other UI elements
+- id: greptile-discourse-008
+  patch: patches/008.patch
+  difficulty: hard
+  title: 'FIX: proper handling of group memberships'
+  description: "Test 8\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [spec/controllers/admin/groups_controller_spec.rb:115]\
+    \ logic: HTTP method mismatch - test uses PUT but remove_member action expects DELETE\n\n```suggestion\n      xhr :delete,\
+    \ :remove_member, group_id: 1, user_id: 42\n```\n  - [app/assets/javascripts/discourse/routes/group-members.js.es6:11]\
+    \ logic: The `findMembers()` call is now asynchronous and unhandled. The controller may not have member data immediately\
+    \ available, creating a race condition.\n  - [app/assets/javascripts/admin/routes/admin_group_route.js:13] logic: This\
+    \ creates a race condition - `findMembers()` is async but the controller setup continues immediately. Templates expecting\
+    \ member data may render before it's available."
+  source_dir: repos/greptile_bases/discourse/008
+  base_sha: 4975fc28903a84418f546b2809370f19abf10e08
+  base_ref: group-dm-user-addition-pre
+  head_ref: group-dm-user-addition-post
+  expected_findings:
+  - title_pattern: HTTP|remove_member|DELETE|group_id
+    file_pattern: spec/controllers/admin/groups_controller_spec\.rb
+    line_range:
+    - 110
+    - 120
+    severity: warning
+    category: correctness
+    recommendation: "HTTP method mismatch - test uses PUT but remove_member action expects DELETE\n\n```suggestion\n     \
+      \ xhr :delete, :remove_member, group_id: 1, user_id: 42\n```"
+  - title_pattern: The|findMembers|call|now|asynchronous
+    file_pattern: app/assets/javascripts/discourse/routes/group\-members\.js\.es6
+    line_range:
+    - 6
+    - 16
+    severity: critical
+    category: concurrency
+    recommendation: The `findMembers()` call is now asynchronous and unhandled.
+  - title_pattern: This|Templates
+    file_pattern: app/assets/javascripts/admin/routes/admin_group_route\.js
+    line_range:
+    - 8
+    - 18
+    severity: critical
+    category: concurrency
+    recommendation: This creates a race condition - `findMembers()` is async but the controller setup continues immediately.
+  - title_pattern: Missing|Ember|RSVP
+    file_pattern: app/assets/javascripts/discourse/models/group\.js
+    line_range:
+    - 16
+    - 26
+    severity: warning
+    category: correctness
+    recommendation: Missing return value - should return `Ember.RSVP.resolve([])` or similar to maintain consistent return
+      type
+  - title_pattern: Missing
+    file_pattern: app/assets/javascripts/discourse/models/group\.js
+    line_range:
+    - 54
+    - 64
+    severity: warning
+    category: concurrency
+    recommendation: "Missing semicolon after function closing brace\n\n```suggestion\n    });\n```"
+  - title_pattern: Missing
+    file_pattern: app/assets/javascripts/discourse/models/group\.js
+    line_range:
+    - 77
+    - 87
+    severity: warning
+    category: correctness
+    recommendation: Missing return value - should return a resolved promise for consistency
+  - title_pattern: This|JavaScript|Select2|HTML
+    file_pattern: app/assets/javascripts/discourse/templates/components/admin\-group\-selector\.hbs
+    line_range:
+    - 1
+    - 6
+    severity: warning
+    category: correctness
+    recommendation: This template appears incomplete - the corresponding JavaScript component expects Select2 integration
+      with multiple selection capabilities, but this template only contains a plain HTML input field wit
+  - title_pattern: The|automatic|variable|should|member
+    file_pattern: app/assets/javascripts/admin/templates/group_member\.hbs
+    line_range:
+    - 1
+    - 6
+    severity: warning
+    category: correctness
+    recommendation: The `automatic` variable should be `member.automatic` or explicitly passed from the parent context, as
+      the current reference may be ambiguous.
+- id: greptile-discourse-009
+  patch: patches/009.patch
+  difficulty: hard
+  title: 'FEATURE: Localization fallbacks (server-side)'
+  description: "Test 9\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [lib/freedom_patches/translate_accelerator.rb:63]\
+    \ logic: Race condition: `@loaded_locales ||= []` is not thread-safe. If two threads call this simultaneously before `@loaded_locales`\
+    \ is initialized, both could initialize it, potentially causing incon\n  - [config/initializers/i18n.rb:9] syntax:\r\n\
+    ```suggestion\r\nI18n::Backend::Simple.send(:include, I18n::Backend::Fallbacks)\r\n```"
+  source_dir: repos/greptile_bases/discourse/009
+  base_sha: 728845d008f06828630a632e5c7d67e11bf15deb
+  base_ref: localization-system-pre
+  head_ref: localization-system-post
+  expected_findings:
+  - title_pattern: Race|loaded_locales
+    file_pattern: lib/freedom_patches/translate_accelerator\.rb
+    line_range:
+    - 58
+    - 68
+    severity: critical
+    category: concurrency
+    recommendation: 'Race condition: `@loaded_locales ||= []` is not thread-safe.'
+  - title_pattern: I18n|Backend|Simple|Fallbacks
+    file_pattern: config/initializers/i18n\.rb
+    line_range:
+    - 4
+    - 14
+    severity: warning
+    category: reliability
+    recommendation: "```suggestion\r\nI18n::Backend::Simple.send(:include, I18n::Backend::Fallbacks)\r\n```"
+- id: greptile-discourse-010
+  patch: patches/010.patch
+  difficulty: hard
+  title: 'FEATURE: Can edit category/host relationships for embedding'
+  description: "Test 10\n\nPlanted bugs (per greptile-apps[bot] review):\n  - [spec/models/topic_spec.rb:1407] syntax: Typo:\
+    \ 'emeddable' should be 'embeddable'\n\n```suggestion\n    describe 'with an embeddable host' do\n```\n  - [app/assets/javascripts/admin/components/embeddable-host.js.es6:26]\
+    \ logic: Potential null reference error if `host.category` is null/undefined. Should add safety check: `this.get('host.category')?.id`\n\
+    \  - [app/controllers/admin/embedding_controller.rb:11] logic: Update method doesn't actually perform any updates - it\
+    \ just renders the same data as show method"
+  source_dir: repos/greptile_bases/discourse/010
+  base_sha: 913c3d6f636d02b3dd6c2c022ca1af2bec95d752
+  base_ref: rest-serializer-enhancement-pre
+  head_ref: rest-serializer-enhancement-post
+  expected_findings:
+  - title_pattern: Typo
+    file_pattern: spec/models/topic_spec\.rb
+    line_range:
+    - 1402
+    - 1412
+    severity: warning
+    category: correctness
+    recommendation: "Typo: 'emeddable' should be 'embeddable'\n\n```suggestion\n    describe 'with an embeddable host' do\n\
+      ```"
+  - title_pattern: Potential|Should
+    file_pattern: app/assets/javascripts/admin/components/embeddable\-host\.js\.es6
+    line_range:
+    - 21
+    - 31
+    severity: critical
+    category: correctness
+    recommendation: Potential null reference error if `host.category` is null/undefined.
+  - title_pattern: Update
+    file_pattern: app/controllers/admin/embedding_controller\.rb
+    line_range:
+    - 6
+    - 16
+    severity: warning
+    category: correctness
+    recommendation: Update method doesn't actually perform any updates - it just renders the same data as show method
+  - title_pattern: This
+    file_pattern: app/assets/javascripts/admin/controllers/admin\-embedding\.js\.es6
+    line_range:
+    - 10
+    - 20
+    severity: warning
+    category: correctness
+    recommendation: This only removes the host from the local array.
+  - title_pattern: This|CRUD
+    file_pattern: app/assets/javascripts/admin/adapters/embedding\.js\.es6
+    line_range:
+    - 1
+    - 11
+    severity: critical
+    category: correctness
+    recommendation: The pathFor method ignores all parameters (store, type, findArgs) that are typically used for dynamic
+      path generation.
+  - title_pattern: Critical|INSERT|INTO|embeddable_hosts
+    file_pattern: db/migrate/20150818190757_create_embeddable_hosts\.rb
+    line_range:
+    - 20
+    - 30
+    severity: critical
+    category: security
+    recommendation: Critical SQL injection vulnerability - host value `#{h}` is directly interpolated without escaping.
+  - title_pattern: This|embeddable_host|happy_category|private_category
+    file_pattern: spec/fabricators/category_fabricator\.rb
+    line_range:
+    - 1
+    - 9
+    severity: critical
+    category: correctness
+    recommendation: This completely removes all category fabricators and replaces them with an embeddable_host fabricator.
+  - title_pattern: Critical|This|EmbeddableHost|Category
+    file_pattern: spec/fabricators/embeddable_host_fabricator\.rb
+    line_range:
+    - 22
+    - 32
+    severity: critical
+    category: correctness
+    recommendation: 'Critical error: This file should contain EmbeddableHost fabricators, not Category fabricators.'
+  - title_pattern: Calling|NoMethodError
+    file_pattern: app/models/embeddable_host\.rb
+    line_range:
+    - 2
+    - 12
+    severity: warning
+    category: correctness
+    recommendation: Calling sub!
+  - title_pattern: embeddable_hosts|Previously|Consider
+    file_pattern: app/controllers/embed_controller\.rb
+    line_range:
+    - 56
+    - 66
+    severity: warning
+    category: concurrency
+    recommendation: The removal of the blank check for `embeddable_hosts` setting changes the behavior.

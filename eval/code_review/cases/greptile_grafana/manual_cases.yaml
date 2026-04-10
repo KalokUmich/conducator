@@ -1,0 +1,79 @@
+# Hand-annotated Greptile-benchmark cases for grafana — see
+# greptile_sentry/manual_cases.yaml for the rationale and convention.
+#
+# Note: Greptile's free trial expired before its bot could review either
+# of these PRs, so there are NO bot inline findings to scrape — these
+# entries had to be reconstructed entirely from the diff and source.
+
+cases:
+  - id: greptile-grafana-002
+    patch: patches/002.patch
+    difficulty: medium
+    title: 'AuthZService: improve authz caching'
+    description: |
+      Adds a dual-caching strategy to the RBAC authz service. Touches
+      pkg/services/authz/rbac/{service.go,cache.go} and the rbac.go
+      facade. Likely bug area: cache invalidation, key collision, or
+      stale read on permission change. Greptile bot trial expired so
+      no bot findings exist.
+    source_dir: repos/greptile_bases/grafana/002
+    base_sha: e650fa7b2041c91fbb98ef3432b3969e13bbdac9
+    base_ref: cache-optimization-baseline
+    head_ref: authz-service-improve-caching-pr
+    quality: human
+    expected_findings:
+      - title_pattern: permDenialCache|denial cache|stale|invalidat|negative cache|permission
+        file_pattern: pkg/services/authz/rbac/service\.go
+        line_range: [108, 160]
+        severity: critical
+        category: security
+        recommendation: |
+          The new ``permDenialCache`` (cacheWrap[bool] for denied
+          permission checks) has no invalidation path. Once a (user,
+          action, name, parent_folder) tuple is denied, the result is
+          cached for ``shortCacheTTL`` and returned immediately without
+          re-checking the source of truth. If an admin GRANTS the user
+          permission inside the TTL window, the user remains locked out
+          until the cache entry expires — a stale-auth security issue.
+          Either drop the negative cache, or wire ``permDenialCache.Delete``
+          into every code path that mutates user permissions / role
+          assignments / team memberships.
+
+  - id: greptile-grafana-004
+    patch: patches/004.patch
+    difficulty: medium
+    title: Advanced Query Processing Architecture
+    description: |
+      Refactors template-variable interpolation in the Loki datasource's
+      query splitting code. Touches querySplitting.ts and
+      shardQuerySplitting.ts plus their tests. Likely bug area:
+      interpolation order, missing variable expansion, or shard
+      partition off-by-one. Greptile bot trial expired so no bot
+      findings exist.
+    source_dir: repos/greptile_bases/grafana/004
+    base_sha: dcb853d3099c08b74370fcc965342f035dd6d6cc
+    base_ref: query-splitting-baseline
+    head_ref: query-splitting-enhancements
+    quality: human
+    expected_findings:
+      - title_pattern: applyTemplateVariables|interpolat|filters|request\.filters|scopedVars
+        file_pattern: public/app/plugins/datasource/loki/(querySplitting|shardQuerySplitting)\.ts
+        line_range: [40, 60]
+        severity: warning
+        category: correctness
+        recommendation: |
+          The PR replaces ``datasource.interpolateVariablesInQueries(targets,
+          scopedVars)`` with ``targets.map(q => datasource.applyTemplateVariables(q,
+          request.scopedVars, request.filters))``. Two issues:
+          (1) ``request.filters`` may be undefined for queries that don't use
+          ad-hoc filters — depending on how ``applyTemplateVariables`` handles
+          a missing ``filters`` argument, this could throw or silently change
+          interpolation behaviour.
+          (2) The OLD path interpolated targets ONCE per request; the NEW path
+          calls ``applyTemplateVariables`` per query inside ``.map`` AND a
+          downstream ``splitQueriesByStreamShard`` re-interpolates per shard
+          (test asserts ``toHaveBeenCalledTimes(5)`` for 1 input query),
+          meaning template variables get re-interpolated multiple times. If
+          the interpolation function is non-idempotent (e.g. mutates the
+          query in place or substitutes already-substituted markers), the
+          shards will see different expressions than intended.

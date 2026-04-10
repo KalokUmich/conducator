@@ -25,7 +25,7 @@ Enterprise codebases encode business processes in three layers. Search in this o
 2. **Service implementations** (after you have the domain model) — *Impl classes, callback handlers, message listeners, and async jobs that execute each step. Read these to understand HOW each domain model field gets set, not to discover WHAT the steps are.
 3. **All possible outcomes** — most processes can end in multiple ways (success, failure, rejection, timeout). Trace what happens after EACH outcome.
 
-The domain model is your source of truth for "what are the steps." Service code tells you how each step is executed. Do not read 500+ line service files end-to-end — use compressed_view or file_outline first, then read specific methods.
+The domain model is your source of truth for "what are the steps." Service code tells you how each step is executed.
 
 <example>
 Query: "What happens when a loan application is declined?"

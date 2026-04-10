@@ -1,0 +1,40 @@
+# Hand-annotated Greptile-benchmark cases for sentry that the auto-importer
+# (import_greptile.py) skipped because greptile-apps[bot] left no inline
+# `logic:`-tagged review comments. The bug content here is derived by
+# reading the diff against base_sha and the surrounding source code.
+#
+# Marker convention: every entry under ``cases:`` here MUST have
+# ``quality: human`` to make it visually distinct from auto-imported
+# entries (and to give downstream consumers a way to filter).
+
+cases:
+  - id: greptile-sentry-004
+    patch: patches/004.patch
+    difficulty: hard
+    title: GitHub OAuth Security Enhancement
+    description: |
+      Greptile published this as a Critical bug case in their public
+      benchmark: "Null reference if github_authenticated_user state is
+      missing". The PR adds an OAuth state-handling enhancement to the
+      GitHub integration, but the new code dereferences a nullable
+      session value without guarding against the missing case.
+    source_dir: repos/greptile_bases/sentry/004
+    base_sha: ccd14e450fcefa5b286c06221775f50a49059f6d
+    base_ref: oauth-state-vulnerable
+    head_ref: oauth-state-secure
+    quality: human
+    expected_findings:
+      - title_pattern: github_authenticated_user|OAuth|state|null|missing
+        file_pattern: src/sentry/integrations/github/integration\.py
+        line_range: [455, 475]
+        severity: critical
+        category: security
+        recommendation: |
+          Guard the new OAuth state check against a missing
+          ``github_authenticated_user``: when ``pipeline.fetch_state`` returns
+          ``None`` the comparison silently passes through, which (combined with
+          deleting ``FORWARD_INSTALL_FOR``) lets a user installing the GitHub
+          App via the direct-from-GitHub flow bypass the verification entirely.
+          Either restore ``FORWARD_INSTALL_FOR = ["github"]`` in
+          ``pipeline_advancer.py`` so the OAuth login step is always reached,
+          or explicitly fail when ``github_authenticated_user`` is unset.

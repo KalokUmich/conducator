@@ -56,8 +56,15 @@ _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```")
 _JSON_BARE_RE = re.compile(r"\[[\s\S]*\]")
 _JSON_OBJECT_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}")
 
+# Map raw severity strings from LLM output → Severity enum.
+# "warning" remains a valid enum value (Severity.WARNING) for backward compat.
+# The 4-level rubric encourages agents to output "high"/"medium"/"low" instead,
+# but "warning" is still parsed and treated as ≈ MEDIUM in merge_recommendation.
 _SEVERITY_MAP = {
     "critical": Severity.CRITICAL,
+    "high": Severity.HIGH,
+    "medium": Severity.MEDIUM,
+    "low": Severity.LOW,
     "warning": Severity.WARNING,
     "nit": Severity.NIT,
     "praise": Severity.PRAISE,
@@ -84,6 +91,11 @@ FOCUS_DESCRIPTIONS = {
         "Swallowed exceptions, missing error handling, timeout issues, "
         "resource leaks, missing observability (logging/metrics), "
         "hardcoded config, shutdown behavior, DLQ/retry gaps."
+    ),
+    "performance": (
+        "N+1 queries, unbounded loops/collections, missing pagination, "
+        "large allocations in hot paths, repeated expensive work that could "
+        "be memoized, chatty RPC sequences, sync calls on async paths."
     ),
     "correctness_b": (
         "Null safety, error handling, edge cases, and contract violations. "
@@ -121,6 +133,13 @@ STRATEGY_HINTS = {
         "and error path in the changed files. Use get_callers to verify "
         "callers handle errors. Brief checks across many paths > deep dive on one."
     ),
+    "performance": (
+        "Scan diff for loops, list endpoints, and DB calls first. For each "
+        "suspect, verify the input bound (is the collection user-controlled?) "
+        "and whether the expensive work runs once or per-iteration. Use "
+        "db_schema to confirm missing indexes before flagging slow queries. "
+        "Prove scalability problems from code structure — avoid microbench speculation."
+    ),
     "correctness_b": (
         "Defensive review: for each changed method, trace every nullable "
         "return value and verify the caller handles null. Check exception "
@@ -142,6 +161,7 @@ AGENT_CATEGORIES = {
     "concurrency": FindingCategory.CONCURRENCY,
     "security": FindingCategory.SECURITY,
     "reliability": FindingCategory.RELIABILITY,
+    "performance": FindingCategory.PERFORMANCE,
     "test_coverage": FindingCategory.TEST_COVERAGE,
 }
 
@@ -153,7 +173,7 @@ Extract the findings and reformat them as a JSON array.
 ## Rules
 - Output ONLY a JSON array. No commentary, no markdown fences, no explanation.
 - Each element must have: title, severity, confidence, file, start_line, end_line, evidence, risk, suggested_fix
-- severity must be one of: "critical", "warning", "nit", "praise"
+- severity must be one of: "critical", "high", "medium", "low", "nit", "praise"
 - confidence must be a number 0.0–1.0
 - evidence must be an array of strings
 - If the text contains no reviewable findings, output: []
@@ -417,11 +437,13 @@ def post_filter(findings: list[ReviewFinding]) -> list[ReviewFinding]:
             dropped += 1
             continue
 
+        # "Missing tests" is never critical — cap at high (provable but functional,
+        # not security/contract).
         if f.category == FindingCategory.TEST_COVERAGE and f.severity == Severity.CRITICAL:
-            f.severity = Severity.WARNING
+            f.severity = Severity.HIGH
 
         if "missing test" in f.title.lower() and f.severity == Severity.CRITICAL:
-            f.severity = Severity.WARNING
+            f.severity = Severity.HIGH
 
         result.append(f)
 
@@ -433,8 +455,8 @@ def post_filter(findings: list[ReviewFinding]) -> list[ReviewFinding]:
 def merge_recommendation(findings: list) -> str:
     """Determine the merge recommendation based on findings severity.
 
-    Logic: any Critical → request_changes; 3+ Warnings → request_changes;
-    1-2 Warnings → approve_with_followups; no issues → approve.
+    Logic: any Critical/High → request_changes; 3+ Medium → request_changes;
+    1-2 Medium → approve_with_followups; no issues → approve.
 
     Args:
         findings: List of ReviewFinding (typically post-processed and ranked).
@@ -443,8 +465,8 @@ def merge_recommendation(findings: list) -> str:
         One of: ``"approve"``, ``"approve_with_followups"``,
         ``"request_changes"``.
     """
-    critical = sum(1 for f in findings if f.severity == Severity.CRITICAL)
-    warnings = sum(1 for f in findings if f.severity == Severity.WARNING)
+    critical = sum(1 for f in findings if f.severity in (Severity.CRITICAL, Severity.HIGH))
+    warnings = sum(1 for f in findings if f.severity in (Severity.MEDIUM, Severity.WARNING))
 
     if critical > 0:
         return "request_changes"
@@ -473,7 +495,9 @@ def build_summary(
         Markdown-formatted summary string.
     """
     critical = sum(1 for f in findings if f.severity == Severity.CRITICAL)
-    warnings = sum(1 for f in findings if f.severity == Severity.WARNING)
+    high = sum(1 for f in findings if f.severity == Severity.HIGH)
+    medium = sum(1 for f in findings if f.severity in (Severity.MEDIUM, Severity.WARNING))
+    low = sum(1 for f in findings if f.severity == Severity.LOW)
     nits = sum(1 for f in findings if f.severity == Severity.NIT)
 
     rec_emoji = {
@@ -767,11 +791,11 @@ def evidence_gate(findings: List[ReviewFinding], tool_calls_made: int = 0) -> Li
 
         if reasons:
             logger.info(
-                "Evidence gate: downgrading '%s' from critical → warning (%s)",
+                "Evidence gate: downgrading '%s' from critical → high (%s)",
                 f.title,
                 "; ".join(reasons),
             )
-            f.severity = Severity.WARNING
+            f.severity = Severity.HIGH
             f.evidence.append(f"[auto-downgraded: {'; '.join(reasons)}]")
 
         gated.append(f)

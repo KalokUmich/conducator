@@ -560,7 +560,6 @@ class AgentToolExecutor(ToolExecutor):
                     "instructions": agent_config.instructions,
                     "skill": getattr(agent_config, "skill", "") or "",
                 },
-                forced_strategy=getattr(agent_config, "strategy", "") or "",
                 forced_skill=getattr(agent_config, "skill", "") or "",
             ),
             tool_executor=sub_executor,

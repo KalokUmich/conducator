@@ -895,17 +895,14 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(str(tmp_path), workspace_layout="CUSTOM_LAYOUT_HERE")
         assert "CUSTOM_LAYOUT_HERE" in prompt
 
-    def test_code_review_strategy_injected(self, tmp_path: Path):
-        """Code review is the only strategy key that injects a template."""
-        prompt = build_system_prompt(str(tmp_path), strategy_key="code_review")
-        assert "Code Review" in prompt
-
-    def test_non_review_queries_have_no_strategy(self, tmp_path: Path):
-        """Non-review strategy keys should NOT inject prescriptive strategies."""
-        for sk in ("issue_tracking", "summary", "diff", "unknown_value"):
-            prompt = build_system_prompt(str(tmp_path), strategy_key=sk)
-            assert "## Strategy" not in prompt
-            assert "## Goal" not in prompt
+    def test_legacy_path_has_no_strategy_injection(self, tmp_path: Path):
+        """The legacy ``build_system_prompt`` no longer injects any strategy
+        template — PR review guidance lives in the ``code_review_pr`` skill,
+        which is only reachable via the Brain sub-agent path."""
+        prompt = build_system_prompt(str(tmp_path))
+        assert "## Strategy" not in prompt
+        assert "## Goal" not in prompt
+        assert "Google Senior Software Engineer" not in prompt
 
     def test_interactive_mode_adds_clarification_step(self, tmp_path: Path):
         """Interactive mode injects ask_user guidance into investigation flow."""

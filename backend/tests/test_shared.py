@@ -237,7 +237,7 @@ class TestEvidenceGate:
             file="app/service.py",
         )
         result = evidence_gate([f], tool_calls_made=5)
-        assert result[0].severity == Severity.WARNING
+        assert result[0].severity == Severity.HIGH
 
     def test_evidence_gate_downgrades_no_file(self):
         f = _make_finding(
@@ -247,7 +247,7 @@ class TestEvidenceGate:
             file="",  # no file reference
         )
         result = evidence_gate([f], tool_calls_made=5)
-        assert result[0].severity == Severity.WARNING
+        assert result[0].severity == Severity.HIGH
 
     def test_evidence_gate_downgrades_no_line(self):
         f = _make_finding(
@@ -257,7 +257,7 @@ class TestEvidenceGate:
             file="app/service.py",
         )
         result = evidence_gate([f], tool_calls_made=5)
-        assert result[0].severity == Severity.WARNING
+        assert result[0].severity == Severity.HIGH
 
     def test_evidence_gate_downgrades_few_tool_calls(self):
         f = _make_finding(
@@ -268,7 +268,7 @@ class TestEvidenceGate:
         )
         # Only 2 tool calls — below the ≥3 threshold
         result = evidence_gate([f], tool_calls_made=2)
-        assert result[0].severity == Severity.WARNING
+        assert result[0].severity == Severity.HIGH
 
     def test_evidence_gate_ignores_warnings(self):
         # Warning severity findings should pass through untouched (no evidence check)
@@ -330,7 +330,7 @@ class TestPostFilter:
         )
         result = post_filter([f])
         assert len(result) == 1
-        assert result[0].severity == Severity.WARNING
+        assert result[0].severity == Severity.HIGH  # capped from critical → high
 
     def test_post_filter_caps_missing_test_critical(self):
         f = _make_finding(
@@ -341,7 +341,7 @@ class TestPostFilter:
         )
         result = post_filter([f])
         assert len(result) == 1
-        assert result[0].severity == Severity.WARNING
+        assert result[0].severity == Severity.HIGH  # capped from critical → high
 
     def test_post_filter_does_not_cap_warning_test_coverage(self):
         f = _make_finding(
@@ -532,6 +532,7 @@ class TestAgentCategories:
             "concurrency",
             "security",
             "reliability",
+            "performance",
             "test_coverage",
         }
         assert set(AGENT_CATEGORIES.keys()) == expected

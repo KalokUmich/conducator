@@ -69,7 +69,10 @@ def score_and_rank(
     """
     severity_weight = {
         Severity.CRITICAL: 1.0,
-        Severity.WARNING: 0.6,
+        Severity.HIGH: 0.85,
+        Severity.MEDIUM: 0.6,
+        Severity.WARNING: 0.6,   # deprecated alias ≈ MEDIUM
+        Severity.LOW: 0.35,
         Severity.NIT: 0.2,
         Severity.PRAISE: 0.0,
     }
