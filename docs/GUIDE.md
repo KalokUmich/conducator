@@ -1851,7 +1851,7 @@ async def _run_agent(self, agent: AgentConfig, ...):
 
 ```
 eval/
-├── code_review/          代码评审质量（plants-bug 用例，12 个 requests 测试）
+├── code_review/          代码评审质量（12 个 requests legacy + 50 个 Greptile benchmark）
 ├── agent_quality/        Agent Loop 答案质量（基线对比）
 └── tool_parity/          Python vs TypeScript 工具输出对比
 ```
@@ -1860,16 +1860,31 @@ eval/
 
 ### 18.1 代码评审评估（code_review/）
 
-在真实开源代码库中植入已知 bug（git patch），运行完整的 `CodeReviewService` 管线，检查发现的结果是否匹配预期。
+在真实开源代码库中植入已知 bug（git patch），运行完整的 PR Brain / `CodeReviewService` 管线，检查发现的结果是否匹配预期。
+
+两套 case 并存：
+
+- **12 个 requests-v2.31.0 legacy cases** — 最早的自产 case，难度梯度可控，适合单元式快速回归。
+- **50 个 Greptile benchmark cases** — 对齐 Greptile 公开的 AI Code Review Benchmark（sentry / cal.com / grafana / keycloak / discourse 五个大型 OSS 项目各 10 个真实 bug-fix PR），用于横向对比 Cursor / Copilot / CodeRabbit 等商用 reviewer 的 `catch_rate`。详细原理和数据管线见 `eval/code_review/GREPTILE_BENCHMARK.md`。
 
 ```bash
 cd backend
 
-# 运行全部 12 个用例
-python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
+# 一次性启动 Greptile 数据集（克隆 5 个 fork + 物化 50 个 base snapshot + 重新生成 patch）
+python ../eval/code_review/setup_greptile_dataset.py
 
-# 只运行特定用例（快速验证）
+# 跑全部 legacy + Greptile（PR Brain 管线，生产路径）
+python ../eval/code_review/run.py --brain \
+    --provider bedrock \
+    --model "eu.anthropic.claude-sonnet-4-6" \
+    --explorer-model "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+# 只跑 Greptile 50 case，开启 verbose 逐 finding 打印
+python ../eval/code_review/run.py --brain --filter greptile- --verbose
+
+# 只跑某个子集（快速验证）
 python ../eval/code_review/run.py --filter "requests-001" --no-judge
+python ../eval/code_review/run.py --filter "greptile-sentry" --no-judge
 
 # 保存当前结果为基线（下次对比用）
 python ../eval/code_review/run.py --save-baseline
@@ -1878,9 +1893,63 @@ python ../eval/code_review/run.py --save-baseline
 python ../eval/code_review/run.py --gold --gold-model opus --save-baseline
 ```
 
-**12 个测试用例：** 4 简单、5 中等、3 困难（基于 requests v2.31.0）。
+**12 个 requests legacy 用例：** 4 简单、5 中等、3 困难（基于 requests v2.31.0）。
 
-**评分维度：** 召回率 (35%)、精确率 (20%)、严重程度准确性 (15%)、位置准确性 (10%)、修复建议 (10%)、上下文深度 (10%)。
+**50 个 Greptile 用例：** 44 个从 `greptile-apps[bot]` 的 inline review 评论自动导入，6 个人工标注（bot 没留可用 anchor）。ground truth 是 `(file, line, severity, category)`，scorer 用 **catch_rate** 作为头部指标（对齐 Greptile 报告的 82%）。
+
+**评分维度：** 召回率 (35%)、精确率 (20%)、严重程度准确性 (15%)、位置准确性 (10%)、修复建议 (10%)、上下文深度 (10%)，外加 **catch_rate** —— 对每个 case 是否至少在正确的 `(file, line)` 上发现一个预期 finding，作为 Greptile-style 的头部指标。
+
+#### 18.1.1 Greptile 数据管线：两个关键技术
+
+这一套 50 case 能跑起来依赖两个非常具体的技术决策，每一个都值得单独记住。完整推导过程见 `eval/code_review/GREPTILE_BENCHMARK.md` §7 / §8 以及 Appendix A（git object model 速成）。
+
+**(1) Merge-base patch 对齐（数据集 bootstrap，`materialize_greptile_bases.py`）**
+
+直觉流程 —— 把 GitHub API 返回的 `.diff` 对着 `base_sha` 打上去 —— 在 Greptile fork 上**经常失败**。原因是 GitHub 的 `.diff` endpoint 计算的是 `merge-base(base_sha, head_sha)` → `head_sha`，而 Greptile 的 fork 会定期同步 upstream，导致 `base_sha` 包含 PR 不知道的新 commit，`git apply` 直接报 "patch does not apply"。
+
+解决办法：snapshot 和 patch **都从同一份本地 fork clone 里派生**，锁定在 `merge-base`：
+
+```bash
+# 1. blobless clone fork（--filter=blob:none 只拉 commit + tree，blob 按需）
+git clone --filter=blob:none https://github.com/ai-code-review-evaluation/sentry-greptile.git
+
+# 2. 算 merge-base（纯 commit 图算法，不需要 blob）
+merge_base=$(git merge-base $base_sha $head_sha)
+
+# 3. 用 git archive 从 merge_base 物化纯源码快照（此时按需拉 blob）
+git archive --format=tar $merge_base | tar -x -C repos/greptile_bases/sentry/001/
+
+# 4. 用本地 git diff 重新生成 patch（两端 tree 已有，补拉差异 blob）
+git diff $merge_base $head_sha > cases/greptile_sentry/patches/001.patch
+```
+
+这样生成的 patch 和 snapshot 天然一致，`git apply` 一定能打上。**泛化启示**：任何时候你要"重放一个 PR"，不要混用 API diff 和 API `base_sha`，必须锁定到同一份本地 git 状态的一对 commit 上。
+
+**(2) Hardlink workspace（每个 case 的 per-run 准备，`runner.py::setup_workspace`）**
+
+跑 50 case 时每 case 都要一个独立可写的 workspace（要 `git init` + `git apply` + `git commit`），但不能污染共享的 base snapshot（6 GB × 50 = 300 GB 根本放不下，而且我们希望 snapshot 复用跨多次 run）。
+
+朴素方案是 `shutil.copytree` —— sentry 17K 文件要跑 ~90 秒/case，50 case 就是 75 分钟光 copy，完全破坏交互开发体验。
+
+`setup_workspace` 用的办法是 **硬链接 + 依赖 atomic write 触发 per-file COW**：
+
+```python
+def _link_or_copy(s, d):
+    try:
+        os.link(str(s), str(d))       # 同 inode，瞬时完成
+    except OSError:
+        shutil.copy2(str(s), str(d))  # 跨文件系统时 fallback
+```
+
+硬链接只是往目录里加一条新 `(name → inode)` 条目，零字节复制。17K 文件从 ~90 秒压到 ~1 秒。
+
+关键洞察是：`git apply`（以及几乎所有像样的文本编辑工具）用 **write-new-file + rename** 模式修改文件 —— 写一个全新 inode 的临时文件，然后 rename 覆盖目标。rename 只动了 workspace 这一侧的目录条目，**snapshot 那一侧的 inode 完全没被碰**。硬链接只在"被改的那几个文件"处断开，其他几万个文件继续共享 snapshot 的 inode。
+
+对一个改 3 个文件的 PR 而言，每个 workspace 实际独占的磁盘只有 3 个新 inode（加上 `.git/`），其他 17K 文件全部是免费共享。`rmtree` 清理时 snapshot 一字节都不掉。
+
+**泛化启示**：任何时候你要给多个消费者准备"一个只读大数据集的独立可写视图"—— test runner、CI build cache、container rootfs、eval harness —— 硬链接 + 工具的 atomic-write 惯例就能几乎零成本地给你 copy-on-write，完全不需要 btrfs / overlayfs 这种特殊文件系统支持。pnpm 的 `node_modules store`、Nix 的 `/nix/store`、`cp --link`、`rsync --link-dest`、ccache 都是这个模式的变种。
+
+两个技术点的共同哲学：**信任 git 的对象模型 + 信任 POSIX 文件系统的惯例，尽量不引入新抽象**。
 
 ### 18.2 Agent 质量评估（agent_quality/）
 

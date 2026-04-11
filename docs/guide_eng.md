@@ -1852,7 +1852,7 @@ When Langfuse is disabled (`langfuse.enabled: false` or the package isn't instal
 
 ```
 eval/
-├── code_review/          Code review quality (plants-bug cases, 12 requests test cases)
+├── code_review/          Code review quality (12 requests legacy + 50 Greptile benchmark)
 ├── agent_quality/        Agent Loop answer quality (baseline comparison)
 └── tool_parity/          Python vs TypeScript tool output comparison
 ```
@@ -1861,16 +1861,32 @@ See `eval/README.md` for detailed docs.
 
 ### 18.1 Code Review Eval (code_review/)
 
-Plants known bugs (git patches) into a real open-source codebase, runs the full `CodeReviewService` pipeline, and checks whether the findings match expectations.
+Plants known bugs (git patches) into real open-source codebases, runs the full PR Brain / `CodeReviewService` pipeline, and checks whether the findings match expectations.
+
+Two case sets coexist:
+
+- **12 requests-v2.31.0 legacy cases** — the original in-house cases with a controlled difficulty gradient, good for fast unit-style regression.
+- **50 Greptile benchmark cases** — aligned with Greptile's public AI Code Review Benchmark (10 real bug-fix PRs each from sentry / cal.com / grafana / keycloak / discourse). Used to compare `catch_rate` against commercial reviewers like Cursor / Copilot / CodeRabbit. Full details of the data pipeline in `eval/code_review/GREPTILE_BENCHMARK.md`.
 
 ```bash
 cd backend
 
-# Run all 12 cases
-python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
+# One-time setup for the Greptile dataset (clone 5 forks + materialize 50 base
+# snapshots + regenerate patches locally)
+python ../eval/code_review/setup_greptile_dataset.py
 
-# Run a specific case (quick check)
+# Run everything (legacy + Greptile) through PR Brain (production code path)
+python ../eval/code_review/run.py --brain \
+    --provider bedrock \
+    --model "eu.anthropic.claude-sonnet-4-6" \
+    --explorer-model "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+# Run only the 50 Greptile cases with per-finding verbose output
+python ../eval/code_review/run.py --brain --filter greptile- --verbose
+
+# Run a subset (quick sanity check)
 python ../eval/code_review/run.py --filter "requests-001" --no-judge
+python ../eval/code_review/run.py --filter "greptile-sentry" --no-judge
 
 # Save current results as a baseline (for future comparison)
 python ../eval/code_review/run.py --save-baseline
@@ -1879,9 +1895,65 @@ python ../eval/code_review/run.py --save-baseline
 python ../eval/code_review/run.py --gold --gold-model opus --save-baseline
 ```
 
-**12 test cases:** 4 easy, 5 medium, 3 hard (based on requests v2.31.0).
+**12 legacy cases:** 4 easy, 5 medium, 3 hard (based on requests v2.31.0).
 
-**Scoring dimensions:** Recall (35%), Precision (20%), Severity accuracy (15%), Location accuracy (10%), Fix suggestion (10%), Context depth (10%).
+**50 Greptile cases:** 44 auto-imported from `greptile-apps[bot]` inline review comments, 6 hand-annotated (the bot left no usable anchors). Ground truth is `(file, line, severity, category)`; the scorer uses **catch_rate** as the headline metric (aligned with Greptile's published 82 %).
+
+**Scoring dimensions:** Recall (35 %), Precision (20 %), Severity accuracy (15 %), Location accuracy (10 %), Fix suggestion (10 %), Context depth (10 %), plus **catch_rate** — whether at least one expected finding was produced on the right `(file, line)` for each case, matching Greptile's headline metric.
+
+#### 18.1.1 Greptile data pipeline: two key techniques
+
+The 50-case pipeline depends on two very specific technical decisions, each worth remembering on its own. Full derivation in `eval/code_review/GREPTILE_BENCHMARK.md` §7 / §8 and Appendix A (git object model primer).
+
+**(1) Merge-base patch alignment (dataset bootstrap, `materialize_greptile_bases.py`)**
+
+The naive approach — apply the GitHub-API-returned `.diff` against `base_sha` — **fails** on Greptile's forks because GitHub's `.diff` endpoint computes the diff against `merge-base(base_sha, head_sha)`, not against `base_sha` literally, and the Greptile forks periodically sync upstream, so `base_sha` contains commits the diff does not know about. `git apply` reports "patch does not apply".
+
+Fix: derive both the snapshot and the patch from **the same local fork clone**, anchored at the merge-base.
+
+```bash
+# 1. blobless clone (--filter=blob:none: commits + trees only, blobs fetched on demand)
+git clone --filter=blob:none https://github.com/ai-code-review-evaluation/sentry-greptile.git
+
+# 2. compute the merge-base (pure commit-graph walk, no blobs needed)
+merge_base=$(git merge-base $base_sha $head_sha)
+
+# 3. materialize the source snapshot at merge_base via git archive
+#    (blobs transparently fetched on first use)
+git archive --format=tar $merge_base | tar -x -C repos/greptile_bases/sentry/001/
+
+# 4. regenerate the patch locally from the same merge_base
+#    (trees already local, only changed-file blobs are fetched)
+git diff $merge_base $head_sha > cases/greptile_sentry/patches/001.patch
+```
+
+Snapshot and patch are guaranteed consistent — `git apply` always succeeds. **Generalisation**: any time you want to "replay a PR", do not mix API diffs with API `base_sha`. Anchor snapshot and patch to the same commit pair in the same local git state.
+
+**(2) Hardlink workspace (per-case preparation, `runner.py::setup_workspace`)**
+
+Running 50 cases requires an independent writable workspace per case (must `git init` + `git apply` + `git commit`) without polluting the shared base snapshots (6 GB × 50 = 300 GB is not an option, and snapshots need to be reusable across runs).
+
+The naive `shutil.copytree` approach costs ~90 seconds per case on sentry's ~17K files — 75 minutes total across 50 cases, hostile to an interactive debug loop.
+
+`setup_workspace` uses **hardlinks plus atomic-write-triggered copy-on-write**:
+
+```python
+def _link_or_copy(s, d):
+    try:
+        os.link(str(s), str(d))       # same inode, instantaneous
+    except OSError:
+        shutil.copy2(str(s), str(d))  # cross-filesystem fallback
+```
+
+A hardlink is just a new directory entry pointing at an existing inode — zero bytes copied. 17K files drop from ~90 s to ~1 s.
+
+The key insight: `git apply` (and every well-behaved Unix writer) modifies files using **write-new-file + rename** — it writes a brand-new inode to a temp file, then renames it over the target. Rename only touches the **workspace's** directory entry; the snapshot's directory entry still points at the **old** inode, which is never touched. The hardlink breaks at exactly the one file that got modified; all the other ~17 000 files stay shared with the snapshot.
+
+For a PR that changes 3 files, each workspace owns 3 new inodes (plus `.git/`); the other 17K files are shared with the snapshot for free. `rmtree` on cleanup frees only the workspace-only inodes, leaving the snapshot pristine.
+
+**Generalisation**: any time you need to hand many consumers an "independent writable view" of a large read-only dataset — test runners, CI build caches, container rootfs prep, eval harnesses — hardlinks + the atomic-write convention give you almost-free per-file copy-on-write without needing btrfs / overlayfs / zfs or any special kernel support. pnpm's `node_modules` store, Nix's `/nix/store`, `cp --link`, `rsync --link-dest`, and ccache are all variants of this pattern.
+
+The shared philosophy behind both techniques: **trust git's object model, trust the POSIX filesystem conventions, and introduce as little new abstraction as possible**.
 
 ### 18.2 Agent Quality Eval (agent_quality/)
 

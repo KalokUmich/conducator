@@ -396,7 +396,134 @@ This is what `materialize_greptile_bases.py::process_target` does.
 
 ---
 
-## 8. Troubleshooting
+## 8. Per-case workspace — the hardlink + atomic-write trick
+
+§7 got **one** clean source snapshot per case onto disk. But the eval run
+itself can't mutate those snapshots — every case needs a **fresh workspace**
+it can `git init`, apply the patch to, and commit into, without polluting
+the shared base (each snapshot is 13K-17K files, ~6 GB across all 50 cases,
+and we want to reuse them run after run).
+
+The naive solution is "for each case, `shutil.copytree` the snapshot into
+a temp dir". On sentry (~17K files) this takes ~90 seconds per case. For
+50 cases that is 75 minutes of pure file copying before any LLM is even
+invoked — completely hostile to an interactive debug loop.
+
+`runner.py::setup_workspace` (eval/code_review/runner.py:90-178) does it
+differently: it **hardlinks** each file instead of copying, then relies on
+`git apply`'s write-new-file + rename behaviour to give us per-file
+copy-on-write for free.
+
+### What setup_workspace does, step by step
+
+```python
+# 1. fresh empty temp directory
+workspace = tempfile.mkdtemp(prefix="eval_ws_")
+
+# 2. walk the snapshot; for each file, try hardlink first, fall back to copy
+def _link_or_copy(s, d):
+    try:
+        os.link(str(s), str(d))    # new directory entry, same inode — instant
+    except OSError:
+        shutil.copy2(str(s), str(d))  # cross-filesystem fallback — slow but works
+
+# 3. init a fresh git repo; the .git/ directory is workspace-specific
+git init
+git add -A
+git commit -m "Initial: clean source"
+
+# 4. apply the bug-introducing patch
+#    --reject tolerates hunks that target excluded dirs (.github/, etc.)
+git apply --reject <patch>
+
+# 5. second commit — now HEAD~1..HEAD is exactly the "PR" under review
+git add -A
+git commit -m "Apply bug patch"
+
+# 6. hand workspace + diff_spec="HEAD~1..HEAD" to PR Brain
+# 7. on cleanup: shutil.rmtree(workspace) frees workspace-only inodes;
+#    snapshot inodes lose one refcount but stay alive via the snapshot dir.
+```
+
+### Why hardlinks work here — the atomic-write contract
+
+A **hardlink** is a second directory entry that points to the *same inode*
+as the original file. The kernel copies no data — it just adds a row
+mapping `(new path → existing inode)`. Operation cost is a few hundred
+bytes of metadata, regardless of how big the file is. On sentry's 17K
+files, hardlinking beats `shutil.copytree` by roughly two orders of
+magnitude: ~1 second vs ~90 seconds.
+
+The obvious worry: if `login.py` in the workspace shares an inode with
+`login.py` in the snapshot, wouldn't `git apply` modifying the workspace
+poison the snapshot? **No** — because `git apply` (like every
+well-behaved Unix file writer) uses **write-new-file + rename**:
+
+1. Read the old file content into memory.
+2. Compute the new content.
+3. Write the new content to a temp file — **this is a brand-new inode.**
+4. `rename(temp, target)` — atomically repoint the workspace's directory
+   entry for `target` to the temp file's new inode.
+
+Step 4 only touches the **workspace's** directory entry. The snapshot's
+directory entry for the same file still points to the **old** inode,
+which is untouched. The hardlink "breaks" at exactly that one file —
+every other file in the workspace stays happily hardlinked to the
+snapshot.
+
+Concretely: for a PR that changes 3 files, the workspace ends up owning
+3 brand-new inodes (plus the `.git/` subdirectory). The other ~17 000
+files remain shared with the snapshot. Extra disk per workspace is in
+the kilobytes, not megabytes. When the workspace is `rmtree`'d after the
+eval, only those workspace-only inodes are freed; the snapshot is left
+in its original, unpolluted state, ready to seed the next case.
+
+### Two filesystem rules the design depends on
+
+1. **You cannot hardlink directories** on Linux (it would allow
+   filesystem cycles and break every recursive traversal tool). That is
+   why `shutil.copytree` always creates fresh directory objects for each
+   directory in the workspace, and why the custom `copy_function`
+   (`_link_or_copy`) only runs at the **file leaves**. Directory
+   structure is real-new; only file inodes are shared.
+2. **Hardlinks cannot cross filesystems.** An inode number is only unique
+   within one mounted filesystem, so `os.link` fails with `EXDEV` if
+   `src` and `dst` are on different mount points (e.g. `/home` on ext4
+   and `/tmp` on tmpfs, or `/mnt/c` on NTFS from a WSL `/home/…` source).
+   The `try os.link / except OSError: shutil.copy2` block means such
+   setups degrade to "slow but correct" rather than crashing.
+
+### What it actually saves
+
+| Approach | Time to prepare 50 workspaces | Extra disk used |
+|---|---:|---:|
+| `shutil.copytree` | ~75 min | ~300 GB (50 × 6 GB) |
+| hardlink + fallback | ~50 sec | a few MB total |
+
+This is why an interactive debug loop on the full 50-case eval is
+tolerable, and why the old troubleshooting entry about "60+ second
+setup_workspace" no longer applies on any filesystem that supports
+same-device hardlinks.
+
+### The pattern, generalised
+
+**Hardlink a read-only master tree, then let atomic-write tools naturally
+provide per-file copy-on-write.** No special filesystem (btrfs,
+overlayfs, zfs), no kernel features, no checkpoint / snapshot APIs —
+plain POSIX `link(2)` plus the universal "write temp + rename"
+convention is enough.
+
+The same pattern shows up in pnpm's `node_modules` store, Nix's
+`/nix/store`, `cp --link`, `rsync --link-dest`, and ccache. It is worth
+remembering any time you need to hand many consumers an "independent
+writable view" of a large read-only dataset — test runners, CI build
+caches, container rootfs prep, eval harnesses. The cost is one
+`try / except` block, and the reward is "copy effectively free, with
+strict isolation".
+
+---
+
+## 9. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -405,12 +532,12 @@ This is what `materialize_greptile_bases.py::process_target` does.
 | `FATAL: GITHUB_TOKEN required` | Used `--refresh-scrape` without a token | Set `GITHUB_TOKEN=ghp_...` (fine-grained PAT, public_repo:read) |
 | `Bedrock converse FAILED ... ExpiredTokenException` | AWS STS token expired mid-eval | Refresh credentials in `config/conductor.secrets.local.yaml` and re-run |
 | `composite=0.000 (recall=0.00, findings=0)` on every case | All Bedrock calls failed | Check AWS credentials BEFORE the next run — see `~/.aws/credentials` or `conductor.secrets.local.yaml` |
-| `setup_workspace` takes 60+ seconds | Sentry / Grafana bases are 13K-17K files; `shutil.copytree` is slow on WSL | Known cost. ~2 min per case on first run, faster after the OS page cache warms up. |
+| `setup_workspace` takes 60+ seconds | Hardlinks are falling back to real copy because `tmpfile.mkdtemp()` lands on a different mount point from `repos/greptile_bases/` | Set `TMPDIR` to a directory on the same filesystem as the repo, or ignore — correctness is unaffected. See §8 for why hardlinks normally make this ~1 sec. |
 | Disk usage > 12 GB | You ran `--refresh-scrape` and have stale bases not cleaned up | `rm -rf eval/code_review/repos/greptile_bases && python setup_greptile_dataset.py` |
 
 ---
 
-## 9. References
+## 10. References
 
 * **Greptile's benchmark report**: <https://www.greptile.com/benchmarks>
   — original methodology, leaderboard, per-case Sentry table.
@@ -427,3 +554,184 @@ This is what `materialize_greptile_bases.py::process_target` does.
 * **The 6 manual cases**: `cases/greptile_*/manual_cases.yaml`
 
 [greptile-benchmarks]: https://www.greptile.com/benchmarks
+
+---
+
+## Appendix A — The git object model you need to read §7 and §8
+
+§7 and §8 both make design decisions that only make sense if you
+understand how git actually stores data under the hood. If phrases like
+"blobless clone", "tree-hash pruning", or "git diff is cheap because of
+content-addressed structural sharing" feel handwavy, this appendix is
+for you. It is the set of notes we wish existed when first building the
+pipeline.
+
+### A.1 The three object types in `.git/objects/`
+
+Git stores exactly three kinds of things (plus annotated tags, which do
+not matter here):
+
+| Object | Contains | Typical size |
+|---|---|---|
+| `commit` | metadata + one hash pointing to a `tree` + parent commit hashes | few hundred bytes |
+| `tree`   | a directory listing: `[(mode, name, hash), ...]` — each entry points at a `blob` or another `tree` | hundreds of bytes to a few KB |
+| `blob`   | raw file bytes — no filename, no permissions, just contents | equal to the file's actual size |
+
+Key consequences, each of which trips up beginners:
+
+- A `commit` **does not** contain the source code. It only carries a
+  pointer to the root tree, the parent commit(s), and some metadata
+  (author, date, message). Typically < 500 bytes.
+- A `tree` represents **one directory only**. Subdirectories are
+  separate tree objects, referenced by hash. To reconstruct the state of
+  a repo at a given commit you recursively walk the DAG
+  `commit → root tree → sub-trees → ... → blobs`.
+- A `blob` has **no filename attached**. The filename is recorded in
+  the tree entry that points to it. Two files with identical content at
+  different paths share the same blob on disk — stored exactly once.
+  The canonical example: thousands of empty `__init__.py` files in a
+  Python monorepo, all pointing at the same blob
+  `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`.
+- Everything is **content-addressed**: the hash of each object is
+  `SHA1(contents)`. Structurally identical trees naturally produce
+  identical hashes, no coordination required.
+
+### A.2 Snapshot-based, not delta-based
+
+Every blob stores the **complete file content**, not a delta against
+its predecessor. This is git's fundamental split from SVN/CVS. It
+sounds wasteful, but two mechanisms keep the store small:
+
+1. **Content-addressed structural sharing (logical level).** A commit
+   that changes one file creates exactly:
+   - 1 new blob (the new file content),
+   - N new trees, where N = depth from root to the changed file (each
+     such tree's child-hash changed, which changes its own hash, so each
+     must be a new object),
+   - 1 new commit.
+
+   Every other tree and blob is **structurally shared** with previous
+   commits — same content means same hash means same object on disk.
+   A 17k-file repo with 10k commits might contain only ~50k unique
+   blobs total, because most files are never touched by most commits.
+
+2. **Packfile delta compression (physical level).** When `git gc` runs
+   or during network transfer, similar blobs are grouped into packfiles
+   where one is stored as a full base and others as binary deltas
+   against it. This is a **pure storage optimisation** — the logical
+   model remains "every blob is a full file". Users and tools see the
+   uncompressed view; git transparently reconstructs blobs from deltas
+   on read.
+
+### A.3 Why `git diff A B` is so fast
+
+`git diff merge_base head` does **not** read every file. It walks the
+two tree hierarchies in parallel and prunes aggressively:
+
+1. Take root tree `A` and root tree `B`.
+2. For each entry in each side:
+   - **Hashes equal** → skip the entire subtree. Hash equality means
+     nothing inside it changed, because the hash is a function of the
+     entire recursive contents.
+   - **Hashes differ, it's a blob** → changed file. Read both blobs and
+     compute a text diff.
+   - **Hashes differ, it's a subtree** → recurse.
+   - **One side missing the entry** → add/delete.
+
+For a PR that changes 5 files in sentry, git diff reads a handful of
+trees (those on the path from root to each changed file) and 10 blobs
+(5 × 2 sides). The other 17 000 files are skipped by a single 20-byte
+hash comparison each. Tree-hash pruning is git's single most underrated
+optimisation.
+
+### A.4 Why `--filter=blob:none` (blobless clone) is exactly right for us
+
+Git partial-clone filters let you defer object downloads until they are
+actually needed:
+
+| Filter | Downloaded | Not downloaded | Good for |
+|---|---|---|---|
+| `--depth=1` | HEAD commit + its tree/blobs only | Any history | Build checkouts, read-only CI |
+| `--filter=blob:none` | All commits + all trees | All blobs (fetched on demand) | **Our pipeline** |
+| `--filter=tree:0` | All commits only | All trees + all blobs | `git log`-only workflows |
+
+Blob-less clone is the sweet spot for us because:
+
+- `git merge-base` needs **only** the commit-parent graph — 0 blobs.
+- `git archive <merge_base>` needs every blob reachable from the
+  merge-base tree (git transparently fetches them on first use — this
+  is the single biggest download in our pipeline).
+- `git diff <merge_base> <head>` only needs to fetch the **head-side**
+  blobs for files that actually changed. The merge-base side is already
+  local from the previous step, and tree-hash pruning avoids fetching
+  anything for unchanged files.
+
+Total cost of cloning one target fork: ~150 MB of commit/tree metadata
++ ~few hundred MB of blobs that are genuinely needed ≈ **~2 GB across
+all 5 targets**. A full (unfiltered) clone would be 8-10 GB because it
+would fetch every historical version of every file, including the >90 %
+our pipeline never touches.
+
+### A.5 Why `git archive` instead of `git checkout + cp -r`
+
+`git archive <ref>` streams a tarball directly from the object store:
+
+- **No working-tree mutation** — safe to run while other operations
+  look at the same fork clone.
+- **No `.git/` in the output** — we get a plain source tree, which is
+  exactly what `setup_workspace` wants to hardlink from.
+- **No dependency on which branch is checked out** — the ref is a
+  parameter, not an ambient state.
+- **Fast** — one tree walk plus streaming IO, no intermediate working
+  tree materialisation.
+
+`git checkout + cp -r` would force serialised access to the fork clone
+(because checkout mutates HEAD), leave a `.git/` we'd have to strip,
+and pay an extra full tree walk to populate the working tree before the
+copy even started.
+
+### A.6 Why blobs "never get deleted" (reachability and gc)
+
+A question that usually pops up once the above is understood: if git
+stores every historical version of every blob forever, doesn't
+`.git/objects/` grow without bound?
+
+In practice, almost yes. Git's deletion model is **reachability-based**:
+
+1. Start from the set of refs — branches, tags, HEAD, stash, reflog.
+2. Walk the graph `ref → commit → tree → subtree → ... → blob` and mark
+   every reachable object.
+3. Objects not marked in step 2 are eligible for deletion.
+4. `git gc` runs mark-and-sweep with the above rules, but there is a
+   **30-day grace period** via reflog for unreachable objects, which
+   means even `git reset --hard` will not free disk until a month later.
+
+The upshot: once you commit a file, the blob stays as long as **any**
+reachable commit anywhere references it. This is a feature (version
+control is supposed to be permanent), but it is also why checking a
+large binary into a git repo is a famously costly mistake: undoing it
+requires rewriting history (`git filter-repo`), force-pushing, and
+forcing every collaborator to re-clone.
+
+Physical size is mitigated by packfile delta compression (see A.2), but
+the object *count* in `.git/objects/` only goes up in practice.
+
+### A.7 Six facts you can carry around in your head
+
+If you internalise just these six statements, ~80 % of git's behaviour
+stops being surprising:
+
+1. A `commit` points to a `tree`; a `tree` points to sub-trees and
+   blobs; a `blob` is just the raw bytes of one file.
+2. Filenames live in tree entries, not in blobs. Two files with the
+   same content share one blob.
+3. Git is snapshot-based, but deduplicated by content-addressing — each
+   commit physically stores roughly "(path depth × 1 tree) + (1 blob)
+   per changed file + 1 commit".
+4. Tree-hash equality prunes entire subtrees in a diff — this is why
+   `git diff` on huge repos is essentially free.
+5. `--filter=blob:none` downloads every commit and tree but defers blob
+   fetching to actual use — ideal when you only need a small number of
+   specific commits' file contents.
+6. `git archive` is a side-effect-free way to get a pure source tree at
+   any commit from any clone, including bare clones and partial clones.
