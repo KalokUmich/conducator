@@ -109,7 +109,14 @@ cases:
       - title_pattern: "scheme|adapter|invalid.?schema|fallback|silent"
         file_pattern: "sessions\\.py"
         line_range: [785, 800]
-        severity: medium
+        # Borderline severity: provable functional bug (any unsupported scheme
+        # silently routes through the wrong adapter), with a conditional
+        # security flavor (file:// or ftp:// could be served via the HTTPS
+        # adapter — protocol confusion). Labeled `high` because the functional
+        # impact is unconditional, even though the security angle is
+        # conditional. Reasonable reviewers may also call this `critical`
+        # under the security framing — that's within 1 step (adjacency credit).
+        severity: high
         category: correctness
         recommendation: "Restore the raise InvalidSchema for unsupported URL schemes in get_adapter"
 

@@ -5,8 +5,8 @@ model: explorer
 skill: code_review_pr
 tools: [git_diff, git_show, find_references, get_callers, get_callees, trace_variable, db_schema, ast_search]
 limits:
-  max_iterations: 18
-  budget_tokens: 280000
+  max_iterations: 20
+  budget_tokens: 300000
   evidence_retries: 1
 quality:
   evidence_check: true

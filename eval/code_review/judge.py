@@ -398,7 +398,7 @@ def _format_match_table(
             f"title={'YES' if match.title_match else 'no '} "
             f"file={'YES' if match.file_match else 'no '} "
             f"line={'YES' if match.line_match else 'no '} "
-            f"severity={'YES' if match.severity_match else 'no '} "
+            f"severity={'YES ' if match.severity_match >= 0.99 else 'ADJ ' if match.severity_match >= 0.49 else 'no  '}"
             f"category={'YES' if match.category_match else 'no '} "
             f"rec={'YES' if match.recommendation_match else 'no '}"
         )

@@ -28,8 +28,8 @@ class GrepParams(BaseModel):
     context_lines: int = Field(
         default=0,
         ge=0,
-        le=10,
-        description="Lines of context to show before and after each match (0 = match line only).",
+        le=20,
+        description="Lines of context to show before and after each match (0 = match line only, max 20).",
     )
     case_insensitive: bool = Field(default=False, description="Case-insensitive matching.")
     multiline: bool = Field(default=False, description="Match across line boundaries (re.DOTALL).")

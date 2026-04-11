@@ -35,6 +35,7 @@ from .shared import (
 )
 from .shared import (
     parse_findings as _parse_findings_shared,
+    parse_findings_with_status as _parse_findings_with_status_shared,
 )
 from .shared import (
     repair_output as _repair_output_shared,
@@ -456,6 +457,23 @@ def _parse_findings(
     )
 
 
+def _parse_findings_with_status(
+    answer: str,
+    spec: AgentSpec,
+    *,
+    warn_on_empty: bool = True,
+) -> tuple:
+    """Like :func:`_parse_findings` but also returns whether the parse
+    found an explicit JSON array (even an empty one) — used to skip the
+    wasted repair-loop call on legitimate "no findings" answers."""
+    return _parse_findings_with_status_shared(
+        answer,
+        spec.name,
+        spec.category,
+        warn_on_empty=warn_on_empty,
+    )
+
+
 async def _repair_output(
     answer: str,
     spec: AgentSpec,
@@ -520,14 +538,17 @@ async def run_review_agent(
             workspace_path=workspace_path,
         )
 
-        findings = _parse_findings(result.answer, spec)
+        findings, parsed_explicit_array = _parse_findings_with_status(
+            result.answer, spec
+        )
 
         # If no findings were parsed but the agent produced context chunks,
         # try to extract findings from individual context chunks too.
         # This helps when FORCE_CONCLUDE cuts off the agent before it
         # produces a final JSON block — partial findings may be scattered
-        # across accumulated text.
-        if not findings and result.context_chunks:
+        # across accumulated text. Skip when the agent emitted an explicit
+        # empty array — that's an authoritative "no findings".
+        if not findings and not parsed_explicit_array and result.context_chunks:
             for chunk in result.context_chunks:
                 chunk_findings = _parse_findings(
                     chunk.content,
@@ -543,9 +564,16 @@ async def run_review_agent(
                 )
 
         # --- Improvement 1: Output Repair Loop ---
-        # If no findings but the agent produced text, ask the model to
-        # reformat the answer as JSON (one cheap extra call).
-        if not findings and result.answer and len(result.answer) > 50:
+        # If parse genuinely failed (no explicit array) but the agent
+        # produced text, ask the model to reformat as JSON. Skipping when
+        # parsed_explicit_array=True avoids ~1K wasted tokens per agent
+        # that legitimately had nothing to report.
+        if (
+            not findings
+            and not parsed_explicit_array
+            and result.answer
+            and len(result.answer) > 50
+        ):
             logger.info(
                 "Agent '%s' produced %d chars but no parseable findings — attempting repair loop",
                 spec.name,

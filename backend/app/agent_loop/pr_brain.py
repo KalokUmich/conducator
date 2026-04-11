@@ -47,7 +47,7 @@ from app.code_review.shared import (
     evidence_gate,
     extract_relevant_diff,
     merge_recommendation,
-    parse_findings,
+    parse_findings_with_status,
     post_filter,
     prefetch_diffs,
     repair_output,
@@ -704,15 +704,21 @@ When reviewing diffs, distinguish these categories:
             tool_calls_made = data.get("tool_calls_made", 0)
             category = AGENT_CATEGORIES.get(agent_name, FindingCategory.CORRECTNESS)
 
-            # Parse JSON findings from agent answer
-            findings = parse_findings(answer, agent_name, category)
+            # Parse JSON findings from agent answer. The boolean signals
+            # whether the agent emitted an explicit JSON array (even an
+            # empty []), which is the authoritative "no findings" answer
+            # — we must NOT trigger repair in that case.
+            findings, parsed_explicit_array = parse_findings_with_status(
+                answer, agent_name, category
+            )
 
-            # Repair fallback: if parse failed but answer has substance
-            # (>100 chars), make a cheap reformat call to recover findings.
-            # This catches truncated outputs from FORCE_CONCLUDE — the agent
-            # ran out of budget mid-investigation but still has evidence
-            # in its accumulated text.
-            if not findings and len(answer) > 100:
+            # Repair fallback: only when parse genuinely failed (no array
+            # was emitted) AND the answer has substance (>100 chars). This
+            # catches truncated outputs from FORCE_CONCLUDE — the agent ran
+            # out of budget mid-investigation but still has evidence in its
+            # accumulated text. Skipping repair on legitimate empty answers
+            # avoids ~1K wasted tokens per agent that has nothing to report.
+            if not findings and not parsed_explicit_array and len(answer) > 100:
                 logger.info(
                     "Attempting repair for %s agent (answer=%d chars)",
                     agent_name,

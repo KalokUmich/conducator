@@ -51,8 +51,8 @@
           },
           "context_lines": {
             "default": 0,
-            "description": "Lines of context to show before and after each match (0 = match line only).",
-            "maximum": 10,
+            "description": "Lines of context to show before and after each match (0 = match line only, max 20).",
+            "maximum": 20,
             "minimum": 0,
             "title": "Context Lines",
             "type": "integer"

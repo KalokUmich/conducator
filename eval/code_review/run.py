@@ -382,10 +382,15 @@ async def run_single_case(
         if score.matches:
             for m in score.matches:
                 exp = case.expected_findings[m.expected_index]
+                sev_label = (
+                    "exact" if m.severity_match >= 0.99
+                    else "adj" if m.severity_match >= 0.49
+                    else "miss"
+                )
                 print(
                     f"    -> expected[{m.expected_index}] matched actual[{m.actual_index}]: "
                     f"title={m.title_match} file={m.file_match} line={m.line_match} "
-                    f"sev={m.severity_match} rec={m.recommendation_match}"
+                    f"sev={sev_label} rec={m.recommendation_match}"
                 )
 
     # LLM judge — pass `case_score` so the judge can see the deterministic

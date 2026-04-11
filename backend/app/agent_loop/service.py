@@ -1688,7 +1688,12 @@ class AgentLoopService:
             )
             answer = (final_response.text or "").strip()
             if final_response.usage:
-                budget.record_usage(final_response.usage.input_tokens, final_response.usage.output_tokens)
+                budget.track(
+                    IterationMetrics(
+                        input_tokens=final_response.usage.input_tokens,
+                        output_tokens=final_response.usage.output_tokens,
+                    )
+                )
             logger.info(
                 "[%s] Final judge call produced %d chars",
                 _sid,

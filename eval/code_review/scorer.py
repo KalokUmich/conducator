@@ -27,9 +27,53 @@ class FindingMatch:
     title_match: bool = False
     file_match: bool = False
     line_match: bool = False
-    severity_match: bool = False
+    # severity_match is a graded float, not a bool: 1.0 for exact match,
+    # 0.5 for adjacent severity (one step apart on the ordinal scale —
+    # e.g. critical vs high), 0.0 otherwise. Adjacent partial credit
+    # reflects that two competent reviewers reasonably disagree by one
+    # severity level on borderline findings.
+    severity_match: float = 0.0
     category_match: bool = False
     recommendation_match: bool = False
+
+
+# Severity ordinal scale used for adjacency scoring. WARNING is the
+# deprecated alias for MEDIUM and shares its rank.
+_SEVERITY_RANK = {
+    "nit": 0,
+    "low": 1,
+    "medium": 2,
+    "warning": 2,
+    "high": 3,
+    "critical": 4,
+}
+
+
+def _severity_score(actual: str, expected: str) -> float:
+    """Score severity match: 1.0 exact, 0.5 adjacent, 0.0 otherwise.
+
+    'praise' is excluded from adjacency — it's a different category
+    (positive feedback) and never scores partial credit against a
+    real-finding severity.
+    """
+    if not actual or not expected:
+        return 0.0
+    a, e = actual.lower(), expected.lower()
+    if a == e:
+        return 1.0
+    # warning ≡ medium equivalence
+    if {a, e} == {"warning", "medium"}:
+        return 1.0
+    # praise has no adjacency — it's not on the bug-severity scale
+    if "praise" in (a, e):
+        return 0.0
+    rank_a = _SEVERITY_RANK.get(a)
+    rank_e = _SEVERITY_RANK.get(e)
+    if rank_a is None or rank_e is None:
+        return 0.0
+    if abs(rank_a - rank_e) == 1:
+        return 0.5
+    return 0.0
 
 
 @dataclass
@@ -136,10 +180,10 @@ def score_case(case: CaseConfig, findings: list, files_reviewed: list) -> CaseSc
         effective_fp = false_positives * 0.5
         score.precision = true_positives / (true_positives + effective_fp) if (true_positives + effective_fp) > 0 else 0.0
 
-    # Severity accuracy: among matched findings, how many got severity right
+    # Severity accuracy: average graded severity score across matched
+    # findings (1.0 exact, 0.5 adjacent, 0.0 otherwise).
     if matches:
-        severity_correct = sum(1 for m in matches if m.severity_match)
-        score.severity_accuracy = severity_correct / len(matches)
+        score.severity_accuracy = sum(m.severity_match for m in matches) / len(matches)
 
     # Location accuracy: file + line range match
     if matches:
@@ -301,18 +345,14 @@ def _evaluate_match(exp_idx: int, act_idx: int, expected: dict, finding) -> Find
         act_end = finding.end_line if finding.end_line > 0 else finding.start_line
         m.line_match = act_start <= exp_end and act_end >= exp_start
 
-    # Severity match — handles the 4-level scale AND the deprecated "warning"
-    # alias.  warning ≈ medium, so finding.severity=WARNING matches
-    # expected="medium" and vice versa.
+    # Severity match — graded score on the 4-level scale. Handles the
+    # deprecated "warning" alias (≡ medium) and gives 0.5 partial credit
+    # for adjacent severities (e.g. agent=critical vs expected=high). See
+    # _severity_score() for the rationale.
     exp_severity = expected.get("severity", "").lower()
     if exp_severity and hasattr(finding, "severity"):
         act_severity = finding.severity.value.lower()
-        # Exact match
-        m.severity_match = act_severity == exp_severity
-        # Also accept warning ≈ medium equivalence
-        if not m.severity_match:
-            equiv = {"warning": "medium", "medium": "warning"}
-            m.severity_match = equiv.get(act_severity) == exp_severity
+        m.severity_match = _severity_score(act_severity, exp_severity)
 
     # Category match
     exp_category = expected.get("category", "")

@@ -878,7 +878,11 @@ Assign severity by answering TWO questions:
 impact**. The bug creates a vulnerability, leaks credentials, bypasses auth, or \
 breaks an external contract (response schema, exit code, wire format). \
 Examples: auth check removed, SSL verification disabled, Authorization header \
-leaked on redirect, breaking change in public API response format.
+leaked on redirect, breaking change in public API response format. \
+**Severity of the symptom is NOT the test** — "every request hangs" or "service \
+won't start" feels catastrophic but is **high**, not critical, when no security \
+boundary is crossed. Reserve `critical` for bugs whose blast radius is the \
+security/auth/contract dimension.
 - **high**: Provable bug **with functional impact** (no security angle). The code \
 will crash, hang, return wrong results, or fail to function — but the impact is \
 internal, not a security boundary. Examples: importing a non-existent module \
@@ -1056,6 +1060,56 @@ get `KeyError` / undefined on every call.
 Q1 — Provable? YES. Field is renamed unconditionally.
 Q2 — Blast radius? API CONTRACT — external clients break on a schema change.
 → **critical**
+</example>
+
+#### Boundary case: critical vs high — when "core feature broken" is NOT critical
+
+The dominant misclassification is treating dramatic functional regressions as \
+`critical`. They are not. Walk through the contrast:
+
+<example>
+Finding: HTTPAdapter no longer forwards the `timeout` argument to urllib3
+
+File: `requests/adapters.py:467`
+Evidence: `send()` accepts `timeout=` from the caller but the call to \
+`conn.urlopen(...)` omits it. Every HTTP request through this adapter waits \
+indefinitely on slow upstreams.
+
+Q1 — Provable? YES. Every request through HTTPAdapter is affected.
+Q2 — Blast radius? FUNCTIONAL — connections hang, threads exhaust, service \
+becomes unresponsive. NO security, auth, credential, or wire-format dimension.
+
+Tempting verdict: **critical** ("the whole library is broken, every user is \
+affected, this could take down production").
+
+Correct verdict: **high**.
+
+Reasoning: The rubric reserves `critical` for the **impact dimension** \
+(security / auth / API contract), not the **severity of symptoms**. A timeout \
+regression is a functional regression — serious, user-facing, production-grade \
+— but no credential leaks, no auth check is bypassed, no public API contract \
+is broken (the function signature still accepts `timeout`; it just no longer \
+honors it internally — that's a behavioral bug, not a wire-format break). \
+Classify by which dimension is violated, not by how loud the symptom is.
+</example>
+
+<example>
+Finding: SSL certificate verification disabled by default for new sessions
+
+File: `requests/sessions.py:312`
+Evidence: `self.verify = False` was changed from `self.verify = True`. Every \
+new Session() now accepts forged certificates. Counterfactual: if this same \
+file said `self.timeout = None` instead — also a "removed safety default" — \
+the verdict would differ.
+
+Q1 — Provable? YES.
+Q2 — Blast radius? **SECURITY** — defeats TLS trust chain, enables MITM.
+→ **critical**
+
+Compare to the timeout case above: same kind of "removed safety default" code \
+change, but a different blast dimension. `verify = False` is `critical` because \
+TLS is a security boundary; `timeout = None` would be `high` because hangs are \
+functional, not security.
 </example>
 
 #### high — provable + functional impact (crash, hang, wrong output)

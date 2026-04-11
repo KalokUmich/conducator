@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.ai_provider.base import AIProvider
 
@@ -517,13 +517,17 @@ def build_summary(
         "",
     ]
 
-    if critical + warnings + nits == 0:
+    if critical + high + medium + low + nits == 0:
         lines.append("No issues found. Code looks good!")
     else:
         if critical:
             lines.append(f"- **{critical} critical** issue(s)")
-        if warnings:
-            lines.append(f"- **{warnings} warning(s)**")
+        if high:
+            lines.append(f"- **{high} high** issue(s)")
+        if medium:
+            lines.append(f"- **{medium} medium** issue(s)")
+        if low:
+            lines.append(f"- {low} low issue(s)")
         if nits:
             lines.append(f"- {nits} nit(s)")
 
@@ -641,13 +645,13 @@ def _try_parse_json_array(text: str) -> Optional[list]:
     return None
 
 
-def parse_findings(
+def parse_findings_with_status(
     answer: str,
     agent_name: str,
     category: FindingCategory,
     *,
     warn_on_empty: bool = True,
-) -> List[ReviewFinding]:
+) -> Tuple[List[ReviewFinding], bool]:
     """Extract structured findings from an agent's answer text.
 
     Tries multiple extraction strategies in priority order:
@@ -655,37 +659,64 @@ def parse_findings(
       2. Bare JSON array anywhere in the text.
       3. Individual JSON objects (for models that omit the array wrapper).
 
+    Returns a (findings, parsed_explicit_array) tuple. The boolean is True
+    when we found and successfully parsed an explicit JSON array — even if
+    it was empty (``[]``). Empty-array is the agent's authoritative way to
+    say "no findings to report" (per the prompt: ``If you find no issues,
+    output exactly: `[]```), and callers should NOT trigger a repair retry
+    in that case.
+
     Args:
         answer: Raw text produced by the review agent.
         agent_name: Agent name attributed to each parsed finding.
         category: Finding category assigned to each parsed finding.
-        warn_on_empty: When True, logs a warning if no findings could be parsed.
+        warn_on_empty: When True, logs a warning if neither an explicit
+            array nor any individual finding objects could be parsed.
 
     Returns:
-        List of valid ReviewFinding objects; empty list on parse failure.
+        Tuple of (list of valid ReviewFinding, parsed_explicit_array bool).
     """
     findings: List[ReviewFinding] = []
 
+    # Strategy 1: JSON array inside a ```json code block. An array here is
+    # authoritative when EITHER it's explicitly empty (the agent's "no
+    # findings" answer) OR it produced at least one valid finding. A
+    # non-empty array that yielded zero findings is most likely an embedded
+    # data structure in prose, not the answer — fall through to other
+    # strategies in that case.
     for m in _JSON_BLOCK_RE.finditer(answer):
         raw_list = _try_parse_json_array(m.group(1))
-        if raw_list is not None:
-            for raw in raw_list:
-                f = raw_to_finding(raw, agent_name, category)
-                if f:
-                    findings.append(f)
-            if findings:
-                return findings
+        if raw_list is None:
+            continue
+        block_findings: List[ReviewFinding] = []
+        for raw in raw_list:
+            f = raw_to_finding(raw, agent_name, category)
+            if f:
+                block_findings.append(f)
+        if not raw_list or block_findings:
+            findings.extend(block_findings)
+            return findings, True
 
+    # Strategy 2: bare JSON array (no fence). Same authority rule — only
+    # short-circuit on an explicit empty array or a populated array that
+    # produced findings. Skip junk arrays embedded in prose (e.g. an
+    # ``evidence: ["..."]`` field of an enclosing object).
     for m in _JSON_BARE_RE.finditer(answer):
         raw_list = _try_parse_json_array(m.group())
-        if raw_list is not None:
-            for raw in raw_list:
-                f = raw_to_finding(raw, agent_name, category)
-                if f:
-                    findings.append(f)
-            if findings:
-                return findings
+        if raw_list is None:
+            continue
+        bare_findings: List[ReviewFinding] = []
+        for raw in raw_list:
+            f = raw_to_finding(raw, agent_name, category)
+            if f:
+                bare_findings.append(f)
+        if not raw_list or bare_findings:
+            findings.extend(bare_findings)
+            return findings, True
 
+    # Strategy 3: individual JSON objects scattered through prose. This is
+    # a recovery path — there's no explicit array marker, so we cannot
+    # treat absence of objects as an authoritative empty answer.
     for m in _JSON_OBJECT_RE.finditer(answer):
         try:
             raw = json.loads(m.group())
@@ -701,10 +732,30 @@ def parse_findings(
             len(findings),
             agent_name,
         )
+        return findings, False  # recovered objects, not an explicit array
 
-    if not findings and warn_on_empty:
+    if warn_on_empty:
         logger.warning("Failed to parse findings JSON from %s agent", agent_name)
 
+    return findings, False
+
+
+def parse_findings(
+    answer: str,
+    agent_name: str,
+    category: FindingCategory,
+    *,
+    warn_on_empty: bool = True,
+) -> List[ReviewFinding]:
+    """Backwards-compatible wrapper around :func:`parse_findings_with_status`.
+
+    Drops the parsed-explicit-array flag and returns just the findings list.
+    New callers should prefer ``parse_findings_with_status`` so they can
+    distinguish a real parse failure from a legitimate empty answer.
+    """
+    findings, _ = parse_findings_with_status(
+        answer, agent_name, category, warn_on_empty=warn_on_empty
+    )
     return findings
 
 
