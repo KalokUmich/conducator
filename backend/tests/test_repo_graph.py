@@ -338,6 +338,75 @@ class TestBuildDependencyGraph:
         graph = build_dependency_graph(str(tmp_path))
         assert graph.stats["total_files"] == 1
 
+    def test_scan_emits_summary_log(self, tmp_path, caplog):
+        """_scan_workspace always logs a completion summary at INFO."""
+        import logging
+
+        (tmp_path / "a.py").write_text("def a(): pass\n")
+        (tmp_path / "b.py").write_text("def b(): pass\n")
+
+        with caplog.at_level(logging.INFO, logger="app.repo_graph.graph"):
+            build_dependency_graph(str(tmp_path))
+
+        msgs = [r.message for r in caplog.records]
+        assert any("_scan_workspace done" in m for m in msgs), (
+            f"expected summary log, got: {msgs}"
+        )
+
+    def test_scan_emits_slow_file_warning_when_threshold_set(self, tmp_path, caplog, monkeypatch):
+        """With CONDUCTOR_SCAN_SLOW_MS set and extract_definitions mocked to
+        take a measurable amount of time, the instrumentation must emit a
+        per-file slow warning and a top-N summary.
+
+        We mock `extract_definitions` to sleep so the test is independent
+        of the real parser's speed (tree-sitter is usually sub-millisecond
+        on tiny test files).
+        """
+        import logging
+        import time as _time
+        from unittest.mock import patch
+
+        from app.repo_graph.parser import FileSymbols
+
+        monkeypatch.setenv("CONDUCTOR_SCAN_SLOW_MS", "5")
+        (tmp_path / "a.py").write_text("x = 1\n")
+        (tmp_path / "b.py").write_text("y = 2\n")
+
+        def slow_extract(path, source):
+            _time.sleep(0.01)  # 10ms — well above the 5ms threshold
+            return FileSymbols(file_path=path, definitions=[], references=[])
+
+        with (
+            caplog.at_level(logging.WARNING, logger="app.repo_graph.graph"),
+            patch("app.repo_graph.graph.extract_definitions", side_effect=slow_extract),
+        ):
+            build_dependency_graph(str(tmp_path))
+
+        msgs = [r.message for r in caplog.records]
+        assert any("slow tree-sitter parse" in m for m in msgs), (
+            f"expected per-file slow warning, got: {msgs}"
+        )
+        assert any("top-10 slow files" in m for m in msgs), (
+            f"expected top-N summary, got: {msgs}"
+        )
+
+    def test_scan_silent_when_threshold_not_set(self, tmp_path, caplog, monkeypatch):
+        """Default (no CONDUCTOR_SCAN_SLOW_MS): no per-file warnings so we
+        don't spam production logs."""
+        import logging
+
+        monkeypatch.delenv("CONDUCTOR_SCAN_SLOW_MS", raising=False)
+
+        (tmp_path / "a.py").write_text("def a(): pass\n")
+
+        with caplog.at_level(logging.WARNING, logger="app.repo_graph.graph"):
+            build_dependency_graph(str(tmp_path))
+
+        msgs = [r.message for r in caplog.records]
+        assert not any("slow tree-sitter parse" in m for m in msgs), (
+            f"unexpected warnings when threshold disabled: {msgs}"
+        )
+
     def test_pre_computed_symbols(self):
         symbols = {
             "a.py": FileSymbols(

@@ -198,14 +198,35 @@ def build_dependency_graph(
 
 
 def _scan_workspace(ws: Path, exclude: Set[str]) -> Dict[str, FileSymbols]:
-    """Scan workspace for source files and extract symbols."""
+    """Scan workspace for source files and extract symbols.
+
+    Emits per-file timing diagnostics to the logger when
+    ``CONDUCTOR_SCAN_SLOW_MS`` is set (default 0 — disabled). Any
+    ``extract_definitions`` call that takes longer than the threshold is
+    logged as a WARNING with the file path and duration, which lets us
+    pinpoint pathological tree-sitter inputs when a large-repo eval stalls
+    on Brain's Phase 1 pre-compute (e.g. the sentry-007 case we saw hang
+    for 30+ minutes — this instrumentation identifies which files burn the
+    budget). At the end of the scan, a summary with the top 10 slowest
+    files is emitted.
+    """
+    import os
+    import time as _time
+
     from .parser import detect_language
 
+    slow_threshold_ms = int(os.environ.get("CONDUCTOR_SCAN_SLOW_MS", "0"))
+
     file_symbols: Dict[str, FileSymbols] = {}
+    slow_files: List[tuple] = []  # (duration_ms, path, bytes)
+    scan_start = _time.monotonic()
+    file_count = 0
+    extracted_count = 0
 
     for path in ws.rglob("*"):
         if not path.is_file():
             continue
+        file_count += 1
         rel = str(path.relative_to(ws))
 
         # Check exclude patterns against relative path components.
@@ -241,7 +262,19 @@ def _scan_workspace(ws: Path, exclude: Set[str]) -> Dict[str, FileSymbols]:
             logger.debug("Skipping large file: %s (%d bytes)", rel, len(source))
             continue
 
+        t0 = _time.monotonic()
         fsyms = extract_definitions(str(path), source)
+        extract_ms = int((_time.monotonic() - t0) * 1000)
+
+        if slow_threshold_ms and extract_ms >= slow_threshold_ms:
+            logger.warning(
+                "slow tree-sitter parse: %s (%d bytes, %d ms)",
+                rel,
+                len(source),
+                extract_ms,
+            )
+            slow_files.append((extract_ms, rel, len(source)))
+
         # Store with relative path
         fsyms.file_path = rel
         for d in fsyms.definitions:
@@ -249,6 +282,25 @@ def _scan_workspace(ws: Path, exclude: Set[str]) -> Dict[str, FileSymbols]:
         for r in fsyms.references:
             r.file_path = rel
         file_symbols[rel] = fsyms
+        extracted_count += 1
+
+    total_ms = int((_time.monotonic() - scan_start) * 1000)
+    logger.info(
+        "_scan_workspace done: ws=%s files_seen=%d extracted=%d duration_ms=%d",
+        ws,
+        file_count,
+        extracted_count,
+        total_ms,
+    )
+    if slow_files:
+        slow_files.sort(reverse=True)  # by duration_ms desc
+        top = slow_files[:10]
+        logger.warning(
+            "_scan_workspace top-10 slow files (total %d over threshold %dms):\n%s",
+            len(slow_files),
+            slow_threshold_ms,
+            "\n".join(f"  {ms:>6d} ms  {rel}  ({b} bytes)" for ms, rel, b in top),
+        )
 
     return file_symbols
 
