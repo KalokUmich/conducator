@@ -5135,12 +5135,43 @@ _CHAINED_INVOKE_RE = re.compile(r'<invoke\s+name=["\']([a-zA-Z_][a-zA-Z0-9_]*)')
 def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> tuple:
     """Pre-repair common LLM mistakes before Pydantic validation.
 
-    Handles structural errors that Pydantic coercion alone cannot fix,
-    e.g. Qwen packing two values into one field: ``"start_line": "298, 422"``.
+    Handles structural errors that Pydantic coercion alone cannot fix. Each
+    pattern is scoped to the families of tools where that malformation is
+    plausibly intended behavior, and is a no-op otherwise.
 
-    Returns (repaired_params, xml_repair_attempted, lost_chained_invokes)
-    where lost_chained_invokes is a list of tool names whose chained call
-    got dropped because this function only handles a single tool's params.
+    Patterns applied (in order):
+
+    * **0 — XML <parameter>/<invoke> fragments in dict keys.**
+      Haiku and Qwen occasionally emit XML tool-use syntax INSIDE the JSON
+      input, producing garbled keys like
+      ``'end_line": 234</parameter>\\n<parameter name="path'``. When the model
+      concatenates two tool calls in one block the garbled key ends in
+      ``<invoke name="Y">`` — we salvage the outer call's params and log the
+      lost chained tool name via the ``lost_chained_invokes`` return value.
+    * **0.5 — list-literal brackets in line-range params**
+      (``read_file`` / ``git_blame`` only).
+      Haiku sometimes emits ``[start, end]`` as a Python list; the JSON layer
+      packs it into a single string (``start_line="[109, 130]"``) or splits
+      it across two params (``start_line="[109"``, ``end_line="130]"``).
+      Strip the brackets so pattern 1 or Pydantic's int coercion can finish.
+    * **1 — comma-separated integers in a single field**
+      (``read_file`` / ``git_blame`` only).
+      Qwen variant: ``start_line="298, 422"`` → split into
+      ``start_line=298`` + ``end_line=422``.
+    * **2 — file_path ↔ path alias.**
+      Different tools expect different parameter names for the file path;
+      the wrong alias is silently remapped to the schema-correct one.
+    * **3 — trailing/leading whitespace on string values.**
+
+    Returns ``(repaired_params, xml_repair_attempted, lost_chained_invokes)``:
+
+    * ``repaired_params`` — the cleaned dict ready for Pydantic validation.
+    * ``xml_repair_attempted`` — ``True`` if pattern 0 fired; the caller
+      uses this to augment the error message when validation fails, nudging
+      the model to emit pure JSON on retry.
+    * ``lost_chained_invokes`` — list of tool names from chained
+      ``<invoke>`` fragments that were detected but NOT synthesized into a
+      second ToolCall (this function operates on a single call's input).
     """
     params = dict(params)  # shallow copy to avoid mutating caller's dict
     xml_repair_attempted = False
@@ -5218,9 +5249,24 @@ def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> tuple:
                 tool_name,
             )
 
+    # --- Pattern 0.5: strip list-literal brackets from line-range params -----
+    # Haiku sometimes emits [start, end] as a Python list; the JSON serializer
+    # either packs it into a single string ("[109, 130]") or splits it into
+    # two string params (start_line="[109", end_line="130]"). In both cases
+    # the `[` / `]` characters land inside int-expected fields and Pydantic
+    # rejects. Strip them here so Pattern 1 (comma-split) or Pydantic's own
+    # int coercion can take over.
+    _LINE_RANGE_TOOLS = {"read_file", "git_blame"}
+    if tool_name in _LINE_RANGE_TOOLS:
+        for key in ("start_line", "end_line"):
+            val = params.get(key)
+            if isinstance(val, str) and ("[" in val or "]" in val):
+                # strip outer brackets and any trailing comma-whitespace
+                cleaned = val.strip().strip("[]").strip().rstrip(",").strip()
+                params[key] = cleaned
+
     # --- Pattern 1: comma-separated integers in a single field ---------------
     # e.g. start_line="298, 422" → start_line=298, end_line=422
-    _LINE_RANGE_TOOLS = {"read_file", "git_blame"}
     if tool_name in _LINE_RANGE_TOOLS:
         for src_key, dst_key in [("start_line", "end_line")]:
             val = params.get(src_key)

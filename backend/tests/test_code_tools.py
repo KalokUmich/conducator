@@ -734,6 +734,58 @@ class TestExecuteTool:
         assert xml_repaired is True
         assert "grep" in lost_chained
 
+    def test_repair_bracket_wrapped_line_range_split(self, ws):
+        """Haiku sometimes emits [start, end] split across two params as
+        start_line='[109', end_line='130]'. Strip brackets so Pydantic can
+        coerce to int."""
+        # The execute_tool path coerces the cleaned strings to int via Pydantic
+        result = execute_tool(
+            "read_file",
+            ws,
+            {"path": "app/service.py", "start_line": "[1", "end_line": "10]"},
+        )
+        assert result.success
+        # The file 'app/service.py' exists in the workspace fixture
+
+    def test_repair_bracket_wrapped_line_range_unit(self, ws):
+        """Pure unit-level verification of bracket stripping on both fields."""
+        from app.code_tools.tools import _repair_tool_params
+
+        garbled = {"path": "x.py", "start_line": "[1", "end_line": "10]"}
+        result, _, _ = _repair_tool_params("read_file", garbled)
+        # After repair, brackets are stripped but values are still strings;
+        # Pydantic's int coercion in execute_tool handles the final conversion.
+        assert result["start_line"] == "1"
+        assert result["end_line"] == "10"
+
+    def test_repair_bracket_wrapped_line_range_single_field(self, ws):
+        """Haiku variant: entire [start, end] packed into one field as a
+        string — bracket-strip + comma-split recombines into two ints."""
+        from app.code_tools.tools import _repair_tool_params
+
+        garbled = {"path": "x.py", "start_line": "[109, 130]"}
+        result, _, _ = _repair_tool_params("read_file", garbled)
+        assert result["start_line"] == "109"
+        assert result["end_line"] == "130"
+
+    def test_repair_bracket_with_trailing_comma(self, ws):
+        """Edge case: '[821,' with trailing comma after bracket strip."""
+        from app.code_tools.tools import _repair_tool_params
+
+        garbled = {"path": "x.py", "start_line": "[821,", "end_line": "130]"}
+        result, _, _ = _repair_tool_params("read_file", garbled)
+        assert result["start_line"] == "821"
+        assert result["end_line"] == "130"
+
+    def test_repair_non_line_range_tool_unaffected(self, ws):
+        """Bracket stripping must only apply to read_file / git_blame."""
+        from app.code_tools.tools import _repair_tool_params
+
+        # grep's 'context_lines' is also an int but shouldn't be bracket-stripped
+        garbled = {"pattern": "foo", "path": "x.py", "context_lines": "[3"}
+        result, _, _ = _repair_tool_params("grep", garbled)
+        assert result["context_lines"] == "[3"  # untouched
+
 
 # ---------------------------------------------------------------------------
 # git_blame / git_show
