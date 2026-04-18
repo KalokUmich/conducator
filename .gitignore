@@ -141,3 +141,6 @@ docs/_build/
 site/
 
 .claude/
+
+# Claude Code source study — 47MB reference material, kept local-only
+reference/claude-code/
