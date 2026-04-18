@@ -2114,9 +2114,18 @@ _graph_cache: Dict[str, tuple] = {}  # workspace → (graph, monotonic_time)
 
 
 def _ensure_graph(workspace: str, graph_service=None):
-    """Build or return a cached dependency graph for the workspace."""
+    """Build or return a cached dependency graph for the workspace.
+
+    Uses per-key in-flight dedup (scratchpad.key_lock) so N concurrent
+    sub-agents hitting a cold cache collapse into ONE real build — the
+    remaining N-1 block on the lock and then find the freshly-cached
+    value on re-check. Without this coordination, a parallel PR Brain
+    dispatch with 7 sub-agents on a 17K-file repo pays 7× the tree-sitter
+    scan cost (observed in sentry-006 Greptile eval).
+    """
     import time
 
+    # Fast path — no lock if the cache is already fresh.
     entry = _graph_cache.get(workspace)
     if entry is not None:
         graph, ts = entry
@@ -2124,20 +2133,33 @@ def _ensure_graph(workspace: str, graph_service=None):
             return graph
         # expired — fall through to rebuild
 
-    graph = None
-    if graph_service is not None:
-        graph = graph_service.build_graph(workspace)
-    else:
-        try:
-            from app.repo_graph.graph import build_dependency_graph
+    # Slow path — serialise cold-miss builders for this specific workspace.
+    # Different workspaces still build in parallel (per-key lock).
+    from app.scratchpad import key_lock
 
-            graph = build_dependency_graph(workspace)
-        except ImportError:
-            logger.warning("repo_graph not available — graph tools disabled.")
-            return None
+    with key_lock(f"v1:ensure_graph:{workspace}"):
+        # Re-check under the lock: a concurrent builder may have just
+        # populated the cache while we were waiting to acquire.
+        entry = _graph_cache.get(workspace)
+        if entry is not None:
+            graph, ts = entry
+            if (time.monotonic() - ts) < _GRAPH_TTL_SECONDS:
+                return graph
 
-    _graph_cache[workspace] = (graph, time.monotonic())
-    return graph
+        graph = None
+        if graph_service is not None:
+            graph = graph_service.build_graph(workspace)
+        else:
+            try:
+                from app.repo_graph.graph import build_dependency_graph
+
+                graph = build_dependency_graph(workspace)
+            except ImportError:
+                logger.warning("repo_graph not available — graph tools disabled.")
+                return None
+
+        _graph_cache[workspace] = (graph, time.monotonic())
+        return graph
 
 
 def invalidate_graph_cache(workspace: Optional[str] = None) -> None:
