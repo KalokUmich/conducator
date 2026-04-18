@@ -494,6 +494,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .git_workspace.router import router as git_workspace_router
     from .integrations.azure_devops.router import router as azure_devops_router
     from .integrations.jira.router import router as jira_router
+    from .integrations.teams.router import router as teams_router
     from .langextract.router import router as langextract_router
     from .policy.router import router as policy_router
     from .todos.router import router as todos_router
@@ -523,6 +524,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(brain_router)
     app.include_router(jira_router)
     app.include_router(azure_devops_router)
+    app.include_router(teams_router)
     if _browser_router is not None:
         app.include_router(_browser_router)
         logger.info("Browser tools: enabled (Playwright)")

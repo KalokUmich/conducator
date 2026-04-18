@@ -24,6 +24,10 @@ Environment variable overrides:
     CONDUCTOR_POSTGRES_PASSWORD      → postgres.password
     CONDUCTOR_JIRA_CLIENT_ID         → jira.client_id
     CONDUCTOR_JIRA_CLIENT_SECRET     → jira.client_secret
+    CONDUCTOR_TEAMS_APP_ID           → teams.app_id
+    CONDUCTOR_TEAMS_APP_PASSWORD     → teams.app_password
+    CONDUCTOR_TEAMS_APP_TENANT_ID    → teams.app_tenant_id
+    CONDUCTOR_TEAMS_APP_TYPE         → teams.app_type
     CONDUCTOR_GOOGLE_CLIENT_ID       → google_sso.client_id
     CONDUCTOR_GOOGLE_CLIENT_SECRET   → google_sso.client_secret
     CONDUCTOR_NGROK_AUTHTOKEN        → ngrok.authtoken
@@ -65,6 +69,10 @@ _ENV_SECRETS_MAP = {
     "CONDUCTOR_MOONSHOT_BASE_URL": ("ai_providers", "moonshot", "base_url"),
     "CONDUCTOR_JIRA_CLIENT_ID": ("jira", "client_id"),
     "CONDUCTOR_JIRA_CLIENT_SECRET": ("jira", "client_secret"),
+    "CONDUCTOR_TEAMS_APP_ID": ("teams", "app_id"),
+    "CONDUCTOR_TEAMS_APP_PASSWORD": ("teams", "app_password"),
+    "CONDUCTOR_TEAMS_APP_TENANT_ID": ("teams", "app_tenant_id"),
+    "CONDUCTOR_TEAMS_APP_TYPE": ("teams", "app_type"),
     "CONDUCTOR_AZURE_DEVOPS_ORG_URL": ("azure_devops", "org_url"),
     "CONDUCTOR_AZURE_DEVOPS_PAT": ("azure_devops", "pat"),
     "CONDUCTOR_GOOGLE_CLIENT_ID": ("google_sso", "client_id"),
@@ -537,6 +545,42 @@ class JiraSecretsConfig(BaseModel):
     client_secret: str = ""
 
 
+class TeamsSettings(BaseModel):
+    """Microsoft Teams bot integration toggle (from conductor.settings.yaml).
+
+    All real credentials live in :class:`TeamsSecretsConfig`; this section only
+    carries the enable flag so the Bot Framework router can refuse to boot when
+    credentials are missing in production.
+    """
+
+    enabled: bool = False
+
+
+class TeamsSecretsConfig(BaseModel):
+    """Microsoft Teams / Bot Framework credentials (from conductor.secrets.yaml).
+
+    Field names mirror Microsoft's ``botbuilder-core`` SDK env var convention
+    (``MicrosoftAppId`` / ``MicrosoftAppPassword`` / ``MicrosoftAppTenantId`` /
+    ``MicrosoftAppType``) so Phase 2 can hand these straight to the SDK.
+
+    - ``app_id``: Azure AD App Registration "Application (client) ID". Also appears
+      as ``botId`` in the Teams manifest. Public — not strictly secret, but grouped
+      here with the others for consistency with the Jira pattern.
+    - ``app_password``: Azure AD App Registration client secret *Value*. Required
+      in Phase 2 for (a) acquiring tokens to post replies to the Bot Framework
+      Connector, and (b) app-only Graph API calls to read channel history.
+      Not used in Phase 1 — the router only logs incoming requests.
+    - ``app_tenant_id``: Azure AD tenant ID. Required when ``app_type`` is
+      ``SingleTenant``.
+    - ``app_type``: ``SingleTenant`` (internal-only) or ``MultiTenant``.
+    """
+
+    app_id: str = ""
+    app_password: str = ""
+    app_tenant_id: str = ""
+    app_type: str = "SingleTenant"
+
+
 class AzureDevOpsSettings(BaseModel):
     """Azure DevOps integration configuration."""
 
@@ -613,6 +657,8 @@ class ConductorConfig(BaseModel):
     google_sso_secrets: GoogleSSOSecretsConfig = Field(default_factory=GoogleSSOSecretsConfig)
     jira: JiraSettings = Field(default_factory=JiraSettings)
     jira_secrets: JiraSecretsConfig = Field(default_factory=JiraSecretsConfig)
+    teams: TeamsSettings = Field(default_factory=TeamsSettings)
+    teams_secrets: TeamsSecretsConfig = Field(default_factory=TeamsSecretsConfig)
     azure_devops: AzureDevOpsSettings = Field(default_factory=AzureDevOpsSettings)
     azure_devops_secrets: AzureDevOpsSecretsConfig = Field(default_factory=AzureDevOpsSecretsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
@@ -728,6 +774,17 @@ def load_config(
         client_secret=_env("CONDUCTOR_JIRA_CLIENT_SECRET", jira_sec.get("client_secret", "")),
     )
 
+    teams_data = raw.get("teams", {})
+    teams_cfg = TeamsSettings(enabled=teams_data.get("enabled", False))
+
+    teams_sec = secrets_raw.get("teams", {})
+    teams_secrets_cfg = TeamsSecretsConfig(
+        app_id=_env("CONDUCTOR_TEAMS_APP_ID", teams_sec.get("app_id", "")),
+        app_password=_env("CONDUCTOR_TEAMS_APP_PASSWORD", teams_sec.get("app_password", "")),
+        app_tenant_id=_env("CONDUCTOR_TEAMS_APP_TENANT_ID", teams_sec.get("app_tenant_id", "")),
+        app_type=_env("CONDUCTOR_TEAMS_APP_TYPE", teams_sec.get("app_type", "SingleTenant")),
+    )
+
     ado_data = raw.get("azure_devops", {})
     ado_cfg = AzureDevOpsSettings(
         enabled=ado_data.get("enabled", False),
@@ -805,6 +862,8 @@ def load_config(
         change_limits=change_limits_cfg,
         jira=jira_cfg,
         jira_secrets=jira_secrets_cfg,
+        teams=teams_cfg,
+        teams_secrets=teams_secrets_cfg,
         azure_devops=ado_cfg,
         azure_devops_secrets=ado_secrets_cfg,
     )

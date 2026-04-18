@@ -199,7 +199,7 @@ postdeploy-check: ensure-extension-deps
 # ===========================
 # Build / Compile
 # ===========================
-.PHONY: compile compile-all compile-ts compile-webview compile-css package update-contracts update-prompt-library
+.PHONY: compile compile-all compile-ts compile-webview compile-css package package-teams-bot update-contracts update-prompt-library
 
 ## Compile extension (TypeScript + React WebView + Tailwind CSS)
 compile: compile-all
@@ -230,6 +230,38 @@ package: compile
 	@echo "Packaging VS Code extension..."
 	cd extension && npx @vscode/vsce package
 	@echo "Extension packaged! (.vsix file in extension/)"
+
+## Package Microsoft Teams bot app for sideloading (Phase 1).
+## Reads bot_id from config/conductor.secrets.local.yaml (teams.app_id) by default.
+## Tunnel host MUST be provided; set TEAMS_TUNNEL_HOST once in your shell.
+##
+## Usage:
+##   export TEAMS_TUNNEL_HOST=kalok-test.ngrok.app
+##   make package-teams-bot
+## Or one-shot:
+##   make package-teams-bot TEAMS_TUNNEL_HOST=kalok-test.ngrok.app
+## Override bot_id with TEAMS_BOT_ID=<...> if you want to package against a different app.
+package-teams-bot: ensure-backend-deps
+	@if [ -z "$(TEAMS_TUNNEL_HOST)" ]; then \
+		echo "Error: TEAMS_TUNNEL_HOST not set."; \
+		echo "  One-shot:   make package-teams-bot TEAMS_TUNNEL_HOST=kalok-test.ngrok.app"; \
+		echo "  Persistent: export TEAMS_TUNNEL_HOST=kalok-test.ngrok.app"; \
+		exit 1; \
+	fi
+	@bot_id="$(TEAMS_BOT_ID)"; \
+	if [ -z "$$bot_id" ]; then \
+		bot_id=$$(cd backend && $(PYTHON) -c "from app.config import get_config; print(get_config().teams_secrets.app_id)" 2>/dev/null); \
+	fi; \
+	if [ -z "$$bot_id" ]; then \
+		echo "Error: bot_id not resolved."; \
+		echo "  Set teams.app_id in config/conductor.secrets.local.yaml,"; \
+		echo "  or override with: make package-teams-bot TEAMS_BOT_ID=<client-id> TEAMS_TUNNEL_HOST=<host>"; \
+		exit 1; \
+	fi; \
+	echo "Packaging Teams bot app..."; \
+	echo "  bot-id:      $$bot_id"; \
+	echo "  tunnel-host: $(TEAMS_TUNNEL_HOST)"; \
+	cd teams-bot && $(PYTHON) build.py --bot-id "$$bot_id" --tunnel-host "$(TEAMS_TUNNEL_HOST)"
 
 ## Regenerate tool contracts after changing Python schemas
 update-contracts: ensure-backend-deps
@@ -442,6 +474,7 @@ help:
 	@echo "Build:"
 	@echo "  make compile            Compile extension (TypeScript + CSS)"
 	@echo "  make package            Package extension as .vsix"
+	@echo "  make package-teams-bot TEAMS_TUNNEL_HOST=<host>  Package Teams bot app (.zip)"
 	@echo "  make update-contracts   Regenerate tool contracts from Python schemas"
 	@echo "  make update-prompt-library  Download latest prompts.chat CSV"
 	@echo ""
