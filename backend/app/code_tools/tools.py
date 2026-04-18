@@ -5128,26 +5128,38 @@ except ImportError:
     logger.debug("Jira tools unavailable")
 
 
-def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+_XML_FRAG_RE = re.compile(r"</parameter>|<parameter\s|<invoke\s")
+_CHAINED_INVOKE_RE = re.compile(r'<invoke\s+name=["\']([a-zA-Z_][a-zA-Z0-9_]*)')
+
+
+def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> tuple:
     """Pre-repair common LLM mistakes before Pydantic validation.
 
     Handles structural errors that Pydantic coercion alone cannot fix,
     e.g. Qwen packing two values into one field: ``"start_line": "298, 422"``.
+
+    Returns (repaired_params, xml_repair_attempted, lost_chained_invokes)
+    where lost_chained_invokes is a list of tool names whose chained call
+    got dropped because this function only handles a single tool's params.
     """
     params = dict(params)  # shallow copy to avoid mutating caller's dict
+    xml_repair_attempted = False
+    lost_chained: List[str] = []
 
-    # --- Pattern 0: XML <parameter> fragments in dict keys --------------------
-    # Some models (Qwen, DeepSeek) mix XML parameter tags into JSON, producing
-    # garbled keys like:
+    # --- Pattern 0: XML <parameter>/<invoke> fragments in dict keys -----------
+    # Some models (Haiku, Qwen, DeepSeek) mix XML tool-use tags into JSON,
+    # producing garbled keys like:
     #   'end_line": 234</parameter>\n<parameter name="path'
-    # with the actual value of 'path' as the dict value for that key.
+    # or, when the model concatenates TWO tool calls into one block:
+    #   'start_line": 1630</parameter>\n</invoke>\n<invoke name="grep'
+    # with the actual value of the last embedded key as the dict value.
     # Detect and reconstruct the intended parameters.
-    _XML_FRAG_RE = re.compile(r"</parameter>|<parameter\s")
     if any(_XML_FRAG_RE.search(str(k)) for k in params):
+        xml_repair_attempted = True
         repaired: Dict[str, Any] = {}
         for key, val in params.items():
             key_str = str(key)
-            if "</parameter>" not in key_str and "<parameter" not in key_str:
+            if not _XML_FRAG_RE.search(key_str):
                 # Clean key — keep as-is
                 repaired[key_str] = val
                 continue
@@ -5161,11 +5173,18 @@ def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any
                 r'["\s:]+\s*([^<]+?)\s*</parameter>',
                 key_str,
             )
-            # Extract the last parameter name
+            # Extract the last parameter name (when the chain ends with
+            # another <parameter> of the SAME tool call)
             last_key_m = re.search(
                 r'<parameter\s+name=["\']([a-zA-Z_][a-zA-Z0-9_]*)',
                 key_str,
             )
+            # Extract any chained <invoke name="..."> — a DIFFERENT tool
+            # call the model tried to emit in the same block. We can't
+            # synthesize a separate ToolCall from this layer, so the chain
+            # is dropped; log clearly so the agent's next iteration knows.
+            chained_invoke_m = _CHAINED_INVOKE_RE.search(key_str)
+
             if first_key_m and embedded_val_m:
                 fk = first_key_m.group(1)
                 fv = embedded_val_m.group(1).strip().strip('"').strip("'")
@@ -5180,6 +5199,9 @@ def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any
             elif first_key_m and not embedded_val_m:
                 # No embedded value found — just use the first key
                 repaired[first_key_m.group(1)] = val
+
+            if chained_invoke_m:
+                lost_chained.append(chained_invoke_m.group(1))
         if repaired:
             logger.warning(
                 "Repaired XML-garbled params for %s: %s → %s",
@@ -5188,6 +5210,13 @@ def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any
                 list(repaired.keys()),
             )
             params = repaired
+        if lost_chained:
+            logger.warning(
+                "Chained <invoke name=%s> lost while repairing %s params — "
+                "model emitted two tool calls in one block; only the outer one is executed",
+                lost_chained,
+                tool_name,
+            )
 
     # --- Pattern 1: comma-separated integers in a single field ---------------
     # e.g. start_line="298, 422" → start_line=298, end_line=422
@@ -5221,7 +5250,7 @@ def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any
         if isinstance(val, str):
             params[key] = val.strip()
 
-    return params
+    return params, xml_repair_attempted, lost_chained
 
 
 def execute_tool(tool_name: str, workspace: str, params: Dict[str, Any]) -> ToolResult:
@@ -5230,8 +5259,8 @@ def execute_tool(tool_name: str, workspace: str, params: Dict[str, Any]) -> Tool
     if fn is None:
         return ToolResult(tool_name=tool_name, success=False, error=f"Unknown tool: {tool_name}")
 
-    # Pre-repair common structural mistakes from weaker LLMs (e.g. Qwen)
-    params = _repair_tool_params(tool_name, params)
+    # Pre-repair common structural mistakes from weaker LLMs (e.g. Qwen, Haiku)
+    params, xml_repaired, lost_chained = _repair_tool_params(tool_name, params)
 
     # Validate & coerce params through the Pydantic model for this tool.
     # This fixes non-Claude models (e.g. Qwen) that return numbers as strings
@@ -5244,6 +5273,25 @@ def execute_tool(tool_name: str, workspace: str, params: Dict[str, Any]) -> Tool
             params = validated.model_dump(exclude_none=True)
         except ValidationError as ve:
             logger.warning("Tool %s param validation failed: %s", tool_name, ve)
+            if xml_repaired:
+                # The input had XML fragments mixed into JSON — give the model
+                # a steering nudge so the next iteration switches to pure JSON.
+                steering = (
+                    "\n\nNOTE: Your previous tool_use mixed XML tags "
+                    "(<invoke>/<parameter>) into the JSON input. Retry with "
+                    "pure JSON only — no XML tags inside parameter names or values."
+                )
+                if lost_chained:
+                    steering += (
+                        f" You also chained a second <invoke name={lost_chained}> "
+                        "in the same block — emit each tool call as a separate "
+                        "tool_use block, not concatenated."
+                    )
+                return ToolResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=f"Invalid parameters: {ve}{steering}",
+                )
             return ToolResult(tool_name=tool_name, success=False, error=f"Invalid parameters: {ve}")
 
     try:

@@ -699,18 +699,40 @@ class TestExecuteTool:
             'end_line": 234</parameter>\n<parameter name="path': "app/service.py",
             "start_line": 225,
         }
-        result = _repair_tool_params("read_file", garbled)
+        result, xml_repaired, lost_chained = _repair_tool_params("read_file", garbled)
         assert result["path"] == "app/service.py"
         assert result["end_line"] == 234
         assert result["start_line"] == 225
+        assert xml_repaired is True
+        assert lost_chained == []
 
     def test_repair_xml_garbled_keys_clean_passthrough(self, ws):
         """Clean params are not affected by XML garble repair."""
         from app.code_tools.tools import _repair_tool_params
 
         clean = {"path": "app/service.py", "start_line": 1, "end_line": 10}
-        result = _repair_tool_params("read_file", clean)
+        result, xml_repaired, lost_chained = _repair_tool_params("read_file", clean)
         assert result == clean
+        assert xml_repaired is False
+        assert lost_chained == []
+
+    def test_repair_xml_chained_invoke_detected(self, ws):
+        """Chained <invoke name="X"> in garbled key is detected and reported."""
+        from app.code_tools.tools import _repair_tool_params
+
+        # Haiku pattern: tries to emit read_file + grep in one tool_use block.
+        # The grep invoke leaks into a JSON key; we can't synthesize a second
+        # call from this layer, but we should salvage read_file and flag the loss.
+        garbled = {
+            'start_line": 1630</parameter>\n</invoke>\n<invoke name="grep': "some_grep_param_value",
+            'end_line": 1675</parameter>\n<parameter name="path': "requests/sessions.py",
+        }
+        result, xml_repaired, lost_chained = _repair_tool_params("read_file", garbled)
+        assert result["start_line"] == 1630
+        assert result["end_line"] == 1675
+        assert result["path"] == "requests/sessions.py"
+        assert xml_repaired is True
+        assert "grep" in lost_chained
 
 
 # ---------------------------------------------------------------------------
