@@ -1265,86 +1265,224 @@ Scope each review agent's diff context to only the files relevant to its focus a
 - [ ] Update `_build_agent_query` / `build_diffs_section` to accept file filter per agent
 - [ ] Combined with prompt caching (9.11): estimated total cost reduction from ~$1.89 to ~$0.50 per review
 
-### 9.13 PR Brain v2 — Detect/Classify Separation (PLANNED)
+### 9.13 PR Brain v2 — Task-Based Sub-Agents (PLANNED)
 
-Architectural refactor separating bug **detection** (sub-agents) from severity **classification** (Brain). Inspired by Claude Code's coordinator→worker→coordinator pattern where workers are generic detectors and the coordinator synthesises + classifies.
+**Merged rewrite of the former 9.13 (severity centralization) and 9.14 (dynamic composition)**. The two were originally scoped as separate phases for sprint pacing, but they share one sub-agent contract redesign — splitting them would force two sequential rewrites of the same `code_review_pr` skill + sub-agent output schema. We do them as one refactor with two shipping checkpoints to bound rollout risk.
 
-**Current**: each sub-agent detects bugs AND assigns severity → 12 severity examples × 7 agents = ~15K tokens of redundant rubric, plus 7 independent Haiku instances making inconsistent severity calls.
+**Thesis**: PR Brain stops being a deterministic pipeline that dispatches a fixed 7-agent swarm with each agent doing detection AND severity classification. It becomes a coordinator that **surveys the PR, decomposes into concrete investigations, composes each sub-agent's prompt per-task, and classifies severity itself during synthesis**. Sub-agents become Haiku execution units answering narrow checks with evidence; Brain (Sonnet/Opus) does all reasoning, classification, arbitration, and synthesis. Inspired by Claude Code's coordinator→worker→coordinator pattern.
 
-**New flow**:
-```
-Phase 1: Brain dispatches sub-agents → each outputs findings WITHOUT severity
-Phase 2: Brain dedup — same bug from multiple agents → merge, tag which dimensions found it
-Phase 3: Brain dispatches Arbitrator per finding WITH dimension context
-         "Found by correctness + security. For EACH dimension, valid or not?"
-         Arbitrator answers per-dimension (e.g. correctness=confirmed, security=rebutted)
-Phase 4: Brain final verdict — sees all findings + per-dimension arbitration
-         → decides keep/drop, assigns severity with 2-question rubric,
-           informed by which dimensions survived
-```
+**Two structural changes in one refactor**:
 
-**Per-dimension arbitration**: when correctness and security both flag the same NPE, the arbitrator is told: "This finding was independently found by two dimensions. For each one, is the evidence valid?" The arbitrator can rebut one dimension while confirming another → Brain uses the surviving dimensions to classify severity (security survived → critical; only correctness survived → high).
+1. **Sub-agent contract flips from role → task** (formerly 9.14's concern).
+   Today: `dispatch_agent("correctness", query)` — sub-agent re-decides what to look at and what matters. Haiku burns 200K context on re-exploration and returns shallow findings.
+   New: `dispatch_subagent(scope, checks, success_criteria, budget, model)` — sub-agent reads 1–3 files, answers 3 concrete falsifiable checks, returns `confirmed | violated | unclear` with evidence. No scope widening. No severity classification.
 
-- [ ] Remove severity from sub-agent output schema (make optional / detection-only)
-- [ ] Remove severity rubric + 12 examples from `code_review_pr` skill (~2,168 tokens saved ×7 agents)
-- [ ] Add severity rubric + 2-question examples to Brain synthesis prompt (Phase 4, 1× only)
-- [ ] Refactor dedup to preserve `found_by: {dimension: {evidence, confidence}}` tags
-- [ ] Refactor Arbitrator to accept per-dimension evidence and rebut per-dimension
-- [ ] Brain synthesis assigns severity AFTER seeing arbitration verdicts + dimension context
-- [ ] Eval: compare severity_accuracy before/after on 12 requests cases + Greptile cases
+2. **Severity classification moves from sub-agent → Brain** (formerly 9.13's concern).
+   Today: 12 severity examples × 7 agents = ~15K tokens of redundant rubric, 7 independent Haikus making inconsistent severity calls on the same bug.
+   New: severity rubric + 2-question examples live ONCE in Brain's synthesis prompt. Brain sees all findings + per-dimension arbitration across all dispatched investigations, classifies with full cross-cutting context.
 
-### 9.14 Dynamic Sub-Agent Composition (PLANNED)
-
-**Thesis**: The PR Brain stops being a deterministic pipeline that dispatches a fixed 7-agent swarm. It becomes a coordinator that **surveys the PR, decomposes into concrete investigations, composes each sub-agent's prompt per-task, and replans based on findings**. Sub-agents become execution units (Haiku) answering narrow checks with evidence. Brain (Sonnet/Opus) does all reasoning, classification, and synthesis. Inspired by Claude Code's coordinator→worker→coordinator pattern.
-
-**Why the current design is wrong**: a Haiku sub-agent given a role-shaped task ("correctness-review this PR") burns its 200K context re-deciding what to look at, then returns shallow findings. Brain has the richest context and must be the one deciding what needs verification.
+These are the same refactor — the new sub-agent schema `{checks, findings with severity=null, unexpected_observations}` encodes both "task-shaped" and "no severity" simultaneously.
 
 **5-phase PR Brain loop** (replaces current 6-phase pipeline):
 
 1. **Survey** (≤100K tokens): Brain reads diff + uses read-only tools (`grep`, `find_symbol`, `read_file`, `file_outline`) to map change points + risk surface. For each change, asks: what's the intent, what class of failure if wrong, what assertions rule it out.
 2. **Plan**: decompose into concrete investigations. Each = one `dispatch_subagent` call with narrow scope (≤3 files) + **exactly 3 checks**. Multiple investigations on the same dimension are fine if change points are unrelated — prefer breadth over depth.
-3. **Execute**: parallel `dispatch_subagent(scope, checks, success_criteria, budget, model)`. Sub-agent returns verdicts (confirmed/violated/unclear) + optional `unexpected_observations`.
-4. **Replan** (≤2 rounds): act on `unclear` (dispatch strong-model follow-up) or `unexpected` (new investigation). Max 8 total dispatches across all rounds.
-5. **Synthesize**: Brain dedups, classifies severity using 2-question rubric, generates markdown. Optionally dispatches strong-model verifier to rebut weak findings.
+3. **Execute**: parallel `dispatch_subagent(scope, checks, success_criteria, budget, model)`. Sub-agent returns verdicts (confirmed/violated/unclear) + optional `unexpected_observations` with confidence scores.
+4. **Replan** (≤2 rounds): act on `unclear` (dispatch strong-model follow-up) or `unexpected` with confidence ≥ 0.8 (new investigation). Max 8 total dispatches across all rounds.
+5. **Synthesize + arbitrate**: Brain dedups across dispatches, classifies severity using the 2-question rubric (provable + blast radius), merged arbitration replaces the legacy standalone arbitrator — Brain acts as its own arbitrator and may fork a strong-model verifier (see 9.16) for findings whose evidence is thin.
 
 **Hard invariants** (prevent under-exploration):
 - ≥1 correctness investigation per PR
 - Auth/crypto/session diffs → mandatory security dispatch
 - DB migrations → mandatory reliability dispatch
 - Max 8 dispatches total, max 3 checks per dispatch
+- Max recursion depth 2 (Brain=0, dispatched sub-agent=1, sub-agent's strong-model verifier=2)
 
-**Sub-agent contract** (replaces today's role-shaped agents):
+**Sub-agent contract** (replaces today's role-shaped agents — see `config/prompts/pr_subagent_checks.md` for the current drafted system prompt):
 - Input: scope + 3 checks + success_criteria + budget + model_tier
-- Output: `{checks: [{verdict, evidence}], findings: [...], unexpected_observations: [...]}`
-- Sub-agent NEVER classifies severity, NEVER investigates beyond scope
-- Applies verify-existence rule: check symbol/signature exists before flagging logic on it (addresses observed failure mode where agents flag hypothetical bugs on non-existent classes)
+- Output: `{checks: [{verdict, evidence}], findings: [{severity: null, ...}], unexpected_observations: [{confidence, ...}]}`
+- Sub-agent NEVER classifies severity, NEVER investigates beyond scope, NEVER recurses
+- Applies verify-existence rule: check symbol/signature exists before flagging logic on it (addresses observed failure mode where agents flag hypothetical bugs on non-existent classes — see sentry-001 eval case)
 
-**`config/agents/*.md` reposition**: from dispatch targets → reference material Brain studies for tone and evidence standards. Brain composes each investigation fresh rather than copying these broad framings.
+**`config/agents/*.md` reposition**: from dispatch targets → reference material Brain studies for tone and evidence standards. Brain composes each investigation fresh rather than copying these broad framings. See `config/prompts/pr_brain_coordinator.md` for the drafted Brain meta-skill.
 
-**Implementation sequence** (reorders earlier sprint plan to respect dependencies):
-```
-Sprint 15: 9.11 + 9.12 (infrastructure — cheaper tokens; prerequisite)
-Sprint 16: 9.14a — `dispatch_subagent` primitive lands alongside fixed swarm
-Sprint 17: 9.13 — severity back to Brain; merged arbitration uses
-                  9.14a to dispatch strong-model verifiers during arbitration
-Sprint 18: 9.14b — Brain meta-skill rewrite; dynamic composition default;
-                   fixed swarm → fallback only
-```
+**Two-checkpoint shipping plan** (risk-managed rollout):
 
-- [ ] 9.14a: `dispatch_subagent` tool in Brain toolset (scope, 3 checks, budget, model)
-- [ ] 9.14a: sub-agent checks-based output schema (`checks`, `findings`, `unexpected_observations`)
-- [ ] 9.14a: sub-agent skill enforcing the check contract + verify-existence rule
-- [ ] 9.14a: side-by-side eval vs fixed swarm on 12 requests + Greptile sentry subset
-- [ ] 9.14b: Brain meta-skill rewrite (Survey→Plan→Execute→Replan→Synthesize)
-- [ ] 9.14b: hard invariants enforced in code (min correctness, trigger patterns, max 8)
-- [ ] 9.14b: `config/agents/*.md` header update — marked as reference-only
-- [ ] 9.14b: eval — composite + severity_accuracy + token cost vs fixed swarm baseline
+*Checkpoint A — Sprint 16/17: primitive + checks contract, lands alongside fixed swarm*
+- `dispatch_subagent` tool added to Brain toolset
+- New sub-agent skill `pr_subagent_checks` enforces the new output schema
+- Severity-classification logic added to Brain's synthesize step, gated on new schema
+- **Old fixed swarm untouched** — still callable via `dispatch_agent`, still returns severity itself
+- Eval: side-by-side `dispatch_subagent` vs fixed swarm on 12 requests + Greptile sentry subset. Brain-driven severity classification validated against existing severity judgments.
+
+*Checkpoint B — Sprint 18: switch default, retire fixed swarm*
+- Brain meta-skill (`pr_brain_coordinator.md`) enabled — Brain plans dispatches itself
+- `config/agents/*.md` get a "reference material" banner at the top
+- Fixed swarm → fallback only (wrapped with a deprecation warning)
+- Arbitrator role folded into Brain's synthesize phase; standalone arbitrator prompt retired
+- Eval: composite, severity_accuracy, token cost, catch rate all compared against Checkpoint A baseline
+
+- [ ] **Checkpoint A**: `dispatch_subagent` tool in Brain toolset (scope, 3 checks, success_criteria, budget, model)
+- [ ] **Checkpoint A**: sub-agent checks-based output schema + `pr_subagent_checks` skill
+- [ ] **Checkpoint A**: Brain synthesize gains severity-classification path for new schema
+- [ ] **Checkpoint A**: verify-existence rule wired into sub-agent skill
+- [ ] **Checkpoint A**: side-by-side eval vs fixed swarm (12 requests + Greptile sentry subset)
+- [ ] **Checkpoint B**: Brain meta-skill (`pr_brain_coordinator.md`) becomes default system prompt
+- [ ] **Checkpoint B**: hard invariants enforced in code (min correctness, trigger patterns, max 8 dispatches, max depth 2)
+- [ ] **Checkpoint B**: `config/agents/*.md` get reference-only header
+- [ ] **Checkpoint B**: legacy arbitrator retired, merged into synthesize
+- [ ] **Checkpoint B**: final eval — composite, severity_accuracy, judge avg, token cost vs Checkpoint A baseline
+
+**Dependencies**:
+- **9.15 Fact Vault** — sub-agents need shared short-term memory (a correctness investigation on `foo.py:120-150` should reuse facts that another sub-agent's grep already produced).
+- **9.16 Forked Agent Pattern** — Checkpoint B's merged arbitrator forks strong-model verifiers for weak-evidence findings. Without forking, each verifier pays a full fresh-dispatch prompt cache write.
 
 **Validation milestones**:
-- Post-Sprint 15: token cost/review ~50% on 12 requests cases
-- Post-Sprint 16: `dispatch_subagent` works end-to-end, no composite regression
-- Post-Sprint 17: severity_accuracy 0.583 → 0.75+, judge avg 2.2 → 3.0+
-- Post-Sprint 18: dynamic composition matches fixed swarm on composite, token cost further −30%+
+- Post-Checkpoint A: `dispatch_subagent` works end-to-end; Brain severity classification matches or exceeds fixed-swarm severity_accuracy on 12 requests cases
+- Post-Checkpoint B: composite within ±1pp of Checkpoint A; severity_accuracy 0.583 → 0.75+; judge avg 2.2 → 3.0+; token cost −30%+ vs fixed swarm
+
+### 9.15 Short-Term Memory — Fact Vault (PLANNED)
+
+**Problem observed (sentry-006)**: when PR Brain dispatches 7 parallel sub-agents, each that independently calls `get_dependencies` triggers its own `_ensure_graph` build on a 17K-file repo. Seven concurrent tree-sitter scans burn ~7× the CPU and budget, and the first finished write overwrites the others. Our module-level `_graph_cache` (tools.py:2113) is shared but has no in-flight coordination — every cold miss stampedes.
+
+Beyond this specific bug, sub-agents routinely re-run identical `grep`/`read_file`/`find_symbol` queries that other agents answered seconds earlier. No facts are shared across dispatches.
+
+**Solution — a task-scoped Fact Vault**:
+- **Storage**: SQLite in `~/.conductor/scratchpad/{session_id}.sqlite`, created at PR-review start and deleted at end. WAL mode for concurrent writes.
+- **Canonical keys** with schema version prefix:
+  ```
+  v1:grep:<pattern>:<path>:<glob>:<type>
+  v1:read_file:<path>:<start>:<end>
+  v1:find_symbol:<symbol>:<path_prefix>
+  v1:ensure_graph:<workspace>          ← singleton per workspace
+  ```
+- **Range-intersection lookup** for line-range tools (request 101–130 hits cached 100–150 and slices).
+- **Negative cache** table — "symbol X was verified NOT to exist" prevents Haiku from re-hallucinating on the same phantom symbol (pairs with 9.13 Checkpoint B's verify-existence rule).
+- **In-flight dedup**: when N concurrent callers miss cache on the same expensive key, N-1 block on a `threading.Event` while the leader computes. Coalesces 7 `_ensure_graph` builds into 1.
+- **Compressed content**: zlib on the BLOB column (~3–5× on read_file output).
+- **INDEX dump**: CLI `python -m app.scratchpad dump <session>` renders SQLite → paper-style markdown for human inspection.
+- **Digest injection** into sub-agent prompts: each dispatch sees a 500-token INDEX summary with fact keys, can pull full content via a `search_facts(key)` tool.
+
+**Why not semantic / vector search**: exact-key + range-intersection covers 90%+ of the "did anyone run this" lookups and is O(log n) via SQLite B-tree. Semantic retrieval adds latency and failure modes without measurable accuracy gain for PR review at our scale (50 cases, 7 agents).
+
+**Why not a dedicated "librarian" sub-agent**: per Claude Code's design — persistent agents are only worth it when they need identity across turns. Memory work is stateless; a service function library is cheaper. (If we later need relevance judgment that requires LLM reasoning, follow Claude Code's `sideQuery` pattern: an inline call, not a standing agent.)
+
+- [ ] `backend/app/scratchpad/` package: `store.py` (SQLite facade), `inflight.py` (per-key thread lock), `keys.py` (canonical key builders)
+- [ ] Migrate `_ensure_graph` to use inflight dedup — single biggest win
+- [ ] Wrap `execute_tool` with `CachedToolExecutor` so `grep`/`read_file`/`find_symbol` transparently consult the vault before running
+- [ ] `search_facts(key)` tool exposed to sub-agents for explicit cross-agent knowledge queries
+- [ ] `INDEX.md` renderer (`python -m app.scratchpad dump`)
+- [ ] Session lifecycle: create at PR-review start, cleanup at `synthesize()` done; cron-style sweep of abandoned sessions > 24h old
+- [ ] Eval: re-run sentry-006 and compare wall-clock (target: 50min → 10min) and token usage
+
+**Dependency**: precedes 9.13 Checkpoint A. Task-based sub-agent dispatch becomes dramatically cheaper when facts are shared across investigations.
+
+### 9.16 Forked Agent Pattern (PLANNED)
+
+**Claude Code pattern** (`reference/claude-code/utils/forkedAgent.ts`): when a workflow needs a short-lived worker for a narrow task — verification, extraction, consolidation — the main agent forks itself rather than spawning a fresh sub-agent. The fork inherits the parent's prompt cache, so the expensive 15K-token system prompt costs nothing to initialise. The fork runs the narrow task, returns its answer, then is discarded.
+
+**Fit for our pipeline** (first consumer: 9.13 Checkpoint B):
+- **Arbitration verifier**: when 9.13 Checkpoint B's merged arbitration flags a finding whose evidence is ambiguous, Brain forks a strong-model verifier to re-check file:line. Forked agent shares Brain's cached review context, so the verifier's incremental cost is marginal.
+- **Symbol existence check**: 9.13's verify-existence rule (in the sub-agent skill) could be promoted from "sub-agent does it inline" to "Brain forks a cheap verifier when confidence < threshold" — forked agent answers "does symbol X exist" in one call.
+- **Future consumers**: 9.17 lifecycle hooks (consolidator at `on_synthesize_complete`), any narrow-task worker that benefits from parent cache reuse.
+
+**Why not "just dispatch another sub-agent"**: a fresh dispatch pays the full system-prompt cache-write again (~10–15K tokens). A fork reuses the parent's cached prefix — per-call cost ~10% of a fresh dispatch.
+
+- [ ] `app/agent_loop/forked.py` — `fork_and_run(parent_brain, task_prompt, allowed_tools, budget)` primitive that inherits the parent's cached messages prefix
+- [ ] Integrate into Brain's arbitration phase — forked verifier triggered when finding confidence < 0.6 or evidence is thin
+- [ ] Permission scoping: forked agents restricted to read-only tools (no file_edit, no dispatch_subagent recursion)
+- [ ] Eval: measure verifier-call cost vs fresh dispatch on 12 requests cases
+- [ ] Safety: max fork depth = 1 from any parent (prevents runaway trees)
+
+### 9.17 Brain Lifecycle Hooks (PLANNED)
+
+**Claude Code pattern**: `handleStopHooks()` fires ephemeral forked agents at turn-end (e.g., `extractMemories` runs at end of every turn; `autoDream` consolidates at 24h + 5-session boundaries).
+
+**Fit for our pipeline**: the PR Brain's 5-step loop has natural hook points that third-party (or our own) extensions could plug into without modifying the core synthesis path.
+
+Proposed hook points:
+- `on_survey_complete` — after Brain's initial diff read, before planning. Good place for risk-classifier plugins.
+- `on_dispatch_complete` — after all sub-agents return, before arbitration. Good for cross-agent statistics / anomaly detection.
+- `on_synthesize_complete` — after final markdown is ready. Good for:
+  - Scratchpad consolidation (extract reusable learnings → long-term memory, Phase 9.15 long-term extension)
+  - Session cleanup (scratchpad SQLite delete, workspace unlink)
+  - Metrics export (Langfuse event, session trace summary)
+- `on_task_end` — terminal hook, guaranteed to fire even on error.
+
+- [ ] `app/agent_loop/lifecycle.py` — hook registry + fire-and-forget executor
+- [ ] Refactor `PRBrainOrchestrator` to emit lifecycle events at the 4 hook points
+- [ ] Cleanup hook for 9.15 scratchpad (delete session SQLite)
+- [ ] Consolidation hook slot wired for future 9.15-long-term extension
+- [ ] Error safety: hook failures logged but don't crash the Brain
+
+### Revised implementation sequence
+
+```
+Sprint 15: 9.11 + 9.12 (cheaper tokens — merged)
+Sprint 16: 9.15 — Short-Term Memory / Fact Vault (unblocks 9.14a)
+           9.14a — dispatch_subagent primitive (depends on vault)
+Sprint 17: 9.13 — PR Brain v2 severity centralization + merged arbitration
+           9.16 — Forked agent pattern (powers arbitration verifiers)
+Sprint 18: 9.14b — Brain meta-skill rewrite, dynamic composition default
+           9.17 — Brain lifecycle hooks (on_task_end et al.)
+```
+
+### 9.18 Workspace Scan Hardening (PLANNED)
+
+**Observed in sentry-007 diagnostic (2026-04-18)**: `_scan_workspace` spent **24 minutes** on a 14.5K-file sentry snapshot because 4 TSX files in `static/app/views/performance/newTraceDetails/` and `static/app/views/settings/organizationTeams/` took **200–530 seconds EACH** to parse. Tree-sitter's GLR parser exponentially explodes on deeply nested JSX (13+ levels) combined with TypeScript generic type params sharing the `<` token — a known pathological pattern in older tree-sitter-typescript grammar versions.
+
+The 30-min bottleneck wasn't the file count (other 14,540 files parsed at ~40ms each, ~10 min cumulative), it was 4 specific files each consuming 3–9 minutes of single-threaded CPU. In-flight dedup from 9.15 doesn't help — the Brain's Phase 1 build is sequential, so there's only one caller per case.
+
+Scope of the hardening:
+
+1. **Per-file parse timeout (30s) with skip caching**
+   - `signal.alarm()` (single-process path) or `future.result(timeout=30)` (parallel path)
+   - Timed-out files get recorded in Fact Vault as `skip_facts` (negative fact variant)
+   - Every subsequent tool that would touch the file (`file_outline`, `get_dependencies`, `read_file`) checks the skip list first and short-circuits with the cached reason
+   - Skip is **task-scoped** (per PR review session, not persistent)
+
+2. **Parallelize `_scan_workspace` via `ProcessPoolExecutor`**
+   - Tree-sitter's Python binding does NOT release the GIL on parse and Parser objects are not thread-safe — process-level parallelism is the correct axis
+   - Each worker gets its own Parser cache, sends back serialised `FileSymbols` dataclasses
+   - `max_workers = os.cpu_count()` with 30s per-future timeout
+   - Expected speedup on 8-core: 14K files at 40ms avg drops from ~9.3 min → ~70s; pathological files capped at 30s each (run in parallel) + rest → total scan ~1.5 min in sentry-007-scale
+
+   **Secondary motivation — zombie thread elimination**:
+   When a Brain sub-agent times out at `sub_agent_timeout` (600s+), the agent's awaitable is cancelled at the Python level but the underlying tool-call worker in our `ThreadPoolExecutor` cannot be interrupted — Python threads cannot be force-killed, and tree-sitter's C-level `parser.parse()` is an atomic call that never yields the GIL or checks for cancellation. Observed in sentry-007 diagnostic run: at 42 minutes elapsed, two sub-agents had already timed out 15+ minutes prior, yet their `find_symbol` → `_get_symbol_index` → `_extract_with_tree_sitter` worker threads were still visible under py-spy, holding 100% CPU and delaying the arbitrator's Bedrock call. Switching to `ProcessPoolExecutor` lets us send `SIGKILL` to the subprocess on timeout — the **only Python-standard way to actually stop an in-flight C extension**. Memory is reclaimed cleanly, GIL contention disappears, and the budget stops burning on discarded work. This matters as much as the raw speed-up.
+
+   **Layered mitigation before the ProcessPool lands** (since the switch is non-trivial):
+   - **Immediate quick win**: track each agent's pending `Future` objects; on agent timeout, call `.cancel()` on them — prevents **new** zombie work from being dispatched (futures not yet started cancel cleanly). Doesn't kill in-flight workers.
+   - **Sprint 16 (item 1 above)**: `signal.alarm()` per-file 30s ceiling in the single-process scan path — bounds each zombie worker's wasted work to 30s per pathological file.
+   - **Sprint 17 (this item)**: full `ProcessPoolExecutor` with `SIGKILL` on timeout — zombie elimination.
+
+3. **Tree-sitter version bump — requires full parity & regression validation**
+   - Current `tree-sitter` shows `Language(path, name) is deprecated` warning → bundled grammars are stale
+   - Upgrade `tree-sitter` and `tree-sitter-languages` (or migrate to `tree-sitter-language-pack`)
+   - Rerun sentry-007 to measure whether newer tree-sitter-typescript grammar fixes the TSX GLR blow-up
+   - **Risk**: newer grammar versions may produce different node types, different child ordering, or renamed fields. The Python `_walk_for_definitions` / `_walk_for_references` walkers key off exact node type names (`function_definition`, `class_declaration`, …) — any grammar churn on these names changes extraction output.
+   - **Mandatory validation before merging the bump**:
+     - `make test` must pass (178 symbol-extraction + repo-graph tests in `backend/tests/test_repo_graph.py` and siblings)
+     - `make test-parity` must pass (Python tools' tree-sitter output must byte-match the TypeScript extension's runner — the contract `backend/tests/test_tool_parity_ast.py` + `test_tool_parity_deep.py` enforces)
+     - Eval regression: rerun 12 requests cases — composite must not drop > 2 pp vs current baseline
+     - Canary run on abound-server: `find_symbol` / `file_outline` / `get_dependencies` outputs should match pre-bump for a sampled set of files
+   - **TS-side implications**: the extension's `astToolRunner.ts` uses its own tree-sitter through `web-tree-sitter` (separate npm package) — a Python tree-sitter bump does NOT automatically upgrade the TS side. Parity tests will catch divergence, but co-ordinated bumps in both language runtimes are the only path to keep parity green long-term.
+
+4. **TSX regex fallback trigger**
+   - If a TSX file has > N nested JSX levels (quick heuristic pre-scan) → route to `_extract_with_regex` directly, skip tree-sitter
+   - Belt-and-suspenders for residual pathological cases after (1)+(3)
+
+- [ ] `_extract_with_tree_sitter` wrapped with per-file time budget (30s default, `CONDUCTOR_PARSE_TIMEOUT_S` env override)
+- [ ] Skip facts recorded to Fact Vault (9.15 prerequisite); all file-touching tools check skip list pre-execution
+- [ ] `_scan_workspace` migrated to ProcessPoolExecutor; results merged back into the returned dict
+- [ ] Dependencies: upgrade `tree-sitter` + grammar provider — **gated on full test suite + parity + eval regression (see item 3 above)**
+- [ ] Co-ordinate TS-side tree-sitter bump in `extension/src/services/astToolRunner.ts` so `make test-parity` stays green
+- [ ] TSX JSX-depth heuristic → regex fallback when above threshold
+- [ ] Agent-timeout zombie mitigation — quick win before ProcessPool lands: track per-agent pending `Future` objects and `.cancel()` them when the agent times out (cancels unstarted work; logs a warning for in-flight workers that can't be killed until item 2 ships)
+- [ ] `_get_symbol_index` protected by `scratchpad.key_lock` (second tree-sitter scan entry point discovered in sentry-007 diagnostic — same stampede shape as `_ensure_graph`, same fix)
+- [ ] Eval: rerun sentry-007, target scan < 2 min (from 24 min)
+- [ ] Eval: rerun 12 requests cases — composite change must be within ±2 pp
+
+**Dependency**: 9.15 (skip list lives in Fact Vault). Slots into Sprint 16/17. The tree-sitter bump is the highest-risk subitem and should ship on its own PR with parity + eval numbers in the description, separate from the timeout / parallelization work (which are safe incremental changes).
 
 ### Reference Study Process
 For each sub-phase:
@@ -1579,10 +1717,15 @@ Bridge the gap between AI Summaries and actionable outcomes. Applies to both Ext
 | Phase 8.6: 美学 UI/UX Overhaul (A-G) | ✅ Complete | Sprint 13 |
 | Phase 8.6H: Interaction Expansion 交互性拓展 | 🟡 Planned | — |
 | Phase 9: Claude Code Pattern Adoption + Competitive Analysis | 🟢 In Progress | Sprint 13+ (ongoing) |
-| **Phase 9.11/9.12: Prompt Caching + Diff Sharding** | **🟡 Planned** | **Sprint 15** |
-| **Phase 9.14a: `dispatch_subagent` primitive** | **🟡 Planned** | **Sprint 16** |
-| **Phase 9.13: PR Brain v2 — Severity Centralization** | **🟡 Planned** | **Sprint 17** |
-| **Phase 9.14b: Dynamic Agent Composition (default)** | **🟡 Planned** | **Sprint 18** |
+| **Phase 9.11/9.12: Prompt Caching + Diff Sharding** | **✅ Complete** | **Sprint 15** |
+| **Phase 9.15 MVP: `_ensure_graph` in-flight dedup** | **🟢 Partial** | **Sprint 15** |
+| **Phase 9.18 MVP: scan diagnostic logging** | **🟢 Partial** | **Sprint 15** |
+| **Phase 9.15 full: Fact Vault (SQLite + caching)** | **🟡 Planned** | **Sprint 16** |
+| **Phase 9.18 full: Scan Hardening (timeout + ProcessPool)** | **🟡 Planned** | **Sprint 16–17** |
+| **Phase 9.13 Checkpoint A: `dispatch_subagent` + checks contract** | **🟡 Planned** | **Sprint 16–17** |
+| **Phase 9.16: Forked Agent Pattern** | **🟡 Planned** | **Sprint 17** |
+| **Phase 9.13 Checkpoint B: dynamic composition default** | **🟡 Planned** | **Sprint 18** |
+| **Phase 9.17: Brain Lifecycle Hooks** | **🟡 Planned** | **Sprint 18** |
 | Phase 10: Companion & Developer Experience | 🟡 Planned | — |
 | Phase 11: Engineering Infrastructure | 🟡 Planned | — |
 | **Phase 12: Team Knowledge Base** | **🔴 Next Up** | **Sprint 14–15** |
