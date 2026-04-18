@@ -1293,6 +1293,59 @@ Phase 4: Brain final verdict — sees all findings + per-dimension arbitration
 - [ ] Brain synthesis assigns severity AFTER seeing arbitration verdicts + dimension context
 - [ ] Eval: compare severity_accuracy before/after on 12 requests cases + Greptile cases
 
+### 9.14 Dynamic Sub-Agent Composition (PLANNED)
+
+**Thesis**: The PR Brain stops being a deterministic pipeline that dispatches a fixed 7-agent swarm. It becomes a coordinator that **surveys the PR, decomposes into concrete investigations, composes each sub-agent's prompt per-task, and replans based on findings**. Sub-agents become execution units (Haiku) answering narrow checks with evidence. Brain (Sonnet/Opus) does all reasoning, classification, and synthesis. Inspired by Claude Code's coordinator→worker→coordinator pattern.
+
+**Why the current design is wrong**: a Haiku sub-agent given a role-shaped task ("correctness-review this PR") burns its 200K context re-deciding what to look at, then returns shallow findings. Brain has the richest context and must be the one deciding what needs verification.
+
+**5-phase PR Brain loop** (replaces current 6-phase pipeline):
+
+1. **Survey** (≤100K tokens): Brain reads diff + uses read-only tools (`grep`, `find_symbol`, `read_file`, `file_outline`) to map change points + risk surface. For each change, asks: what's the intent, what class of failure if wrong, what assertions rule it out.
+2. **Plan**: decompose into concrete investigations. Each = one `dispatch_subagent` call with narrow scope (≤3 files) + **exactly 3 checks**. Multiple investigations on the same dimension are fine if change points are unrelated — prefer breadth over depth.
+3. **Execute**: parallel `dispatch_subagent(scope, checks, success_criteria, budget, model)`. Sub-agent returns verdicts (confirmed/violated/unclear) + optional `unexpected_observations`.
+4. **Replan** (≤2 rounds): act on `unclear` (dispatch strong-model follow-up) or `unexpected` (new investigation). Max 8 total dispatches across all rounds.
+5. **Synthesize**: Brain dedups, classifies severity using 2-question rubric, generates markdown. Optionally dispatches strong-model verifier to rebut weak findings.
+
+**Hard invariants** (prevent under-exploration):
+- ≥1 correctness investigation per PR
+- Auth/crypto/session diffs → mandatory security dispatch
+- DB migrations → mandatory reliability dispatch
+- Max 8 dispatches total, max 3 checks per dispatch
+
+**Sub-agent contract** (replaces today's role-shaped agents):
+- Input: scope + 3 checks + success_criteria + budget + model_tier
+- Output: `{checks: [{verdict, evidence}], findings: [...], unexpected_observations: [...]}`
+- Sub-agent NEVER classifies severity, NEVER investigates beyond scope
+- Applies verify-existence rule: check symbol/signature exists before flagging logic on it (addresses observed failure mode where agents flag hypothetical bugs on non-existent classes)
+
+**`config/agents/*.md` reposition**: from dispatch targets → reference material Brain studies for tone and evidence standards. Brain composes each investigation fresh rather than copying these broad framings.
+
+**Implementation sequence** (reorders earlier sprint plan to respect dependencies):
+```
+Sprint 15: 9.11 + 9.12 (infrastructure — cheaper tokens; prerequisite)
+Sprint 16: 9.14a — `dispatch_subagent` primitive lands alongside fixed swarm
+Sprint 17: 9.13 — severity back to Brain; merged arbitration uses
+                  9.14a to dispatch strong-model verifiers during arbitration
+Sprint 18: 9.14b — Brain meta-skill rewrite; dynamic composition default;
+                   fixed swarm → fallback only
+```
+
+- [ ] 9.14a: `dispatch_subagent` tool in Brain toolset (scope, 3 checks, budget, model)
+- [ ] 9.14a: sub-agent checks-based output schema (`checks`, `findings`, `unexpected_observations`)
+- [ ] 9.14a: sub-agent skill enforcing the check contract + verify-existence rule
+- [ ] 9.14a: side-by-side eval vs fixed swarm on 12 requests + Greptile sentry subset
+- [ ] 9.14b: Brain meta-skill rewrite (Survey→Plan→Execute→Replan→Synthesize)
+- [ ] 9.14b: hard invariants enforced in code (min correctness, trigger patterns, max 8)
+- [ ] 9.14b: `config/agents/*.md` header update — marked as reference-only
+- [ ] 9.14b: eval — composite + severity_accuracy + token cost vs fixed swarm baseline
+
+**Validation milestones**:
+- Post-Sprint 15: token cost/review ~50% on 12 requests cases
+- Post-Sprint 16: `dispatch_subagent` works end-to-end, no composite regression
+- Post-Sprint 17: severity_accuracy 0.583 → 0.75+, judge avg 2.2 → 3.0+
+- Post-Sprint 18: dynamic composition matches fixed swarm on composite, token cost further −30%+
+
 ### Reference Study Process
 For each sub-phase:
 1. **Read** the reference files listed above (deep study, not skim)
@@ -1526,7 +1579,10 @@ Bridge the gap between AI Summaries and actionable outcomes. Applies to both Ext
 | Phase 8.6: 美学 UI/UX Overhaul (A-G) | ✅ Complete | Sprint 13 |
 | Phase 8.6H: Interaction Expansion 交互性拓展 | 🟡 Planned | — |
 | Phase 9: Claude Code Pattern Adoption + Competitive Analysis | 🟢 In Progress | Sprint 13+ (ongoing) |
-| **Phase 9.10: PR Brain v2 — Detect/Classify Separation** | **🟡 Planned** | **Sprint 17** |
+| **Phase 9.11/9.12: Prompt Caching + Diff Sharding** | **🟡 Planned** | **Sprint 15** |
+| **Phase 9.14a: `dispatch_subagent` primitive** | **🟡 Planned** | **Sprint 16** |
+| **Phase 9.13: PR Brain v2 — Severity Centralization** | **🟡 Planned** | **Sprint 17** |
+| **Phase 9.14b: Dynamic Agent Composition (default)** | **🟡 Planned** | **Sprint 18** |
 | Phase 10: Companion & Developer Experience | 🟡 Planned | — |
 | Phase 11: Engineering Infrastructure | 🟡 Planned | — |
 | **Phase 12: Team Knowledge Base** | **🔴 Next Up** | **Sprint 14–15** |

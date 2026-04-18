@@ -7,14 +7,19 @@ against required findings defined in the baseline JSON files.
 Usage:
     cd /home/kalok/conductor/backend
 
-    # Run all baselines (direct agent only, ~30s per case)
+    # Run all baselines (direct agent, default sonnet)
     python ../eval/agent_quality/run_bedrock.py
 
     # Run a specific baseline
     python ../eval/agent_quality/run_bedrock.py --case abound_render_approval
 
-    # Run with the Brain orchestrator (multi-agent)
-    python ../eval/agent_quality/run_bedrock.py --brain
+    # Run with the Brain orchestrator (sonnet for both roles)
+    python ../eval/agent_quality/run_bedrock.py --brain --sonnet
+
+    # Brain with tiered split (highest = brain, lowest = sub-agent)
+    python ../eval/agent_quality/run_bedrock.py --brain --sonnet --haiku  # brain=sonnet, explorer=haiku
+    python ../eval/agent_quality/run_bedrock.py --brain --opus --sonnet   # brain=opus,   explorer=sonnet
+    python ../eval/agent_quality/run_bedrock.py --brain --opus --haiku    # brain=opus,   explorer=haiku
 
     # Compare direct agent vs Brain
     python ../eval/agent_quality/run_bedrock.py --compare
@@ -266,34 +271,58 @@ def print_report(case_id: str, mode: str, run_result: dict, scoring: dict):
     print(f"\n  Answer: {preview}...")
 
 
+# Model registry: name → (bedrock inference profile id, tier rank).
+# Higher rank = stronger model. When multiple --opus/--sonnet/--haiku
+# flags are combined, the highest-tier becomes the Brain/judge and the
+# lowest-tier becomes the explorer/sub-agent. Single flag uses that
+# model for both roles.
+_MODELS = {
+    "opus": ("eu.anthropic.claude-opus-4-7", 2),
+    "sonnet": ("eu.anthropic.claude-sonnet-4-6", 1),
+    "haiku": ("eu.anthropic.claude-haiku-4-5-20251001-v1:0", 0),
+}
+
+
 async def main():
-    parser = argparse.ArgumentParser(description="Agent quality evaluation")
+    parser = argparse.ArgumentParser(
+        description="Agent quality evaluation",
+        epilog=(
+            "Model tier flags are composable. The highest-tier flag is used as "
+            "the Brain/judge, the lowest-tier as the explorer/sub-agent. "
+            "Examples: --sonnet --haiku  (brain=sonnet, subagent=haiku); "
+            "--opus --sonnet  (brain=opus, subagent=sonnet); "
+            "--sonnet  (both roles use sonnet)."
+        ),
+    )
     parser.add_argument("--case", help="Run specific baseline case ID")
     parser.add_argument("--brain", action="store_true", help="Use Brain orchestrator")
     parser.add_argument("--compare", action="store_true", help="Run both direct and Brain")
-    parser.add_argument("--haiku", action="store_true", help="Use Haiku as explorer, Sonnet as judge")
-    parser.add_argument("--opus", action="store_true", help="Use Sonnet as explorer, Opus as judge (premium tier)")
+    parser.add_argument("--opus", action="store_true", help="Include Opus 4.7 in selection")
+    parser.add_argument("--sonnet", action="store_true", help="Include Sonnet 4.6 in selection")
+    parser.add_argument("--haiku", action="store_true", help="Include Haiku 4.5 in selection")
     args = parser.parse_args()
 
-    if args.haiku and args.opus:
-        logger.error("--haiku and --opus are mutually exclusive")
-        sys.exit(2)
+    selected = [name for name in ("opus", "sonnet", "haiku") if getattr(args, name)]
+    if not selected:
+        selected = ["sonnet"]  # default: sonnet for both roles
+
+    # Sort by tier descending → brain first, subagent last
+    selected.sort(key=lambda name: -_MODELS[name][1])
+    brain_name = selected[0]
+    subagent_name = selected[-1]
 
     baselines = load_baselines(args.case)
     if not baselines:
         logger.error("No baselines found in %s", BASELINE_DIR)
         sys.exit(1)
 
-    if args.opus:
-        provider = _create_provider("eu.anthropic.claude-opus-4-6-v1")
-        explorer_provider = _create_provider("eu.anthropic.claude-sonnet-4-6")
-        logger.info("Premium mode: explorer=sonnet-4-6, judge=opus-4-6")
-    else:
-        provider = _create_provider("eu.anthropic.claude-sonnet-4-6")
+    provider = _create_provider(_MODELS[brain_name][0])
+    if subagent_name == brain_name:
         explorer_provider = None
-        if args.haiku:
-            explorer_provider = _create_provider("eu.anthropic.claude-haiku-4-5-20251001-v1:0")
-            logger.info("Workflow mode: explorer=haiku-4-5, judge=sonnet-4-6")
+        logger.info("Mode: brain=%s (explorer falls back to brain)", brain_name)
+    else:
+        explorer_provider = _create_provider(_MODELS[subagent_name][0])
+        logger.info("Mode: brain=%s, explorer=%s", brain_name, subagent_name)
     all_results = {}
 
     for baseline in baselines:
@@ -321,12 +350,10 @@ async def main():
                 label = mode
             else:
                 run_result = await run_brain(provider, workspace, question, explorer_provider=explorer_provider)
-                if args.opus:
-                    label = f"{mode} [sonnet→opus]"
-                elif args.haiku:
-                    label = f"{mode} [haiku→sonnet]"
+                if subagent_name != brain_name:
+                    label = f"{mode} [{subagent_name}→{brain_name}]"
                 else:
-                    label = mode
+                    label = f"{mode} [{brain_name}]"
 
             scoring = score_answer(run_result["answer"], required)
             print_report(case_id, label, run_result, scoring)

@@ -153,11 +153,11 @@ ai_models:
     enabled: true
     explorer: true    # fallback explorer when Haiku is unavailable
 
-  # Opus: premium brain only — too expensive for sub-agent ($15/1M in, $75/1M out)
-  - id: "claude-opus-4-6-bedrock"
+  # Opus 4.7: premium brain — top reasoning ($15/1M in, $75/1M out)
+  - id: "claude-opus-4-7-bedrock"
     provider: "aws_bedrock"
-    model_name: "eu.anthropic.claude-opus-4-6-v1"
-    display_name: "Claude Opus 4.6 (Bedrock EU)"
+    model_name: "eu.anthropic.claude-opus-4-7"
+    display_name: "Claude Opus 4.7 (Bedrock EU)"
     enabled: true
     # NOT explorer — reserved for Brain/PR review synthesis
 
@@ -402,3 +402,12 @@ jira:
   # Override in conductor.settings.local.yaml with:
   #   enabled: true, branch_formats, allowed_projects, teams
   # Secrets (client_id, client_secret) go in conductor.secrets.yaml
+
+teams:
+  # Microsoft Teams bot integration.
+  # Phase 1 (connectivity proof) does not require `enabled: true` — the router
+  # logs all incoming Activities unconditionally so we can observe payload shape.
+  # Phase 2 (AI replies + Graph API history reads) will gate on this flag.
+  # Credentials (app_id, app_password, app_tenant_id, app_type) live in
+  # conductor.secrets.yaml.
+  enabled: false

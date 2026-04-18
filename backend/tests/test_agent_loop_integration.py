@@ -18,6 +18,7 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import textwrap
 import time
 from dataclasses import dataclass, field
@@ -35,14 +36,37 @@ from app.code_tools.tools import invalidate_graph_cache
 # Helpers & multi-model support
 # ---------------------------------------------------------------------------
 
-# Known Bedrock cross-region inference profile IDs (eu-west-2)
-MODEL_SONNET = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
-MODEL_OPUS = "eu.anthropic.claude-opus-4-6-v1"
+# Known Bedrock cross-region inference profile IDs (eu-west-2).
+# Update these when Anthropic ships newer model versions.
+MODEL_OPUS = "eu.anthropic.claude-opus-4-7"
+MODEL_SONNET = "eu.anthropic.claude-sonnet-4-6"
+MODEL_HAIKU = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-# Which models to compare in multi-model tests (override via env)
-_COMPARE_MODELS: Dict[str, str] = {
-    "sonnet": MODEL_SONNET,
+_MODEL_ALIASES: Dict[str, str] = {
     "opus": MODEL_OPUS,
+    "sonnet": MODEL_SONNET,
+    "haiku": MODEL_HAIKU,
+}
+
+
+def _resolve_model(value: str) -> str:
+    """Accept either an alias (opus/sonnet/haiku) or a full inference profile ID."""
+    return _MODEL_ALIASES.get(value.strip().lower(), value.strip())
+
+
+# Brain + sub-agent model pair for integration tests. Override via env:
+#   CONDUCTOR_INTEGRATION_BRAIN_MODEL=opus pytest -m integration ...
+#   CONDUCTOR_INTEGRATION_SUBAGENT_MODEL=haiku pytest -m integration ...
+# Values accept aliases (opus/sonnet/haiku) or full inference profile IDs.
+BRAIN_MODEL = _resolve_model(os.getenv("CONDUCTOR_INTEGRATION_BRAIN_MODEL", "sonnet"))
+SUBAGENT_MODEL = _resolve_model(os.getenv("CONDUCTOR_INTEGRATION_SUBAGENT_MODEL", "haiku"))
+
+# Multi-model comparison set. Override via env (comma-separated aliases/IDs):
+#   CONDUCTOR_INTEGRATION_COMPARE_MODELS=sonnet,opus,haiku pytest -m integration ...
+_COMPARE_MODELS: Dict[str, str] = {
+    name.strip().lower(): _resolve_model(name)
+    for name in os.getenv("CONDUCTOR_INTEGRATION_COMPARE_MODELS", "sonnet,opus").split(",")
+    if name.strip()
 }
 
 
@@ -63,7 +87,7 @@ def _load_bedrock_credentials() -> Optional[dict]:
     return None
 
 
-def _make_provider(model_id: str = MODEL_SONNET) -> Optional[ClaudeBedrockProvider]:
+def _make_provider(model_id: str = BRAIN_MODEL) -> Optional[ClaudeBedrockProvider]:
     """Create a real Bedrock provider from secrets, or None if unavailable."""
     creds = _load_bedrock_credentials()
     if not creds:
@@ -1160,17 +1184,18 @@ async def _run_agent(
 @pytest.mark.integration
 @_skip_no_creds
 class TestHighLevelQueryIntegration:
-    """Integration tests for high-level queries using a real LLM (Sonnet).
+    """Integration tests for high-level queries using a real LLM (``BRAIN_MODEL``).
 
     These use the noisy 40+ file repo to validate the agent can find the
-    correct orchestration layer despite many decoy files.
+    correct orchestration layer despite many decoy files. Override the model
+    via ``CONDUCTOR_INTEGRATION_BRAIN_MODEL`` (alias or full inference profile ID).
     """
 
     @pytest.mark.asyncio
     async def test_loan_journey_steps(self, loan_journey_repo: Path):
         """The agent should correctly identify ALL 5 steps despite 40+ noise files."""
         r = await _run_agent(
-            MODEL_SONNET,
+            BRAIN_MODEL,
             "What are the steps in the loan application journey? List all steps in order.",
             str(loan_journey_repo),
         )
@@ -1188,7 +1213,7 @@ class TestHighLevelQueryIntegration:
     async def test_architecture_overview(self, loan_journey_repo: Path):
         """The agent should describe the architecture from a brief README."""
         r = await _run_agent(
-            MODEL_SONNET,
+            BRAIN_MODEL,
             "Describe the architecture of this system. What are the main modules?",
             str(loan_journey_repo),
         )
@@ -1209,7 +1234,7 @@ class TestHighLevelQueryIntegration:
         The agent must still discover the orchestration layer from context.
         """
         r = await _run_agent(
-            MODEL_SONNET,
+            BRAIN_MODEL,
             "How does a loan application get processed from start to finish in this system?",
             str(loan_journey_repo),
         )
@@ -1227,7 +1252,7 @@ class TestHighLevelQueryIntegration:
     async def test_decoy_resistance(self, loan_journey_repo: Path):
         """Agent should NOT confuse the notification flow or legacy journey with the real one."""
         r = await _run_agent(
-            MODEL_SONNET,
+            BRAIN_MODEL,
             "What are the steps in the loan journey? Don't include deprecated or notification steps.",
             str(loan_journey_repo),
         )

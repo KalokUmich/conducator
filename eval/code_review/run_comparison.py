@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Run 3 rounds of Legacy vs Brain eval and print comparison table."""
+"""Run 3 rounds of Legacy vs Brain eval and print comparison table.
+
+Model tier flags are composable. The highest-tier flag becomes the
+Brain/judge and the lowest-tier becomes the explorer/sub-agent. A single
+flag uses that model for both roles.
+
+Examples:
+    python run_comparison.py                    # default: sonnet brain + haiku explorer
+    python run_comparison.py --sonnet --haiku   # explicit default
+    python run_comparison.py --opus --sonnet    # opus brain + sonnet explorer
+    python run_comparison.py --opus --haiku     # opus brain + haiku explorer
+    python run_comparison.py --sonnet           # sonnet for both roles
+"""
+import argparse
 import asyncio
 import json
 import os
@@ -29,14 +42,51 @@ from scorer import score_case
 
 from app.ai_provider.claude_bedrock import ClaudeBedrockProvider
 
+# Model registry: name → (bedrock inference profile id, tier rank).
+# Higher rank = stronger model.
+_MODELS = {
+    "opus": ("eu.anthropic.claude-opus-4-7", 2),
+    "sonnet": ("eu.anthropic.claude-sonnet-4-6", 1),
+    "haiku": ("eu.anthropic.claude-haiku-4-5-20251001-v1:0", 0),
+}
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Legacy vs Brain PR review eval (3 rounds × 12 cases)",
+        epilog=(
+            "Model tier flags are composable: highest tier = Brain/judge, "
+            "lowest tier = explorer/sub-agent. Default is --sonnet --haiku."
+        ),
+    )
+    parser.add_argument("--opus", action="store_true", help="Include Opus 4.7 in selection")
+    parser.add_argument("--sonnet", action="store_true", help="Include Sonnet 4.6 in selection")
+    parser.add_argument("--haiku", action="store_true", help="Include Haiku 4.5 in selection")
+    return parser.parse_args()
+
+
+_args = _parse_args()
+_selected = [name for name in ("opus", "sonnet", "haiku") if getattr(_args, name)]
+if not _selected:
+    _selected = ["sonnet", "haiku"]  # default: sonnet brain + haiku explorer
+
+_selected.sort(key=lambda name: -_MODELS[name][1])  # brain first, subagent last
+BRAIN_NAME = _selected[0]
+SUBAGENT_NAME = _selected[-1]
+
 kw = dict(
     aws_access_key_id=creds["access_key_id"],
     aws_secret_access_key=creds["secret_access_key"],
     aws_session_token=creds["session_token"],
     region_name=creds["region"],
 )
-sonnet = ClaudeBedrockProvider(model_id="eu.anthropic.claude-sonnet-4-6", **kw)
-haiku = ClaudeBedrockProvider(model_id="eu.anthropic.claude-haiku-4-5-20251001-v1:0", **kw)
+brain_provider = ClaudeBedrockProvider(model_id=_MODELS[BRAIN_NAME][0], **kw)
+if SUBAGENT_NAME == BRAIN_NAME:
+    subagent_provider = brain_provider
+    print(f"Mode: brain={BRAIN_NAME} (explorer shares brain provider)")
+else:
+    subagent_provider = ClaudeBedrockProvider(model_id=_MODELS[SUBAGENT_NAME][0], **kw)
+    print(f"Mode: brain={BRAIN_NAME}, explorer={SUBAGENT_NAME}")
 
 # Load cases
 cases_yaml = yaml.safe_load(open(str(_EVAL_DIR / "cases/requests/cases.yaml")))
@@ -62,9 +112,9 @@ async def run_one_round(mode: str, round_num: int) -> dict:
         print(f"{label}... ", end="", flush=True)
         try:
             if mode == "brain":
-                r = await run_case_brain(case, source_dir, patch_dir, sonnet, haiku)
+                r = await run_case_brain(case, source_dir, patch_dir, brain_provider, subagent_provider)
             else:
-                r = await run_case(case, source_dir, patch_dir, sonnet, haiku, max_agents=5)
+                r = await run_case(case, source_dir, patch_dir, brain_provider, subagent_provider, max_agents=5)
 
             if r.error:
                 print(f"ERROR")

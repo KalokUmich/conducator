@@ -16,8 +16,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Add backend/ to sys.path so we can import from backend
-_BACKEND_DIR = str(Path(__file__).resolve().parent.parent / "backend")
+# Add backend/ to sys.path so we can import from backend.
+# File is at eval/code_review/runner.py → 3 parents → repo root → backend/
+_BACKEND_DIR = str(Path(__file__).resolve().parent.parent.parent / "backend")
 if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
