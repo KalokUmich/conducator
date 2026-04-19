@@ -995,8 +995,11 @@ def find_symbol(
 
     results: List[Dict] = []
     name_lower = name.lower()
+    # Cache abs-path → degraded? decisions so each file is checked once.
+    degraded_cache: Dict[str, bool] = {}
 
     for rel, definitions in index.items():
+        is_degraded = _is_degraded_path(workspace, rel, degraded_cache)
         for defn in definitions:
             if name_lower not in defn.name.lower():
                 continue
@@ -1019,6 +1022,12 @@ def find_symbol(
                 signature=defn.signature,
             ).model_dump()
             d["role"] = role
+            if is_degraded:
+                # Agent hint: this file's symbol data came from the
+                # regex fallback because tree-sitter timed out. Nested
+                # defs / arrow functions / JSX may be missing. Tool
+                # description tells the agent to grep those files.
+                d["extracted_via"] = "regex"
             results.append(d)
 
     # Sort: role priority first, then exact match before substring match
@@ -1029,14 +1038,43 @@ def find_symbol(
         )
     )
 
+    degraded_count = sum(1 for v in degraded_cache.values() if v)
     logger.info(
-        "find_symbol('%s'%s): %d results from %d indexed files",
+        "find_symbol('%s'%s): %d results from %d indexed files%s",
         name,
         f", kind={kind}" if kind else "",
         len(results),
         len(index),
+        f" ({degraded_count} regex-fallback)" if degraded_count else "",
     )
     return ToolResult(tool_name="find_symbol", data=results)
+
+
+def _is_degraded_path(
+    workspace: str, rel_path: str, cache: Dict[str, bool]
+) -> bool:
+    """True if the given file is on the session's tree-sitter skip list.
+
+    Used by AST tools to tag individual results with ``extracted_via:
+    "regex"`` so the agent can route structural queries about those
+    paths to grep / read_file. Best-effort: no vault bound → always
+    False; any exception → False. Cache keyed on ``rel_path`` so each
+    file is only checked once per tool call.
+    """
+    if rel_path in cache:
+        return cache[rel_path]
+    try:
+        from app.scratchpad.context import current_factstore
+
+        store = current_factstore()
+        if store is None:
+            cache[rel_path] = False
+            return False
+        abs_path = str(Path(workspace).resolve() / rel_path)
+        cache[rel_path] = store.should_skip(abs_path) is not None
+    except Exception:
+        cache[rel_path] = False
+    return cache[rel_path]
 
 
 def find_references(
@@ -1132,6 +1170,23 @@ def file_outline(workspace: str, path: str) -> ToolResult:
         ).model_dump()
         for d in symbols.definitions
     ]
+    # Wrap in a dict iff extraction degraded to regex so the agent knows
+    # results may miss nested defs / arrow functions / JSX components.
+    # Preserves the plain-list shape on the common (tree-sitter) path.
+    if symbols.extracted_via == "regex":
+        return ToolResult(
+            tool_name="file_outline",
+            data={
+                "definitions": defs,
+                "extracted_via": "regex",
+                "note": (
+                    "tree-sitter parse failed or timed out on this file; outline is "
+                    "regex-based and may miss nested definitions, arrow functions, "
+                    "or JSX components. For authoritative structural info, use "
+                    "`grep` or `read_file`."
+                ),
+            },
+        )
     return ToolResult(tool_name="file_outline", data=defs)
 
 

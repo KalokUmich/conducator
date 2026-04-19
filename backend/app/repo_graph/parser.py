@@ -46,12 +46,22 @@ class SymbolRef:
 
 @dataclass
 class FileSymbols:
-    """Definitions and references extracted from a single file."""
+    """Definitions and references extracted from a single file.
+
+    ``extracted_via`` records which backend produced the results — this
+    matters because the regex fallback (used when tree-sitter times out
+    or can't parse) has lower recall on nested definitions, arrow
+    functions, decorators, etc. Tools that surface structural data should
+    check this and pass a ``degraded_files`` list up to the caller so the
+    agent knows to prefer ``grep`` / ``read_file`` for authoritative
+    answers on those paths.
+    """
 
     file_path: str
     definitions: List[SymbolDef] = field(default_factory=list)
     references: List[SymbolRef] = field(default_factory=list)
     language: Optional[str] = None
+    extracted_via: str = "tree_sitter"  # or "regex" when fallback ran
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +420,7 @@ _REF_PATTERN = re.compile(r"\b([A-Z][a-zA-Z0-9_]*|[a-z_][a-zA-Z0-9_]{2,})\b")
 
 def _extract_with_regex(source: str, language: str, file_path: str) -> FileSymbols:
     """Fallback extraction using regex patterns."""
-    symbols = FileSymbols(file_path=file_path, language=language)
+    symbols = FileSymbols(file_path=file_path, language=language, extracted_via="regex")
     lines = source.split("\n")
 
     # Extract definitions

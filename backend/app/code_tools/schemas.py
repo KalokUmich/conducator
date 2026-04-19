@@ -821,7 +821,12 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "Example: find_symbol('ApplicationDecisionService') finds the class definition; "
             "grep('ApplicationDecisionService') finds every mention including imports.\n\n"
             "If you get 0 results, the name may be misspelled or use a different convention. "
-            "Try grep with a partial name to discover the correct spelling."
+            "Try grep with a partial name to discover the correct spelling.\n\n"
+            "**Degraded results**: individual results may include "
+            "`extracted_via: \"regex\"` when tree-sitter timed out on that file "
+            "(common on deeply-nested TSX). Regex fallback can miss nested defs, "
+            "arrow functions, and JSX components. For authoritative structural "
+            "info on those paths, use `grep` or `read_file`."
         ),
         "input_schema": FindSymbolParams.model_json_schema(),
     },
@@ -851,7 +856,12 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "- Use compressed_view instead if you also need call relationships, side effects, "
             "and exceptions (richer but slightly more output).\n"
             "- Use module_summary instead if you need an overview of an entire directory.\n\n"
-            "Useful for answering 'what methods does this class have?' in one call."
+            "Useful for answering 'what methods does this class have?' in one call.\n\n"
+            "**Degraded results**: when tree-sitter times out on a file the response "
+            "shape changes to `{\"definitions\": [...], \"extracted_via\": \"regex\", "
+            "\"note\": \"...\"}`. Regex-based outline can miss nested defs, arrow "
+            "functions, and JSX. In that case prefer `grep` or `read_file` for "
+            "authoritative structural info."
         ),
         "input_schema": FileOutlineParams.model_json_schema(),
     },
