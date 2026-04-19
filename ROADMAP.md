@@ -1472,7 +1472,7 @@ Scope of the hardening:
    - If a TSX file has > N nested JSX levels (quick heuristic pre-scan) → route to `_extract_with_regex` directly, skip tree-sitter
    - Belt-and-suspenders for residual pathological cases after (1)+(3)
 
-- [x] `_extract_with_tree_sitter` wrapped with per-file time budget (60s default, `CONDUCTOR_PARSE_TIMEOUT_S` env override) — shipped as `extract_definitions_with_timeout`, `extract_definitions` now delegates so every caller is protected; daemon-thread pattern leaves zombies running until C-level parse ends (full kill requires ProcessPool in Sprint 17)
+- [x] `_extract_with_tree_sitter` wrapped with per-file time budget (60s default, `CONDUCTOR_PARSE_TIMEOUT_S` env override) — shipped as `extract_definitions_with_timeout`, `extract_definitions` now delegates so every caller is protected. **Primitive: subprocess pool with SIGKILL on timeout** (`app.repo_graph.parse_pool`). An initial daemon-thread implementation was caught broken by py-spy on sentry-007 — tree-sitter's Python binding holds the GIL through the C parse, so an in-process `queue.get(timeout=…)` was dead code: main thread could never reacquire the GIL to raise Empty. Subprocess is the only reliable primitive; ProcessPool work was pulled forward from Sprint 17
 - [x] Skip facts recorded to Fact Vault (9.15 prerequisite); all file-touching tools check skip list pre-execution — parser writes `skip_facts` on timeout, pre-checks on re-entry so pathological files short-circuit to regex for the rest of the session
 - [ ] `_scan_workspace` migrated to ProcessPoolExecutor; results merged back into the returned dict
 - [ ] Dependencies: upgrade `tree-sitter` + grammar provider — **gated on full test suite + parity + eval regression (see item 3 above)**
@@ -1722,8 +1722,8 @@ Bridge the gap between AI Summaries and actionable outcomes. Applies to both Ext
 | **Phase 9.15 MVP: `_ensure_graph` in-flight dedup** | **✅ Complete** | **Sprint 15** |
 | **Phase 9.18 MVP: scan diagnostic logging** | **🟢 Partial** | **Sprint 15** |
 | **Phase 9.15 full: Fact Vault (SQLite + CachedToolExecutor + search_facts + CLI)** | **✅ Complete** | **Sprint 15–16** |
-| **Phase 9.18 step 1: per-file parse timeout + skip caching** | **✅ Complete** | **Sprint 16** |
-| **Phase 9.18 step 2+: ProcessPool + grammar bump + TSX heuristic** | **🟡 Planned** | **Sprint 17** |
+| **Phase 9.18 step 1: per-file parse timeout + skip caching (subprocess + SIGKILL)** | **✅ Complete** | **Sprint 16** |
+| **Phase 9.18 step 2+: grammar bump + TSX heuristic + parallel scan** | **🟡 Planned** | **Sprint 17** |
 | **Phase 9.13 Checkpoint A: `dispatch_subagent` + checks contract** | **🟡 Planned** | **Sprint 16–17** |
 | **Phase 9.16: Forked Agent Pattern** | **🟡 Planned** | **Sprint 17** |
 | **Phase 9.13 Checkpoint B: dynamic composition default** | **🟡 Planned** | **Sprint 18** |

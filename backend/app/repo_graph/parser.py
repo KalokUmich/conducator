@@ -474,12 +474,15 @@ def extract_definitions_with_timeout(
     ``timeout_s`` defaults to ``CONDUCTOR_PARSE_TIMEOUT_S`` (60 s). Set
     to ``0`` to disable the timeout, useful for tests.
 
-    Caveat: the timed-out tree-sitter thread keeps running until the
-    C-level parse completes — Python cannot interrupt a GIL-holding C
-    call from userland. Full zombie elimination arrives with the
-    ``ProcessPoolExecutor`` migration in Phase 9.18 Sprint 17.
+    Implementation note: the parse runs in a persistent worker
+    subprocess (see :mod:`app.repo_graph.parse_pool`) so we can SIGKILL
+    it on timeout. An earlier daemon-thread design was shown by py-spy
+    to be broken — tree-sitter's C binding holds the GIL through the
+    parse, so the main thread could never reacquire the GIL to raise
+    the timeout. The subprocess primitive is the only reliable one.
     """
     import os as _os
+    import time as _t
 
     if timeout_s is None:
         try:
@@ -512,8 +515,9 @@ def extract_definitions_with_timeout(
             logger.debug("skip-list pre-check failed for %s: %s", file_path, exc)
 
     if timeout_s <= 0:
-        # Timeout disabled — legacy synchronous behaviour with existing
-        # regex fallback on exception.
+        # Timeout disabled — legacy in-process behaviour with the
+        # existing regex fallback on exception. Useful for benchmarks /
+        # tests that must not spawn a subprocess.
         try:
             return _extract_with_tree_sitter(source, language, file_path)
         except Exception as exc:
@@ -522,34 +526,19 @@ def extract_definitions_with_timeout(
                 source.decode("utf-8", errors="replace"), language, file_path
             )
 
-    # Run the parse on a daemon thread so the main loop unblocks after
-    # ``timeout_s`` even if tree-sitter never returns. The thread keeps
-    # running; it's not safe to interrupt. Subsequent pathological files
-    # don't block the main loop — they each spawn a new daemon thread.
-    import queue as _q
-    import threading as _th
-    import time as _t
+    from .parse_pool import get_parse_pool
 
-    result_q: _q.Queue = _q.Queue(maxsize=1)
-
-    def _worker() -> None:
-        try:
-            result_q.put(("ok", _extract_with_tree_sitter(source, language, file_path)))
-        except Exception as e:
-            result_q.put(("err", e))
-
+    pool = get_parse_pool()
     t0 = _t.monotonic()
-    worker_t = _th.Thread(
-        target=_worker, daemon=True, name=f"tsparse-{Path(file_path).name}"
-    )
-    worker_t.start()
+    result = pool.parse(source, language, file_path, timeout_s=timeout_s)
+    elapsed_ms = int((_t.monotonic() - t0) * 1000)
 
-    try:
-        kind, val = result_q.get(timeout=timeout_s)
-    except _q.Empty:
-        elapsed_ms = int((_t.monotonic() - t0) * 1000)
+    if result is None:
+        # Pool returns None on timeout, pickle error, worker crash, or
+        # any other failure. Treat all as "tree-sitter unavailable for
+        # this file" — log + skip-list write + regex fallback.
         logger.warning(
-            "tree-sitter parse timed out after %.1fs (limit=%.1fs): %s — "
+            "tree-sitter parse failed after %.1fs (limit=%.1fs): %s — "
             "falling back to regex, file skipped for rest of session",
             elapsed_ms / 1000, timeout_s, file_path,
         )
@@ -557,7 +546,7 @@ def extract_definitions_with_timeout(
             try:
                 store.put_skip(
                     file_path,
-                    reason=f"tree-sitter timeout after {timeout_s:.0f}s",
+                    reason=f"tree-sitter timeout/failure after {timeout_s:.0f}s",
                     duration_ms=elapsed_ms,
                 )
             except Exception as exc:
@@ -566,12 +555,7 @@ def extract_definitions_with_timeout(
             source.decode("utf-8", errors="replace"), language, file_path
         )
 
-    if kind == "err":
-        logger.debug("tree-sitter extraction failed for %s: %s", file_path, val)
-        return _extract_with_regex(
-            source.decode("utf-8", errors="replace"), language, file_path
-        )
-    return val
+    return result
 
 
 def _current_factstore_safe():

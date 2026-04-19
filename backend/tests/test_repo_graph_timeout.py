@@ -1,17 +1,25 @@
 """Tests for Phase 9.18 step 1 — per-file tree-sitter parse timeout.
 
-Covers the timeout wrapper, regex fallback on timeout, skip_fact
-writeback to the session Fact Vault, and skip-list pre-check so future
-tool calls on pathological files short-circuit.
+Two layers:
 
-Zombie daemon thread behaviour is NOT asserted here — by design the
-worker keeps running after timeout; full kill-on-timeout arrives with
-Sprint 17's ProcessPoolExecutor.
+* ``Test*Wrapper`` — exercises ``extract_definitions_with_timeout`` by
+  stubbing out the subprocess pool (``get_parse_pool``) with an
+  in-process fake. Tests the wrapper's control flow: skip-list
+  pre-check, timeout → regex fallback, skip_fact writeback, env var
+  parsing.
+* ``TestParsePoolSubprocess`` — end-to-end tests that actually spawn a
+  real subprocess worker and verify the SIGKILL + respawn path works.
+  Slower (a few hundred ms each) but only place the real primitive is
+  exercised.
+
+The subprocess design replaces an earlier daemon-thread design that
+was broken — py-spy on sentry-007 caught tree-sitter's C binding
+holding the GIL through the parse, so in-process timeouts were dead
+code. See ``parse_pool.py`` for the write-up.
 """
 
 from __future__ import annotations
 
-import time
 import uuid
 from unittest.mock import patch
 
@@ -26,6 +34,10 @@ from app.repo_graph.parser import (
 from app.scratchpad import FactStore
 from app.scratchpad.context import bind_factstore
 
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def isolated_vault(tmp_path, monkeypatch):
@@ -36,231 +48,284 @@ def isolated_vault(tmp_path, monkeypatch):
     store.delete()
 
 
+class _FakePool:
+    """Drop-in replacement for ParsePool. Configure ``returns`` before
+    dispatching; inspect ``calls`` / ``last_call`` after."""
+
+    def __init__(self) -> None:
+        self.returns = None  # what parse() should return
+        self.calls = 0
+        self.last_call = None  # (file_path, timeout_s)
+
+    def parse(self, source, language, file_path, timeout_s):
+        self.calls += 1
+        self.last_call = (file_path, timeout_s)
+        return self.returns
+
+
+@pytest.fixture
+def fake_pool(monkeypatch):
+    """Replace ``get_parse_pool()`` with a fake. Unit-level tests never
+    spawn a real subprocess."""
+    fake = _FakePool()
+    monkeypatch.setattr(
+        "app.repo_graph.parse_pool.get_parse_pool", lambda: fake
+    )
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_any_real_pool():
+    """Safety net: tear down any real pool spawned by a test. Keeps the
+    test suite from leaking subprocesses if an assertion fails mid-test."""
+    yield
+    from app.repo_graph.parse_pool import shutdown_parse_pool
+    shutdown_parse_pool()
+
+
 # ---------------------------------------------------------------------------
-# timeout → regex fallback
+# Wrapper-level: pool hit paths
 # ---------------------------------------------------------------------------
 
 
-class TestTimeoutFallsBackToRegex:
-    def test_slow_parser_triggers_fallback(self, tmp_path):
-        """When _extract_with_tree_sitter blocks past the timeout, the
-        wrapper must unblock and return the regex extractor's output."""
-
-        def _slow_treesitter(source, language, file_path):
-            time.sleep(5)  # longer than test's 0.2s timeout
-            raise AssertionError("must not complete — test expects timeout")
-
-        src = b"def hello():\n    return 1\n"
-        test_file = tmp_path / "hello.py"
-        test_file.write_bytes(src)
-
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _slow_treesitter):
-            t0 = time.monotonic()
-            result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=0.2
-            )
-            elapsed = time.monotonic() - t0
-
-        # Unblocked well before the 5s mock sleep
-        assert elapsed < 2.0, f"timeout wrapper took {elapsed:.2f}s — should be ~0.2s"
-        # Regex fallback produced the function definition
-        assert result.file_path == str(test_file)
-        assert any(d.name == "hello" for d in result.definitions)
-
-    def test_exception_also_falls_back_to_regex(self, tmp_path):
-        def _broken_treesitter(source, language, file_path):
-            raise RuntimeError("grammar exploded")
-
-        src = b"def foo():\n    pass\n"
-        test_file = tmp_path / "foo.py"
-
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _broken_treesitter):
-            result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=1.0
-            )
-        assert any(d.name == "foo" for d in result.definitions)
-
-    def test_fast_parser_returns_treesitter_output(self, tmp_path):
-        """Happy path — timeout generous, tree-sitter returns before the
-        wrapper's queue wait expires, regex is NOT called."""
+class TestWrapperSuccessPath:
+    def test_pool_returns_symbols_wrapper_passes_through(self, fake_pool, tmp_path):
         sentinel = FileSymbols(file_path="sentinel", language="python")
-
-        def _fast(source, language, file_path):
-            return sentinel
-
-        src = b"def bar(): pass\n"
-        test_file = tmp_path / "bar.py"
-
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _fast), patch(
-            "app.repo_graph.parser._extract_with_regex"
-        ) as regex_mock:
+        fake_pool.returns = sentinel
+        with patch("app.repo_graph.parser._extract_with_regex") as regex_mock:
             result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=5.0
+                str(tmp_path / "bar.py"),
+                source=b"def bar(): pass\n",
+                timeout_s=5.0,
             )
         assert result is sentinel
+        assert fake_pool.calls == 1
         regex_mock.assert_not_called()
+
+    def test_unknown_language_skips_pool(self, fake_pool, tmp_path):
+        """When detect_language returns None, wrapper must not invoke
+        the pool — regex fallback has nothing to do either."""
+        result = extract_definitions_with_timeout(
+            str(tmp_path / "unknown.xyz"),
+            source=b"contents",
+            timeout_s=5.0,
+        )
+        assert fake_pool.calls == 0
+        assert result.definitions == []
+
+
+class TestWrapperFallbackPath:
+    def test_pool_timeout_falls_back_to_regex(self, fake_pool, tmp_path):
+        """Pool returns None → wrapper must fall back to regex extractor
+        and still return a usable FileSymbols."""
+        fake_pool.returns = None
+        result = extract_definitions_with_timeout(
+            str(tmp_path / "hello.py"),
+            source=b"def hello():\n    return 1\n",
+            timeout_s=0.2,
+        )
+        assert any(d.name == "hello" for d in result.definitions)
+
+    def test_pool_error_falls_back_to_regex(self, fake_pool, tmp_path):
+        """Pool returns None for both timeouts AND worker errors; the
+        wrapper cannot distinguish, and shouldn't need to."""
+        fake_pool.returns = None
+        result = extract_definitions_with_timeout(
+            str(tmp_path / "foo.py"),
+            source=b"def foo():\n    pass\n",
+            timeout_s=1.0,
+        )
+        assert any(d.name == "foo" for d in result.definitions)
 
 
 # ---------------------------------------------------------------------------
-# skip_fact integration
+# Wrapper-level: skip_fact integration
 # ---------------------------------------------------------------------------
 
 
 class TestSkipFactsIntegration:
-    def test_timeout_writes_skip_fact(self, isolated_vault, tmp_path):
-        def _slow(source, language, file_path):
-            time.sleep(5)
-
-        src = b"def x(): pass\n"
-        test_file = tmp_path / "x.py"
-
-        with bind_factstore(isolated_vault), patch("app.repo_graph.parser._extract_with_tree_sitter", _slow):
+    def test_timeout_writes_skip_fact(self, fake_pool, isolated_vault, tmp_path):
+        """When the pool signals failure and a vault is bound, the file
+        must be recorded on the skip list so later calls bypass the pool."""
+        fake_pool.returns = None
+        with bind_factstore(isolated_vault):
             extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=0.2
+                str(tmp_path / "x.py"),
+                source=b"def x(): pass\n",
+                timeout_s=0.2,
             )
-
-        reason = isolated_vault.should_skip(str(test_file))
+        reason = isolated_vault.should_skip(str(tmp_path / "x.py"))
         assert reason is not None
-        assert "timeout" in reason.lower()
+        assert "timeout" in reason.lower() or "failure" in reason.lower()
 
-    def test_skip_fact_prevents_retry(self, isolated_vault, tmp_path):
-        """Once a path is on the skip list, subsequent calls MUST NOT
-        invoke tree-sitter — they go straight to regex."""
-        src = b"def y(): pass\n"
-        test_file = tmp_path / "y.py"
-        isolated_vault.put_skip(str(test_file), reason="prior timeout", duration_ms=200)
+    def test_skip_fact_prevents_pool_dispatch(
+        self, fake_pool, isolated_vault, tmp_path
+    ):
+        """Pre-check short-circuits — the pool must NOT be called when
+        the file is on the skip list."""
+        target = tmp_path / "y.py"
+        isolated_vault.put_skip(str(target), reason="prior timeout", duration_ms=200)
 
-        with bind_factstore(isolated_vault), patch(
-            "app.repo_graph.parser._extract_with_tree_sitter"
-        ) as ts_mock:
+        with bind_factstore(isolated_vault):
             result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=5.0
+                str(target), source=b"def y(): pass\n", timeout_s=5.0
             )
-        ts_mock.assert_not_called()
+        assert fake_pool.calls == 0
         assert any(d.name == "y" for d in result.definitions)
 
-    def test_no_vault_bound_still_works(self, tmp_path):
-        """When scratchpad isn't bound, timeout wrapper MUST still succeed
-        — the skip-list machinery is best-effort."""
-
-        def _slow(source, language, file_path):
-            time.sleep(5)
-
-        src = b"def z(): pass\n"
-        test_file = tmp_path / "z.py"
-
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _slow):
-            result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=0.2
-            )
+    def test_no_vault_bound_still_works(self, fake_pool, tmp_path):
+        """Scratchpad is optional — extraction works when nothing's bound."""
+        fake_pool.returns = None
+        result = extract_definitions_with_timeout(
+            str(tmp_path / "z.py"),
+            source=b"def z(): pass\n",
+            timeout_s=0.2,
+        )
         assert any(d.name == "z" for d in result.definitions)
 
-    def test_vault_put_skip_error_does_not_propagate(self, isolated_vault, tmp_path):
-        """If put_skip raises (closed DB, disk full), extraction still
-        returns a usable FileSymbols — caching is never load-bearing."""
-
-        def _slow(source, language, file_path):
-            time.sleep(5)
-
-        src = b"def w(): pass\n"
-        test_file = tmp_path / "w.py"
-
+    def test_vault_put_skip_error_does_not_propagate(
+        self, fake_pool, isolated_vault, tmp_path
+    ):
+        """A broken vault must not break extraction — caching is always
+        best-effort."""
+        fake_pool.returns = None
         with bind_factstore(isolated_vault), patch.object(
             isolated_vault, "put_skip", side_effect=RuntimeError("disk full")
-        ), patch("app.repo_graph.parser._extract_with_tree_sitter", _slow):
+        ):
             result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=0.2
+                str(tmp_path / "w.py"),
+                source=b"def w(): pass\n",
+                timeout_s=0.2,
             )
         assert any(d.name == "w" for d in result.definitions)
 
 
 # ---------------------------------------------------------------------------
-# timeout=0 (disabled) and env var override
+# Wrapper-level: timeout parsing + disabled mode
 # ---------------------------------------------------------------------------
 
 
-class TestTimeoutDisabled:
-    def test_zero_timeout_is_legacy_sync(self, tmp_path):
-        """timeout_s=0 must NOT spawn a daemon thread. Verified
-        indirectly by checking that a fast parser returns successfully
-        with no queue machinery."""
+class TestTimeoutConfig:
+    def test_zero_timeout_bypasses_pool(self, fake_pool, tmp_path):
+        """``timeout_s=0`` is explicit opt-out — pool not invoked,
+        tree-sitter runs in-process. Useful for tests and benchmarks
+        that must not spawn a subprocess."""
         sentinel = FileSymbols(file_path="s", language="python")
-
-        def _fast(source, language, file_path):
-            return sentinel
-
-        src = b"pass\n"
-        test_file = tmp_path / "s.py"
-
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _fast):
+        with patch("app.repo_graph.parser._extract_with_tree_sitter", lambda *a: sentinel):
             result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=0
+                str(tmp_path / "s.py"), source=b"pass\n", timeout_s=0
             )
         assert result is sentinel
+        assert fake_pool.calls == 0
 
-    def test_env_var_sets_default(self, tmp_path, monkeypatch):
+    def test_env_var_drives_default_timeout(self, fake_pool, tmp_path, monkeypatch):
         monkeypatch.setenv("CONDUCTOR_PARSE_TIMEOUT_S", "0.1")
+        fake_pool.returns = None
+        extract_definitions_with_timeout(
+            str(tmp_path / "q.py"),
+            source=b"def q(): pass\n",
+            timeout_s=None,
+        )
+        assert fake_pool.last_call[1] == 0.1
 
-        def _slow(source, language, file_path):
-            time.sleep(2)
-
-        src = b"def q(): pass\n"
-        test_file = tmp_path / "q.py"
-
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _slow):
-            t0 = time.monotonic()
-            result = extract_definitions_with_timeout(
-                str(test_file), source=src, timeout_s=None
-            )
-            elapsed = time.monotonic() - t0
-        assert elapsed < 1.0
-        assert any(d.name == "q" for d in result.definitions)
-
-    def test_invalid_env_var_falls_back_to_60s_default(self, tmp_path, monkeypatch):
-        """Bad env value → 60s default, not a crash."""
+    def test_invalid_env_var_falls_back_to_60s_default(
+        self, fake_pool, tmp_path, monkeypatch
+    ):
         monkeypatch.setenv("CONDUCTOR_PARSE_TIMEOUT_S", "not-a-number")
         sentinel = FileSymbols(file_path="n", language="python")
-
-        def _fast(source, language, file_path):
-            return sentinel
-
-        src = b"pass\n"
-        test_file = tmp_path / "n.py"
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _fast):
-            # Should not raise — default kicks in
-            assert (
-                extract_definitions_with_timeout(str(test_file), source=src) is sentinel
-            )
+        fake_pool.returns = sentinel
+        result = extract_definitions_with_timeout(
+            str(tmp_path / "n.py"), source=b"pass\n"
+        )
+        assert result is sentinel
+        assert fake_pool.last_call[1] == 60.0
 
 
 # ---------------------------------------------------------------------------
-# extract_definitions delegation
+# Public API: extract_definitions now delegates to the timed wrapper
 # ---------------------------------------------------------------------------
 
 
 class TestExtractDefinitionsDelegation:
-    def test_extract_definitions_uses_timeout_wrapper(self, tmp_path):
-        """Public extract_definitions() must now go through the timed
-        wrapper, so every caller in the codebase gets the 60s ceiling."""
-
-        def _slow(source, language, file_path):
-            time.sleep(5)
-
-        src = b"def a(): pass\n"
-        test_file = tmp_path / "a.py"
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _slow):
-            t0 = time.monotonic()
-            result = extract_definitions(str(test_file), source=src, timeout_s=0.2)
-            elapsed = time.monotonic() - t0
-        assert elapsed < 2.0
+    def test_extract_definitions_routes_through_pool(self, fake_pool, tmp_path):
+        """Every call site in the codebase that uses ``extract_definitions``
+        gets the subprocess ceiling for free."""
+        fake_pool.returns = None
+        result = extract_definitions(
+            str(tmp_path / "a.py"),
+            source=b"def a(): pass\n",
+            timeout_s=0.2,
+        )
         assert any(d.name == "a" for d in result.definitions)
+        assert fake_pool.calls == 1
 
-    def test_regex_fallback_runs_on_timeout(self, tmp_path):
-        def _slow(source, language, file_path):
-            time.sleep(5)
-
+    def test_regex_fallback_is_deterministic(self, tmp_path):
+        """Regex fallback is pure Python — same input always yields same
+        output, no subprocess involvement."""
         src = b"def direct_fallback(): pass\n"
-        test_file = tmp_path / "d.py"
-        with patch("app.repo_graph.parser._extract_with_tree_sitter", _slow):
-            result = _extract_with_regex(src.decode("utf-8"), "python", str(test_file))
-            assert any(d.name == "direct_fallback" for d in result.definitions)
+        result = _extract_with_regex(src.decode("utf-8"), "python", str(tmp_path / "d.py"))
+        assert any(d.name == "direct_fallback" for d in result.definitions)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: real subprocess exercises
+# ---------------------------------------------------------------------------
+
+
+class TestParsePoolSubprocess:
+    """These tests spawn actual subprocesses. Slow (~300-800ms each for
+    spawn overhead) but the only place we verify the primitive works."""
+
+    def test_pool_parses_simple_python(self):
+        from app.repo_graph.parse_pool import ParsePool
+
+        pool = ParsePool()
+        try:
+            result = pool.parse(
+                b"def hello():\n    return 1\n",
+                "python",
+                "test.py",
+                timeout_s=30.0,
+            )
+        finally:
+            pool.shutdown()
+        assert result is not None
+        assert any(d.name == "hello" for d in result.definitions)
+
+    def test_pool_survives_after_timeout_and_respawns(self):
+        """Force a timeout so short that the worker can't complete, then
+        verify the pool spawns a fresh worker for the next parse."""
+        from app.repo_graph.parse_pool import ParsePool
+
+        pool = ParsePool()
+        try:
+            # 0s timeout — the poll returns immediately without a result.
+            # The worker is killed + respawned. We don't assert on the
+            # first parse's outcome (could be anything); we assert the
+            # pool remains usable.
+            r1 = pool.parse(
+                b"def a(): pass\n" * 1000,
+                "python",
+                "big.py",
+                timeout_s=0.001,
+            )
+            # Next parse must succeed on a fresh worker.
+            r2 = pool.parse(
+                b"def z(): return 0\n",
+                "python",
+                "z.py",
+                timeout_s=30.0,
+            )
+        finally:
+            pool.shutdown()
+        assert r2 is not None
+        assert any(d.name == "z" for d in r2.definitions)
+        # r1 is None (timeout) by design.
+        assert r1 is None
+
+    def test_shutdown_is_idempotent(self):
+        from app.repo_graph.parse_pool import ParsePool
+
+        pool = ParsePool()
+        pool.shutdown()
+        pool.shutdown()  # must not raise
