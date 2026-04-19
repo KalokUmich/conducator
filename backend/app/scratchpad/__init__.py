@@ -1,7 +1,8 @@
 """Scratchpad — task-scoped short-term memory for PR Brain sub-agents.
 
 Phase 9.15 full: SQLite-backed fact vault + canonical keys + in-flight dedup.
-See docs/SHORT_TERM_MEMORY_DESIGN.md for the full design.
+See ROADMAP.md (Phase 9.15) for the design rationale and
+backend/CLAUDE.md for the runtime contract.
 
 Public surface:
     key_lock(key) → threading.Lock
