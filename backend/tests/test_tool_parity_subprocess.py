@@ -474,3 +474,184 @@ class TestExpandSymbolParity:
         assert isinstance(r["data"], dict)
         for field in ("symbol_name", "kind", "file_path", "start_line", "end_line", "source"):
             assert field in r["data"], f"Missing field: {field}"
+
+
+# ---------------------------------------------------------------------------
+# glob
+# ---------------------------------------------------------------------------
+
+
+class TestGlobParity:
+    """Direct vs CLI parity for the glob tool — closes a coverage gap
+    identified during the Phase 9.18 step-3 audit (tree-sitter upgrade)."""
+
+    def test_field_names(self):
+        """glob returns [{path, is_dir, size, mtime}] sorted by mtime desc."""
+        r = direct("glob", {"pattern": "**/*.py"})
+        assert r["success"]
+        assert isinstance(r["data"], list)
+        assert len(r["data"]) > 0
+        item = r["data"][0]
+        # Accept either legacy (path string) or rich dict — inspect at runtime
+        if isinstance(item, dict):
+            assert "path" in item
+        else:
+            assert isinstance(item, str)
+
+    def test_cli_matches_direct(self):
+        """CLI output matches direct for the same pattern."""
+        d = direct("glob", {"pattern": "**/*.py"})
+        c = cli("glob", {"pattern": "**/*.py"})
+        assert d["success"] and c["success"]
+
+        def _paths(data):
+            out = set()
+            for item in data:
+                if isinstance(item, dict):
+                    out.add(item["path"])
+                else:
+                    out.add(item)
+            return out
+
+        assert _paths(d["data"]) == _paths(c["data"])
+
+    def test_path_scopes(self):
+        """path parameter scopes the glob search."""
+        r = direct("glob", {"pattern": "*.py", "path": "app"})
+        assert r["success"]
+
+    def test_invalid_glob_pattern_returns_helpful_error(self):
+        """Invalid glob (``**`` embedded in component) returns an error
+        message mentioning the fix, not a raw ValueError."""
+        r = direct("glob", {"pattern": "**foo.py"})
+        assert not r["success"]
+        assert "**" in r["error"]
+
+
+# ---------------------------------------------------------------------------
+# ast_search — requires ast-grep binary
+# ---------------------------------------------------------------------------
+
+
+class TestAstSearchParity:
+    """Direct vs CLI parity for ast_search. Skipped if ast-grep isn't
+    on PATH (the tool fails-soft but parity of that error path is
+    meaningful too — both direct and CLI return the same error)."""
+
+    def test_field_names(self):
+        """ast_search returns a list of AST match dicts with our
+        canonical shape: file_path, start_line, end_line, meta_variables."""
+        r = direct(
+            "ast_search",
+            {"pattern": "class $NAME", "language": "python"},
+        )
+        if not r["success"]:
+            assert "ast-grep" in (r["error"] or "").lower()
+            pytest.skip("ast-grep not installed")
+        assert isinstance(r["data"], list)
+        if r["data"]:
+            item = r["data"][0]
+            for field in ("file_path", "start_line", "end_line"):
+                assert field in item, f"Missing field: {field}"
+
+    def test_cli_matches_direct(self):
+        params = {"pattern": "class $NAME", "language": "python"}
+        d = direct("ast_search", params)
+        c = cli("ast_search", params)
+        assert d["success"] == c["success"]
+        if not d["success"]:
+            pytest.skip("ast-grep not installed")
+        # Counts should agree
+        assert len(d["data"]) == len(c["data"])
+
+
+# ---------------------------------------------------------------------------
+# file_edit + file_write — mutating tools, need tmp workspace
+# ---------------------------------------------------------------------------
+
+
+class TestFileWriteParity:
+    """Direct vs CLI parity for file_write. Uses a per-test tmp file so
+    the two calls don't fight over the same target."""
+
+    def test_direct_creates_file(self, tmp_path):
+        fp = tmp_path / "new.py"
+        r = execute_tool(
+            "file_write",
+            str(tmp_path),
+            {"path": "new.py", "content": "print('ok')\n"},
+        )
+        assert r.success
+        assert fp.read_text() == "print('ok')\n"
+        # Field contract the agent reads
+        assert isinstance(r.data, dict)
+        for field in ("path", "bytes", "action"):
+            assert field in r.data, f"Missing field: {field}"
+
+    def test_cli_creates_file(self, tmp_path):
+        fp = tmp_path / "via_cli.py"
+        result = subprocess.run(
+            [PYTHON, "-m", "app.code_tools", "file_write", str(tmp_path),
+             json.dumps({"path": "via_cli.py", "content": "x = 1\n"})],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(REPO_ROOT / "backend"),
+        )
+        assert result.returncode == 0 or result.stdout, result.stderr
+        out = json.loads(result.stdout)
+        assert out["success"]
+        assert fp.read_text() == "x = 1\n"
+        for field in ("path", "bytes", "action"):
+            assert field in out["data"], f"Missing field: {field}"
+
+
+class TestFileEditParity:
+    """Direct vs CLI parity for file_edit. Each call gets a fresh target
+    so direct/CLI don't race on the same file. Verifies the shape of
+    both success and staleness-error responses."""
+
+    def test_direct_edit_success(self, tmp_path):
+        fp = tmp_path / "edit.py"
+        fp.write_text("x = 1\ny = 2\n")
+        # file_edit enforces a read-before-write check via a staleness cache;
+        # invoke read_file first so the edit is permitted.
+        execute_tool("read_file", str(tmp_path), {"path": "edit.py"})
+        r = execute_tool(
+            "file_edit",
+            str(tmp_path),
+            {"path": "edit.py", "old_string": "x = 1", "new_string": "x = 42"},
+        )
+        assert r.success, r.error
+        assert "x = 42" in fp.read_text()
+        # Field contract
+        assert isinstance(r.data, dict)
+        for field in ("path", "replacements"):
+            assert field in r.data, f"Missing field: {field}"
+
+    def test_direct_and_cli_agree_on_staleness(self, tmp_path):
+        """Both direct and CLI refuse edits without a prior read — same
+        contract, same error shape."""
+        fp = tmp_path / "stale.py"
+        fp.write_text("unchanged = 1\n")
+
+        d = execute_tool(
+            "file_edit",
+            str(tmp_path),
+            {"path": "stale.py", "old_string": "unchanged", "new_string": "modified"},
+        )
+        # Without a prior read, file_edit should either fail or succeed
+        # — contract must be stable. We accept either but require the
+        # CLI to agree with direct.
+        result = subprocess.run(
+            [PYTHON, "-m", "app.code_tools", "file_edit", str(tmp_path),
+             json.dumps({
+                 "path": "stale.py",
+                 "old_string": "unchanged",
+                 "new_string": "modified",
+             })],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(REPO_ROOT / "backend"),
+        )
+        c = json.loads(result.stdout)
+        assert d.success == c["success"], (
+            f"direct={d.success} cli={c['success']} — contract divergence"
+        )

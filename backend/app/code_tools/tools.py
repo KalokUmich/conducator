@@ -5487,9 +5487,22 @@ def _repair_tool_params(tool_name: str, params: Dict[str, Any]) -> tuple:
         params["file_path"] = params.pop("path")
 
     # --- Pattern 3: strip leading/trailing whitespace from string values ------
+    # Exception: content-bearing params for mutating tools MUST be preserved
+    # byte-for-byte. Stripping ``file_write.content`` would destroy trailing
+    # newlines (the POSIX convention for text files). Stripping
+    # ``file_edit.old_string`` / ``new_string`` would break any edit that
+    # needs to preserve indentation around the replaced block.
+    _PRESERVE_WHITESPACE = {
+        ("file_write", "content"),
+        ("file_edit", "old_string"),
+        ("file_edit", "new_string"),
+    }
     for key, val in params.items():
-        if isinstance(val, str):
-            params[key] = val.strip()
+        if not isinstance(val, str):
+            continue
+        if (tool_name, key) in _PRESERVE_WHITESPACE:
+            continue
+        params[key] = val.strip()
 
     return params, xml_repair_attempted, lost_chained
 

@@ -20,9 +20,13 @@ fakeredis[aioredis]  # test only
 # Dependency graph construction and PageRank
 networkx
 # AST parsing for symbol extraction (Python, JS, TS, Go, Rust, etc.)
-# tree-sitter-languages 1.x requires tree-sitter 0.21.x (Language API changed in 0.22+)
-tree-sitter>=0.21,<0.22
-tree-sitter-languages
+# Phase 9.18 step 3: upgraded 2026-04 from tree-sitter-languages 1.10 (abandoned,
+# pinned to tree-sitter 0.21.x with a deprecated Language API) to
+# tree-sitter-language-pack 1.6 (maintained successor, bundles grammars,
+# compatible with tree-sitter 0.25+). Grammar versions now match the extension's
+# web-tree-sitter 0.26.x so parity tests stay byte-level identical.
+tree-sitter>=0.25,<0.26
+tree-sitter-language-pack>=1.6,<2.0
 
 # --- ast-grep (Structural Code Search) ---
 # Used by ast_search tool for AST-pattern matching

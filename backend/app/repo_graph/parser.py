@@ -101,14 +101,20 @@ _parser_cache: Dict[str, object] = {}
 
 
 def _get_parser(language: str):
-    """Get or create a tree-sitter parser for *language*."""
+    """Get or create a tree-sitter parser for *language*.
+
+    Uses ``tree-sitter-language-pack`` (the maintained replacement for the
+    abandoned ``tree-sitter-languages``). Matches the web-tree-sitter
+    0.26 / tree-sitter 0.25 versions the extension ships, so parity
+    tests stay byte-identical across Python and TypeScript runners.
+    """
     if language in _parser_cache:
         return _parser_cache[language]
 
     try:
-        import tree_sitter_languages  # type: ignore
+        import tree_sitter_language_pack as tslp  # type: ignore
 
-        parser = tree_sitter_languages.get_parser(language)
+        parser = tslp.get_parser(language)
         _parser_cache[language] = parser
         return parser
     except (ImportError, Exception) as exc:
