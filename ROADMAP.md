@@ -1480,8 +1480,8 @@ Scope of the hardening:
 - [x] Eval: rerun 12 requests cases — aggregate composite 0.950 (baseline 0.951, within noise); 12/12 cases pass regression threshold; 0 ParsePool kills (Python-only codebase = zero overhead); LLM Judge 5/5 on all 4 axes for all 12 cases
 - [x] ~~Agent-timeout zombie mitigation — quick win before ProcessPool lands: track per-agent pending `Future` objects and `.cancel()` them when the agent times out~~ — **superseded**: subprocess + SIGKILL already eliminates zombies at the right layer; per-agent future cancellation is moot when the C-level parse can no longer block forever
 - [ ] ~~`_scan_workspace` migrated to ProcessPoolExecutor; results merged back into the returned dict~~ — **de-prioritised**: scan no longer a hot path (bounded at ~4 min worst-case via per-file subprocess timeout; sentry-007 full review now 8 min end-to-end). Only revisit if profiling shows scan is dominant again
-- [ ] Dependencies: upgrade `tree-sitter` + grammar provider — **deferred, requires its own PR**. Gated on: full 178 repo_graph/parser tests + 92 parity tests + 12 requests + sentry-007 eval regression + canary on abound-server. High-risk because newer grammars may rename node types (`function_definition`, `class_declaration`, …) that Python walkers key off. Parity with the TS extension runner must stay green
-- [ ] Co-ordinate TS-side tree-sitter bump in `extension/src/services/astToolRunner.ts` — paired with the Python bump above, keeps `make test-parity` byte-level green
+- [x] Dependencies: upgrade `tree-sitter` + grammar provider — shipped as Phase 9.18 step 3 (commit 8ae5a75). Python moved from tree-sitter 0.21.3 / tree-sitter-languages 1.10 (abandoned) to tree-sitter 0.25.2 / tree-sitter-language-pack 1.6.2 (maintained successor, bundles grammars, compatible ABI with the extension's web-tree-sitter 0.26.7). All 160 parity tests + 1777 backend tests pass. Sentry-007 end-to-end result: composite 0.575, 0 SIGKILL budget used, MATCH the exact expected bug. Deprecation warnings eliminated
+- [x] Co-ordinate TS-side tree-sitter bump — **no change required**: TS extension's pinned grammar WASM tags (typescript v0.23.2, python v0.23.6, etc.) already have ABI-matching versions bundled in tree-sitter-language-pack, so parity stays green without a TS-side version bump. The extension's existing `download-grammars.sh` pinning machinery validates the alignment automatically
 
 **Dependency**: 9.15 (skip list lives in Fact Vault). Step 1 shipped Sprint 16. The tree-sitter/grammar bump is the highest-risk remaining subitem and should ship on its own PR with parity + eval numbers in the description.
 
@@ -1724,7 +1724,7 @@ Bridge the gap between AI Summaries and actionable outcomes. Applies to both Ext
 | **Phase 9.15 full: Fact Vault (SQLite + CachedToolExecutor + search_facts + CLI)** | **✅ Complete** | **Sprint 15–16** |
 | **Phase 9.18 step 1: per-file parse timeout + skip caching (subprocess + SIGKILL)** | **✅ Complete** | **Sprint 16** |
 | **Phase 9.18 step 2: TSX JSX-depth heuristic** | **✅ Complete** | **Sprint 16** |
-| **Phase 9.18 step 3: tree-sitter grammar upgrade + TS-side bump** | **🟡 Deferred** | **Separate PR** |
+| **Phase 9.18 step 3: tree-sitter upgrade (0.21 → 0.25) + language-pack + file_write whitespace fix** | **✅ Complete** | **Sprint 16** |
 | **Phase 9.13 Checkpoint A: `dispatch_subagent` + checks contract** | **🟡 Planned** | **Sprint 16–17** |
 | **Phase 9.16: Forked Agent Pattern** | **🟡 Planned** | **Sprint 17** |
 | **Phase 9.13 Checkpoint B: dynamic composition default** | **🟡 Planned** | **Sprint 18** |
