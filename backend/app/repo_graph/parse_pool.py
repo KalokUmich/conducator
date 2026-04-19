@@ -27,12 +27,19 @@ Design choices
   parallelise the scan loop, which is a separate effort. A single
   worker keeps the pickling surface and process-management logic
   minimal.
-* **"spawn" start method.** The backend is a heavily multi-threaded
-  asyncio process; ``fork`` in that environment is known-unsafe
-  (threads other than the forker vanish in the child but their held
-  mutexes stay locked, causing deadlocks). ``spawn`` costs ~300 ms at
-  startup, but the worker is persistent — we pay that once per worker
-  lifetime, not per file.
+* **"forkserver" start method (with "spawn" fallback on Windows).**
+  The backend is a heavily multi-threaded asyncio process; ``fork`` in
+  that environment is known-unsafe (threads other than the forker
+  vanish in the child but their held mutexes stay locked, causing
+  deadlocks). ``forkserver`` spawns a single, single-threaded server
+  process at first use, and every subsequent worker forks from *that*
+  server — so parent-thread state never leaks into the child. Windows
+  falls back to spawn. **Both start methods still require an
+  ``if __name__ == "__main__":`` guard in any script that uses the
+  pool** — Python's multiprocessing bootstrap guard runs before the
+  start method is selected, so you'll get a ``RuntimeError`` from
+  ``Process.start()`` either way. This is unrelated to our design;
+  it's a Python multiprocessing constraint.
 * **Lazy, process-global.** The pool is created on first use and lives
   until interpreter shutdown. Test code can override with a fresh
   instance.
@@ -52,7 +59,17 @@ from .parser import FileSymbols
 
 logger = logging.getLogger(__name__)
 
-_START_METHOD = "spawn"
+
+def _choose_start_method() -> str:
+    """Prefer forkserver (POSIX) — avoids spawn's __main__ re-import hazard
+    and fork's multi-threaded unsafety. Fall back to spawn on Windows."""
+    available = _mp.get_all_start_methods()
+    if "forkserver" in available:
+        return "forkserver"
+    return "spawn"
+
+
+_START_METHOD = _choose_start_method()
 
 
 def _worker_loop(conn) -> None:  # pragma: no cover — runs in child process
@@ -91,6 +108,15 @@ class ParsePool:
 
     def _spawn(self) -> None:
         ctx = _mp.get_context(_START_METHOD)
+        # forkserver: pre-import the parser so the first worker fork
+        # inherits a ready-to-use module instead of paying the import
+        # cost on the hot path. Harmless on spawn (where set_forkserver
+        # _preload only takes effect for forkserver context).
+        if _START_METHOD == "forkserver":
+            try:
+                ctx.set_forkserver_preload(["app.repo_graph.parser"])
+            except Exception as exc:  # already set on a prior spawn is OK
+                logger.debug("forkserver preload skipped: %s", exc)
         parent_conn, child_conn = ctx.Pipe(duplex=True)
         proc = ctx.Process(
             target=_worker_loop,
@@ -98,13 +124,31 @@ class ParsePool:
             daemon=True,
             name="tree-sitter-parse-worker",
         )
-        proc.start()
+        try:
+            proc.start()
+        except RuntimeError as exc:
+            # Most commonly: "An attempt has been made to start a new
+            # process before the current process has finished its
+            # bootstrapping phase." Raised by spawn-context children
+            # that re-import a parent __main__ module lacking the
+            # ``if __name__ == "__main__":`` guard. Re-raise with a
+            # pointer so the caller can diagnose.
+            parent_conn.close()
+            child_conn.close()
+            raise RuntimeError(
+                f"ParsePool subprocess start failed with method "
+                f"'{_START_METHOD}': {exc}. If running from a script, "
+                "guard module-level code with `if __name__ == '__main__':` "
+                "so child processes don't re-execute setup."
+            ) from exc
         # Parent doesn't need the child side; closing it avoids a leak
         # and makes recv() raise EOFError if the child exits.
         child_conn.close()
         self._proc = proc
         self._conn = parent_conn
-        logger.info("ParsePool spawned worker pid=%d", proc.pid)
+        logger.info(
+            "ParsePool spawned worker pid=%d (method=%s)", proc.pid, _START_METHOD
+        )
 
     def _kill_current(self, reason: str) -> None:
         """SIGKILL the worker and release pipe handles. Caller holds the lock."""
