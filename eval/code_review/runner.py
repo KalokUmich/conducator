@@ -270,8 +270,8 @@ async def run_case_brain(
         workspace = setup_workspace(source_dir, patch_path)
 
         from app.agent_loop.pr_brain import PRBrainOrchestrator
-        from app.workflow.loader import load_pr_brain_config, load_agent_registry
         from app.code_tools.executor import LocalToolExecutor
+        from app.workflow.loader import load_agent_registry, load_pr_brain_config
 
         pr_brain_config = load_pr_brain_config()
         agent_registry = load_agent_registry()
@@ -285,6 +285,7 @@ async def run_case_brain(
             pr_brain_config=pr_brain_config,
             agent_registry=agent_registry,
             tool_executor=tool_executor,
+            task_id=f"eval-{case.id}",
         )
 
         # Collect events from the pipeline
@@ -294,33 +295,39 @@ async def run_case_brain(
         files_reviewed = []
         total_tokens = 0
 
-        async for event in orchestrator.run_stream():
-            if event.kind == "done":
-                data = event.data
-                synthesis = data.get("answer", "")
-                findings_data = data.get("findings", [])
-                merge_rec = data.get("merge_recommendation", "")
-                files_reviewed = data.get("files_reviewed", [])
+        try:
+            async for event in orchestrator.run_stream():
+                if event.kind == "done":
+                    data = event.data
+                    synthesis = data.get("answer", "")
+                    findings_data = data.get("findings", [])
+                    merge_rec = data.get("merge_recommendation", "")
+                    files_reviewed = data.get("files_reviewed", [])
 
-                # Convert finding dicts back to ReviewFinding objects
-                from app.code_review.models import ReviewFinding, Severity, FindingCategory
-                for fd in findings_data:
-                    try:
-                        findings.append(ReviewFinding(
-                            title=fd.get("title", ""),
-                            category=FindingCategory(fd.get("category", "correctness")),
-                            severity=Severity(fd.get("severity", "warning")),
-                            confidence=fd.get("confidence", 0.7),
-                            file=fd.get("file", ""),
-                            start_line=fd.get("start_line", 0),
-                            end_line=fd.get("end_line", 0),
-                            evidence=fd.get("evidence", []),
-                            risk=fd.get("risk", ""),
-                            suggested_fix=fd.get("suggested_fix", ""),
-                            agent=fd.get("agent", ""),
-                        ))
-                    except (ValueError, KeyError):
-                        continue
+                    # Convert finding dicts back to ReviewFinding objects
+                    from app.code_review.models import FindingCategory, ReviewFinding, Severity
+                    for fd in findings_data:
+                        try:
+                            findings.append(ReviewFinding(
+                                title=fd.get("title", ""),
+                                category=FindingCategory(fd.get("category", "correctness")),
+                                severity=Severity(fd.get("severity", "warning")),
+                                confidence=fd.get("confidence", 0.7),
+                                file=fd.get("file", ""),
+                                start_line=fd.get("start_line", 0),
+                                end_line=fd.get("end_line", 0),
+                                evidence=fd.get("evidence", []),
+                                risk=fd.get("risk", ""),
+                                suggested_fix=fd.get("suggested_fix", ""),
+                                agent=fd.get("agent", ""),
+                            ))
+                        except (ValueError, KeyError):
+                            continue
+        finally:
+            # Phase 9.15 — release the per-case Fact Vault. Without this,
+            # each case leaks ~40KB into ~/.conductor/scratchpad/ and the
+            # cache_perf stats never log, robbing us of validation data.
+            orchestrator.cleanup()
 
         review_result = ReviewResult(
             diff_spec="HEAD~1..HEAD",

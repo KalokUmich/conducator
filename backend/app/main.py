@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager, suppress
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -335,7 +335,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _pr_brain_config = load_pr_brain_config()
             _agent_registry = load_agent_registry()
 
-            def _make_pr_brain(workspace: str, diff_spec: str) -> PRBrainOrchestrator:
+            def _make_pr_brain(
+                workspace: str,
+                diff_spec: str,
+                task_id: Optional[str] = None,
+            ) -> PRBrainOrchestrator:
                 return PRBrainOrchestrator(
                     provider=agent_provider,
                     explorer_provider=explorer_provider or agent_provider,
@@ -345,6 +349,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     agent_registry=_agent_registry,
                     tool_executor=LocalToolExecutor(workspace),
                     trace_writer=trace_writer,
+                    task_id=task_id,
                 )
 
             app.state.pr_brain_factory = _make_pr_brain

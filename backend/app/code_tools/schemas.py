@@ -253,6 +253,27 @@ class DbSchemaParams(BaseModel):
     max_results: int = Field(default=50, ge=1, le=200)
 
 
+class SearchFactsParams(BaseModel):
+    tool: Optional[str] = Field(
+        None,
+        description="Exact tool name to filter by (e.g. 'grep', 'read_file'). Omit for all tools.",
+    )
+    path: Optional[str] = Field(
+        None,
+        description="Substring to match against the cached fact's file path. Omit for all paths.",
+    )
+    pattern: Optional[str] = Field(
+        None,
+        description="Substring to match against the cache key — useful for finding all cached greps for a given pattern.",
+    )
+    limit: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Max entries to return. Clamped to 100.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Interactive tool parameter schemas
 # ---------------------------------------------------------------------------
@@ -558,6 +579,8 @@ TOOL_PARAM_MODELS: Dict[str, type] = {
     "list_endpoints": ListEndpointsParams,
     "extract_docstrings": ExtractDocstringsParams,
     "db_schema": DbSchemaParams,
+    # Scratchpad (Phase 9.15) — sub-agent queries over the session Fact Vault
+    "search_facts": SearchFactsParams,
     # File editing tools
     "file_edit": FileEditParams,
     "file_write": FileWriteParams,
@@ -1157,6 +1180,27 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "input_schema": DbSchemaParams.model_json_schema(),
     },
     # ------------------------------------------------------------------
+    # Scratchpad tools (Phase 9.15) — session-shared Fact Vault queries
+    # ------------------------------------------------------------------
+    {
+        "name": "search_facts",
+        "description": (
+            "Query the current PR review session's shared Fact Vault to see what "
+            "previous sub-agents have already cached.\n\n"
+            "Returns HEADERS (key, tool, path, line range, which agent produced it, "
+            "timestamp) — not the full cached content. When you want the content, "
+            "call the original tool with the same params and it will cache-hit.\n\n"
+            "Filters (all optional, AND-combined):\n"
+            "- tool: filter to one tool (e.g. 'grep', 'read_file')\n"
+            "- path: substring match on the cached fact's file path\n"
+            "- pattern: substring match on the cache key (e.g. find all cached greps for 'auth')\n\n"
+            "Use this BEFORE running an expensive exploration tool to avoid redundant work: "
+            "if a sibling sub-agent already grepped what you need, the fact is there and "
+            "the original tool call will be served from cache."
+        ),
+        "input_schema": SearchFactsParams.model_json_schema(),
+    },
+    # ------------------------------------------------------------------
     # File editing tools
     # ------------------------------------------------------------------
     {
@@ -1404,6 +1448,11 @@ TOOL_METADATA: Dict[str, ToolMetadata] = {
     "list_endpoints": ToolMetadata(category="analysis", summary_template="endpoints: {_count} routes"),
     "extract_docstrings": ToolMetadata(category="analysis", summary_template="docstrings in {path}: {_count} docs"),
     "db_schema": ToolMetadata(category="analysis", summary_template="db_schema: {_count} models"),
+    # --- Scratchpad (Phase 9.15) ---
+    "search_facts": ToolMetadata(
+        category="scratchpad",
+        summary_template="search_facts tool={tool} path={path}: {_count} facts",
+    ),
     # --- Testing ---
     "find_tests": ToolMetadata(category="test", summary_template="tests for '{name}': {_count} tests"),
     "test_outline": ToolMetadata(category="test", summary_template="test_outline {path}: {_count} tests"),

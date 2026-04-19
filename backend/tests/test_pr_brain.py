@@ -33,6 +33,18 @@ from app.workflow.models import PRBrainConfig
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _disable_scratchpad(monkeypatch):
+    """Skip Fact Vault creation in PRBrainOrchestrator unit tests.
+
+    These tests don't exercise `run_stream` end-to-end; they unit-test
+    helper methods with mocked tool_executors. Creating a real SQLite
+    file per test leaks ~40KB each into ~/.conductor/scratchpad/. Set
+    the env var to 0 for the duration of this test module.
+    """
+    monkeypatch.setenv("CONDUCTOR_SCRATCHPAD_ENABLED", "0")
+
+
 def _make_pr_brain(
     review_agents=None,
     max_findings=10,

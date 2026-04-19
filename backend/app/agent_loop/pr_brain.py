@@ -169,6 +169,8 @@ class PRBrainOrchestrator:
         tool_executor: ToolExecutor,
         trace_writer=None,
         event_sink: Optional[asyncio.Queue] = None,
+        scratchpad=None,
+        task_id: Optional[str] = None,
     ):
         self._provider = provider
         self._explorer_provider = explorer_provider
@@ -176,9 +178,48 @@ class PRBrainOrchestrator:
         self._diff_spec = diff_spec
         self._config = pr_brain_config
         self._agent_registry = agent_registry
-        self._tool_executor = tool_executor
         self._trace_writer = trace_writer
         self._event_sink = event_sink
+        self._task_id = task_id
+
+        # Phase 9.15 — task-scoped Fact Vault. Sub-agent tool calls are
+        # routed through a CachedToolExecutor so identical grep / read_file /
+        # find_symbol queries across 7 parallel review agents hit the vault
+        # instead of re-running. Opt out via CONDUCTOR_SCRATCHPAD_ENABLED=0.
+        #
+        # ``task_id`` (e.g. "ado-pr-12345", "greptile-sentry-006") is folded
+        # into the session_id so concurrent PR reviews produce readable
+        # scratchpad filenames — isolation was already guaranteed by
+        # per-session files, this just makes them traceable.
+        import os as _os
+        import re as _re
+        import uuid as _uuid
+
+        from app.scratchpad import CachedToolExecutor, FactStore
+
+        self._owns_scratchpad = False
+        if _os.environ.get("CONDUCTOR_SCRATCHPAD_ENABLED", "1") != "0" and scratchpad is None:
+            if task_id:
+                slug = _re.sub(r"[^A-Za-z0-9._-]+", "-", task_id).strip("-")[:48] or "pr"
+                session_id = f"{slug}-{_uuid.uuid4().hex[:8]}"
+            else:
+                session_id = f"pr-{_uuid.uuid4().hex[:12]}"
+            scratchpad = FactStore.open(
+                session_id, workspace=workspace_path, task_id=task_id
+            )
+            self._owns_scratchpad = True
+        self._scratchpad = scratchpad
+
+        # Token returned by contextvars.ContextVar.set so cleanup() can
+        # reset binding exactly once, even if cleanup is called twice.
+        self._scratchpad_ctx_token = None
+        if scratchpad is not None:
+            from app.scratchpad.context import _current_store
+
+            self._scratchpad_ctx_token = _current_store.set(scratchpad)
+            self._tool_executor = CachedToolExecutor(tool_executor, scratchpad)
+        else:
+            self._tool_executor = tool_executor
 
     async def run_stream(self) -> AsyncGenerator[WorkflowEvent, None]:
         """Execute the full PR review pipeline, yielding progress events.
@@ -467,6 +508,53 @@ class PRBrainOrchestrator:
                     break
 
         return agents
+
+    def cleanup(self) -> None:
+        """Close and delete the session-owned Fact Vault, if any.
+
+        Must be called once the orchestrator is done (success OR failure).
+        Callers that passed a vault via ``scratchpad=`` keep ownership —
+        we only delete what we created ourselves. Safe to call multiple
+        times; second call is a no-op.
+
+        Also resets the ContextVar binding so ``search_facts`` in any
+        other concurrent task stops pointing at our (now-deleted) DB.
+        """
+        # Reset the ContextVar binding regardless of ownership — if we
+        # set it, we reset it, so concurrent search_facts calls won't hit
+        # a deleted store.
+        if self._scratchpad_ctx_token is not None:
+            try:
+                from app.scratchpad.context import _current_store
+
+                _current_store.reset(self._scratchpad_ctx_token)
+            except (LookupError, ValueError) as e:
+                # Token already reset or context mismatch; safe to ignore.
+                logger.debug("Scratchpad ContextVar reset skipped: %s", e)
+            self._scratchpad_ctx_token = None
+
+        if not self._owns_scratchpad or self._scratchpad is None:
+            return
+        try:
+            stats = self._scratchpad.stats()
+            exec_stats = getattr(self._tool_executor, "stats", None)
+            # WARNING level so the line lands in default-level loggers
+            # (root level is WARNING). One emit per PR review — low noise,
+            # high signal: hits / misses / range_hits / negative_hits /
+            # skipped from CachedToolExecutor + facts/negative_facts/
+            # skip_facts counts from FactStore. Critical observability for
+            # the eval harness.
+            logger.warning(
+                "Scratchpad close: session=%s stats=%s cache_perf=%s",
+                self._scratchpad.session_id,
+                stats,
+                exec_stats,
+            )
+            self._scratchpad.delete()
+        except Exception as e:
+            logger.warning("Scratchpad cleanup failed: %s", e)
+        self._scratchpad = None
+        self._owns_scratchpad = False
 
     async def _dispatch_agents(
         self,

@@ -238,6 +238,14 @@ class WorkflowEngine:
 
             workspace_path = params.get("workspace_path", context.get("workspace_path", ""))
             diff_spec = params.get("diff_spec", "HEAD~1..HEAD")
+            # Prefer caller-supplied task_id; fall back to room_id or
+            # session_id so the scratchpad filename still traces back to the
+            # chat session when the source didn't set one explicitly.
+            task_id = (
+                params.get("task_id")
+                or context.get("room_id")
+                or context.get("session_id")
+            )
 
             orchestrator = PRBrainOrchestrator(
                 provider=self._provider,
@@ -249,6 +257,7 @@ class WorkflowEngine:
                 tool_executor=self._tool_executor or LocalToolExecutor(workspace_path),
                 trace_writer=self._trace_writer,
                 event_sink=self._event_queue,
+                task_id=task_id,
             )
 
             try:
@@ -257,6 +266,10 @@ class WorkflowEngine:
             except Exception as exc:
                 logger.error("PR Brain failed: %s", exc, exc_info=True)
                 await self._event_queue.put(WorkflowEvent("error", {"error": f"PR Brain failed: {exc}"}))
+            finally:
+                # Phase 9.15 — release the session-scoped Fact Vault.
+                # No-op when the orchestrator doesn't own one (caller passed a vault).
+                orchestrator.cleanup()
         else:
             await self._event_queue.put(WorkflowEvent("error", {"error": f"Unknown specialized brain: {brain_name}"}))
 

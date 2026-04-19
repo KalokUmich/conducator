@@ -645,6 +645,12 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
     2. **Disk** — ``{workspace}/.conductor/symbol_index.json``, survives
        server restarts.
     3. **Full scan** — AST walk, written to memory + disk.
+
+    Uses per-key in-flight dedup (scratchpad.key_lock) so N concurrent
+    sub-agents hitting a cold cache collapse into ONE real scan. Without
+    this, 7 parallel sub-agents calling ``find_symbol`` on a cold cache
+    each run their own 17K-file tree-sitter walk (observed in sentry-007
+    diagnostic — the second stampede entry point after _ensure_graph).
     """
     try:
         from app.repo_graph.parser import detect_language, extract_definitions
@@ -654,7 +660,7 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
 
     current_head = _get_git_head(workspace)
 
-    # 1. In-memory hit
+    # Fast path: in-memory hit, no lock
     entry = _symbol_index_cache.get(workspace)
     if entry is not None:
         index, cached_head = entry
@@ -666,89 +672,103 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
             )
             return index
 
-    # 2. Disk hit
-    if current_head is not None:
-        disk_entry = _load_disk_cache(workspace)
-        if disk_entry is not None:
-            disk_index, disk_head = disk_entry
-            if disk_head == current_head:
-                logger.debug(
-                    "Symbol index disk hit: %d files, head=%s",
-                    len(disk_index),
-                    current_head[:8],
-                )
-                _symbol_index_cache[workspace] = (disk_index, current_head)
-                return disk_index
+    # Slow path — serialise cold-miss builders. The lock key includes the
+    # git HEAD because a HEAD change is a legitimate reason to rebuild even
+    # if another thread is mid-build for the previous HEAD; we want fresh.
+    from app.scratchpad import key_lock
 
-    # 3. Full scan
-    ws = Path(workspace).resolve()
-    if not ws.is_dir():
-        logger.warning("Symbol index scan: workspace does not exist: %s", ws)
-        return {}
+    with key_lock(f"v1:symbol_index:{workspace}:{current_head or 'no-head'}"):
+        # Re-check in-memory under the lock
+        entry = _symbol_index_cache.get(workspace)
+        if entry is not None:
+            index, cached_head = entry
+            if cached_head == current_head:
+                return index
 
-    index: Dict[str, list] = {}
-    files_scanned = 0
-    files_skipped_lang = 0
-    files_skipped_size = 0
-    total_defs = 0
+        # 2. Disk hit (also checked under lock — the disk cache may have been
+        # populated by a concurrent builder that just released the lock)
+        if current_head is not None:
+            disk_entry = _load_disk_cache(workspace)
+            if disk_entry is not None:
+                disk_index, disk_head = disk_entry
+                if disk_head == current_head:
+                    logger.debug(
+                        "Symbol index disk hit: %d files, head=%s",
+                        len(disk_index),
+                        current_head[:8],
+                    )
+                    _symbol_index_cache[workspace] = (disk_index, current_head)
+                    return disk_index
 
-    for dirpath, dirnames, filenames in os.walk(ws):
-        rel_dir = Path(dirpath).relative_to(ws)
-        if _is_excluded(rel_dir.parts):
-            dirnames.clear()
-            continue
-        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+        # 3. Full scan
+        ws = Path(workspace).resolve()
+        if not ws.is_dir():
+            logger.warning("Symbol index scan: workspace does not exist: %s", ws)
+            return {}
 
-        for f in filenames:
-            fp = Path(dirpath) / f
-            if detect_language(str(fp)) is None:
-                files_skipped_lang += 1
+        index: Dict[str, list] = {}
+        files_scanned = 0
+        files_skipped_lang = 0
+        files_skipped_size = 0
+        total_defs = 0
+
+        for dirpath, dirnames, filenames in os.walk(ws):
+            rel_dir = Path(dirpath).relative_to(ws)
+            if _is_excluded(rel_dir.parts):
+                dirnames.clear()
                 continue
-            try:
-                fsize = fp.stat().st_size
-            except OSError:
-                continue
-            if fsize > _MAX_FILE_SIZE:
-                files_skipped_size += 1
-                continue
-            try:
-                source = fp.read_bytes()
-            except OSError:
-                continue
-            files_scanned += 1
-            rel = str(fp.relative_to(ws))
-            symbols = extract_definitions(str(fp), source)
-            if symbols.definitions:
-                index[rel] = symbols.definitions
-                total_defs += len(symbols.definitions)
+            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
 
-    logger.info(
-        "Symbol index built: %d files with %d definitions "
-        "(scanned=%d, skipped_lang=%d, skipped_size=%d, workspace=%s, head=%s)",
-        len(index),
-        total_defs,
-        files_scanned,
-        files_skipped_lang,
-        files_skipped_size,
-        workspace,
-        (current_head or "")[:8],
-    )
+            for f in filenames:
+                fp = Path(dirpath) / f
+                if detect_language(str(fp)) is None:
+                    files_skipped_lang += 1
+                    continue
+                try:
+                    fsize = fp.stat().st_size
+                except OSError:
+                    continue
+                if fsize > _MAX_FILE_SIZE:
+                    files_skipped_size += 1
+                    continue
+                try:
+                    source = fp.read_bytes()
+                except OSError:
+                    continue
+                files_scanned += 1
+                rel = str(fp.relative_to(ws))
+                symbols = extract_definitions(str(fp), source)
+                if symbols.definitions:
+                    index[rel] = symbols.definitions
+                    total_defs += len(symbols.definitions)
 
-    cache_head = current_head or ""
-    _symbol_index_cache[workspace] = (index, cache_head)
-    # Only persist to disk if the index is non-trivial.
-    # An empty or near-empty index may indicate the workspace wasn't fully
-    # checked out yet (e.g. git worktree still in progress).  By skipping
-    # disk caching we ensure the next call does a fresh scan.
-    if current_head and total_defs > 0:
-        _save_disk_cache(workspace, index, current_head)
-    elif current_head and total_defs == 0 and files_scanned > 0:
-        logger.warning(
-            "Symbol index has 0 definitions from %d scanned files — "
-            "NOT saving to disk cache (possible incomplete checkout)",
+        logger.info(
+            "Symbol index built: %d files with %d definitions "
+            "(scanned=%d, skipped_lang=%d, skipped_size=%d, workspace=%s, head=%s)",
+            len(index),
+            total_defs,
             files_scanned,
+            files_skipped_lang,
+            files_skipped_size,
+            workspace,
+            (current_head or "")[:8],
         )
-    return index
+
+        cache_head = current_head or ""
+        _symbol_index_cache[workspace] = (index, cache_head)
+        # Only persist to disk if the index is non-trivial.
+        # An empty or near-empty index may indicate the workspace wasn't fully
+        # checked out yet (e.g. git worktree still in progress).  By skipping
+        # disk caching we ensure the next call does a fresh scan.
+        if current_head and total_defs > 0:
+            _save_disk_cache(workspace, index, current_head)
+        elif current_head and total_defs == 0 and files_scanned > 0:
+            logger.warning(
+                "Symbol index has 0 definitions from %d scanned files — "
+                "NOT saving to disk cache (possible incomplete checkout)",
+                files_scanned,
+            )
+        return index
 
 
 def invalidate_symbol_cache(workspace: Optional[str] = None) -> None:
@@ -5127,6 +5147,104 @@ TOOL_REGISTRY = {
     "extract_docstrings": extract_docstrings,
     "db_schema": db_schema,
 }
+
+
+# ---------------------------------------------------------------------------
+# Scratchpad tools (Phase 9.15) — sub-agents query facts accumulated by
+# earlier sub-agents in the same PR review session.
+# ---------------------------------------------------------------------------
+
+
+def search_facts(
+    workspace: str,
+    tool: Optional[str] = None,
+    path: Optional[str] = None,
+    pattern: Optional[str] = None,
+    limit: int = 20,
+) -> ToolResult:
+    """Search the current session's Fact Vault for previously-cached results.
+
+    Returns METADATA only — keys, tool, path, range, agent, timestamp — not
+    the full cached content. The caller can re-run the original tool to get
+    content (CachedToolExecutor serves it from cache transparently), or
+    it can see the fact already exists and decide the lookup is redundant.
+
+    Filters (all optional, AND-combined):
+        * ``tool``    — exact tool name (``grep``, ``read_file``, …)
+        * ``path``    — substring match on the cached fact's file path
+        * ``pattern`` — substring match on the cache KEY (includes patterns for grep)
+
+    Returns a structured list of dicts the calling sub-agent can inspect.
+    When no FactStore is active (tool called outside a PR review context),
+    returns success=False with an instructive error.
+    """
+    from app.scratchpad import current_factstore
+
+    store = current_factstore()
+    if store is None:
+        return ToolResult(
+            tool_name="search_facts",
+            success=False,
+            error=(
+                "No active scratchpad session. search_facts is only useful "
+                "during a PR review run (PRBrainOrchestrator binds a FactStore)."
+            ),
+        )
+
+    # Build the SQL filter dynamically — None values are omitted.
+    clauses: List[str] = []
+    params: List[Any] = []
+    if tool:
+        clauses.append("tool = ?")
+        params.append(tool.lower())
+    if path:
+        clauses.append("path LIKE ?")
+        params.append(f"%{path}%")
+    if pattern:
+        clauses.append("key LIKE ?")
+        params.append(f"%{pattern}%")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(max(1, min(limit, 100)))  # clamp
+
+    try:
+        rows = store._conn().execute(
+            f"SELECT key, tool, path, range_start, range_end, agent, ts_written "
+            f"FROM facts {where} ORDER BY ts_written DESC LIMIT ?",
+            params,
+        ).fetchall()
+    except Exception as e:
+        logger.warning("search_facts query failed: %s", e)
+        return ToolResult(
+            tool_name="search_facts",
+            success=False,
+            error=f"scratchpad query failed: {e}",
+        )
+
+    headers = [
+        {
+            "key": r["key"],
+            "tool": r["tool"],
+            "path": r["path"],
+            "range_start": r["range_start"],
+            "range_end": r["range_end"],
+            "agent": r["agent"],
+            "ts_written": r["ts_written"],
+        }
+        for r in rows
+    ]
+    return ToolResult(
+        tool_name="search_facts",
+        success=True,
+        data={
+            "count": len(headers),
+            "facts": headers,
+            "stats": store.stats(),
+        },
+    )
+
+
+TOOL_REGISTRY["search_facts"] = search_facts
+
 
 # --- Browser tools (Playwright) ---
 try:

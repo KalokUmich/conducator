@@ -1527,7 +1527,7 @@ class TestToolMetadata:
     def test_metadata_categories_valid(self):
         from app.code_tools.schemas import TOOL_METADATA
 
-        valid = {"search", "navigate", "git", "analysis", "test", "browser", "integration", "edit"}
+        valid = {"search", "navigate", "git", "analysis", "test", "browser", "integration", "edit", "scratchpad"}
         for name, meta in TOOL_METADATA.items():
             assert meta.category in valid, f"Tool '{name}' has invalid category '{meta.category}'"
 

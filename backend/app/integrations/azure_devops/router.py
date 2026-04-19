@@ -131,8 +131,11 @@ async def review_pull_request(
                 diff_spec=diff_spec,
             )
 
-            # Step 3: Full review via PRBrainOrchestrator
-            orchestrator = pr_brain_factory(worktree_path, diff_spec)
+            # Step 3: Full review via PRBrainOrchestrator. ``task_id`` makes
+            # the scratchpad SQLite filename traceable back to this PR when
+            # multiple reviews run concurrently.
+            task_id = f"ado-{req.project}-pr-{req.pr_id}"
+            orchestrator = pr_brain_factory(worktree_path, diff_spec, task_id=task_id)
 
             # Collect results from the streaming pipeline
             from app.code_review.models import (
@@ -150,33 +153,37 @@ async def review_pull_request(
             total_iterations = 0
             duration_ms = 0.0
 
-            async for event in orchestrator.run_stream():
-                if event.kind == "done":
-                    data = event.data
-                    synthesis = data.get("answer", "")
-                    merge_rec = data.get("merge_recommendation", "")
-                    files_reviewed = data.get("files_reviewed", [])
-                    total_iterations = data.get("total_iterations", 0)
-                    duration_ms = data.get("duration_ms", 0.0)
-                    for fd in data.get("findings", []):
-                        try:
-                            findings.append(
-                                ReviewFinding(
-                                    title=fd.get("title", ""),
-                                    category=FindingCategory(fd.get("category", "correctness")),
-                                    severity=Severity(fd.get("severity", "warning")),
-                                    confidence=fd.get("confidence", 0.7),
-                                    file=fd.get("file", ""),
-                                    start_line=fd.get("start_line", 0),
-                                    end_line=fd.get("end_line", 0),
-                                    evidence=fd.get("evidence", []),
-                                    risk=fd.get("risk", ""),
-                                    suggested_fix=fd.get("suggested_fix", ""),
-                                    agent=fd.get("agent", ""),
+            try:
+                async for event in orchestrator.run_stream():
+                    if event.kind == "done":
+                        data = event.data
+                        synthesis = data.get("answer", "")
+                        merge_rec = data.get("merge_recommendation", "")
+                        files_reviewed = data.get("files_reviewed", [])
+                        total_iterations = data.get("total_iterations", 0)
+                        duration_ms = data.get("duration_ms", 0.0)
+                        for fd in data.get("findings", []):
+                            try:
+                                findings.append(
+                                    ReviewFinding(
+                                        title=fd.get("title", ""),
+                                        category=FindingCategory(fd.get("category", "correctness")),
+                                        severity=Severity(fd.get("severity", "warning")),
+                                        confidence=fd.get("confidence", 0.7),
+                                        file=fd.get("file", ""),
+                                        start_line=fd.get("start_line", 0),
+                                        end_line=fd.get("end_line", 0),
+                                        evidence=fd.get("evidence", []),
+                                        risk=fd.get("risk", ""),
+                                        suggested_fix=fd.get("suggested_fix", ""),
+                                        agent=fd.get("agent", ""),
+                                    )
                                 )
-                            )
-                        except Exception:
-                            continue
+                            except Exception:
+                                continue
+            finally:
+                # Phase 9.15 — release the session-scoped Fact Vault.
+                orchestrator.cleanup()
 
             result = ReviewResult(
                 diff_spec=diff_spec,
