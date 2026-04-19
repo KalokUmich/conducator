@@ -13,10 +13,12 @@ This guide covers running tests for the backend (Python/pytest), the extension s
 
 ```bash
 cd backend
-pytest                                        # all tests (1300+)
+pytest                                        # all tests (1777+)
 pytest -k "test_code_tools"                  # code tools tests only
 pytest -k "test_agent_loop"                  # agent loop tests only
 pytest -k "test_repo_graph"                  # repo graph tests only
+pytest -k "test_scratchpad"                  # Phase 9.15 Fact Vault tests
+pytest -k "test_pr_brain"                    # PR Brain orchestrator tests
 pytest -v --tb=short                         # verbose with short tracebacks
 pytest --cov=. --cov-report=html             # coverage report
 
@@ -29,27 +31,56 @@ make update-contracts                         # regenerate after schema changes
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `tests/test_code_tools.py` | 98 | All 24 code tools + dispatcher + multi-language |
-| `tests/test_agent_loop.py` | 47 | Agent loop + 3-layer prompt + completeness check |
+| `tests/test_code_tools.py` | 139 | All 32 code tools + dispatcher + multi-language + ToolMetadata + whitespace-preservation regression (Phase 9.18 step 3) |
+| `tests/test_agent_loop.py` | 55 | Agent loop + 4-layer prompt + context clearing |
+| `tests/test_brain.py` | 64 | Brain orchestrator, AgentToolExecutor, 4 dispatch modes |
+| `tests/test_pr_brain.py` | 32 | PRBrainOrchestrator 6-phase pipeline, Fact Vault wiring, cleanup |
+| `tests/test_file_edit_tools.py` | 32 | file_edit + file_write (read-before-write, staleness check, secret detection) |
+| `tests/test_backend_only_tools.py` | 8 | git_hotspots / list_endpoints / extract_docstrings / db_schema smoke tests |
 | `tests/test_budget_controller.py` | 20 | Token budget signals, tracking, edge cases |
-| `tests/test_session_trace.py` | 15 | SessionTrace, IterationTrace, save/load |
-| `tests/test_evidence.py` | 14 | Evidence evaluator (file refs, tool calls, budget checks) |
+| `tests/test_session_trace.py` | 23 | SessionTrace, IterationTrace, save/load |
+| `tests/test_evidence.py` | 19 | Evidence evaluator (file refs, tool calls, budget checks) |
 | `tests/test_symbol_role.py` | 24 | Symbol role classification + sorting + decorator detection |
-| `tests/test_output_policy.py` | 19 | Per-tool truncation policies, budget adaptation |
-| `tests/test_query_classifier.py` | 26 | Keyword + LLM classification, dynamic tool sets, filter_tools |
+| `tests/test_output_policy.py` | 21 | Per-tool truncation policies, budget adaptation, glob |
 | `tests/test_compressed_tools.py` | 24 | compressed_view, module_summary, expand_symbol |
+| `tests/test_detect_patterns.py` | 34 | Pattern extraction (detect_patterns tool) |
 | `tests/test_langextract.py` | 57 | Bedrock provider, catalog, service, router |
-| `tests/test_repo_graph.py` | 72 | Parser + graph + PageRank + RepoMapService |
-| `tests/test_config_new.py` | 27 | Config + secrets |
-| `tests/test_chat_persistence.py` | — | ChatPersistenceService: micro-batch writes, flush timer, delete room |
-| `tests/test_browser_tools.py` | — | Browser tools (Playwright — mocked BrowserService) |
-| `tests/test_git_workspace.py` | — | Git workspace lifecycle |
+| `tests/test_repo_graph.py` | 67 | Parser + graph + PageRank + RepoMapService |
+| `tests/test_repo_graph_timeout.py` | 23 | Phase 9.18 step 1+2: subprocess parse pool, SIGKILL, skip_facts, JSX-depth heuristic |
+| `tests/test_degraded_extraction_signal.py` | 6 | Agent-visible `extracted_via` markers on regex-fallback symbol data |
+| **Scratchpad (Phase 9.15 Fact Vault)** | | |
+| `tests/test_scratchpad_keys.py` | 21 | Canonical cache-key builders (24 tools), range extraction, path normalisation |
+| `tests/test_scratchpad_store.py` | 22 | FactStore put/get/range_lookup, WAL concurrency, task_id meta, sweep_orphans |
+| `tests/test_scratchpad_cached_executor.py` | 10 | CachedToolExecutor hit/miss, range-intersection, negative cache, skip-list |
+| `tests/test_scratchpad_cli.py` | 7 | `python -m app.scratchpad` list/dump/sweep |
+| `tests/test_scratchpad_search_facts.py` | 11 | search_facts tool dispatch, filters, Pydantic validation |
+| `tests/test_scratchpad_inflight.py` | — | In-flight dedup via key_lock (prevents cold-cache stampede) |
+| **Tool parity** | | |
+| `tests/test_tool_parity.py` | 68 | get_dependencies / get_dependents / test_outline parity (direct vs TS extension) |
+| `tests/test_tool_parity_ast.py` | 26 | AST tools parity (file_outline, find_symbol, find_references, get_callers, get_callees, expand_symbol) |
+| `tests/test_tool_parity_deep.py` | 34 | Deep parity (trace_variable, compressed_view, module_summary, detect_patterns, test_outline) |
+| `tests/test_tool_parity_subprocess.py` | 60+ | Python direct vs Python CLI shape parity. Phase 9.18 step 3 added 4 new classes: glob, ast_search, file_edit, file_write |
+| `tests/test_local_tools_parity.py` | 23 | Local mode contract validation |
+| **Other** | | |
 | `tests/test_ai_provider.py` | 131 | All 3 AI providers + chat_with_tools + TokenUsage |
+| `tests/test_bedrock_tool_repair.py` | 64 | Bedrock tool-call repair + malformed response handling |
+| `tests/test_prompt_builder.py` | 64 | 4-layer prompt assembly, skill injection |
+| `tests/test_shared.py` | 55 | Shared code-review functions (evidence gate, dedup, ranking) |
+| `tests/test_code_review.py` | 67 | Legacy CodeReviewService 10-step pipeline |
+| `tests/test_auto_apply_policy.py` | 28 | Auto-apply policy enforcement |
+| `tests/test_chat_persistence.py` | 16 | ChatPersistenceService: micro-batch writes, flush timer, delete room |
+| `tests/test_browser_tools.py` | 35 | Browser tools (Playwright — mocked BrowserService) |
+| `tests/test_git_workspace.py` | 75 | Git workspace lifecycle |
 | `tests/test_chat.py` | 29 | WebSocket + history + typing indicators |
+| `tests/test_jira_router.py` | 45 | Jira OAuth 3LO + REST router |
+| `tests/test_jira_service.py` | 48 | JiraOAuthService token lifecycle |
+| `tests/test_jira_tools.py` | 21 | Jira agent tools (search, create, update) |
+| `tests/test_auth.py` | 38 | SSO ARN parsing, device auth |
+| `tests/test_config_new.py` | 19 | Config + secrets |
 
-### Code Tools Tests (98 tests)
+### Code Tools Tests (139 tests)
 
-The `test_code_tools.py` file covers all **24 code tools** using real filesystem operations via `tmp_path` fixtures:
+The `test_code_tools.py` file covers all **32 code tools** using real filesystem operations via `tmp_path` fixtures. File editing tools (`file_edit`, `file_write`) have their own dedicated `test_file_edit_tools.py` (32 tests) covering read-before-write, staleness checks, secret detection, and the whitespace preservation regression (Phase 9.18 step 3: `_repair_tool_params` Pattern 3 whitelist for `file_write.content` / `file_edit.old_string` / `file_edit.new_string`):
 
 **Basic navigation tools:**
 - `grep` — regex search, multi-match, exclude patterns, binary skip
@@ -282,6 +313,19 @@ The `test_config_new.py` file covers (RAG remnants removed):
 - `setdefault()` semantics (does not overwrite existing env vars)
 - AWS, OpenAI credential injection via `os.environ.setdefault()`
 
+### Phase 9.15 + 9.18 Infrastructure (~95 tests)
+
+The 9.15 Fact Vault + 9.18 Scan Hardening shipped an entire new layer under `app/scratchpad/` and `app/repo_graph/parse_pool.py`, backed by a matching test surface:
+
+- **test_scratchpad_keys.py (21)** — canonical cache keys for all 24 cacheable tools, `v1:` schema prefix, path normalisation via `os.path.realpath`, pattern whitespace strip, glob-set canonicalisation
+- **test_scratchpad_store.py (22)** — SQLite WAL + thread-local connections, `put`/`get` round-trip, `range_lookup` narrowest-superset preference, `put_skip` + `should_skip`, concurrent writes across threads, `task_id` in meta, `sweep_orphans(hours=24)`
+- **test_scratchpad_cached_executor.py (10)** — non-cacheable passthrough, skip-list short-circuit, exact-key hit, range-intersection hit with slice, negative-cache hit, miss delegates to inner, vault write errors don't fail caller
+- **test_scratchpad_cli.py (7)** — `python -m app.scratchpad list/dump/sweep` command line
+- **test_scratchpad_search_facts.py (11)** — `search_facts` tool dispatch, filter combinations, Pydantic validation, no-vault-bound error shape
+- **test_pr_brain.py fixture** — autouse sets `CONDUCTOR_SCRATCHPAD_ENABLED=0` so the 32 legacy pr_brain tests don't leak SQLite files into `~/.conductor/scratchpad/`
+- **test_repo_graph_timeout.py (23)** — wrapper-level (mocked pool) for timeout/regex-fallback/skip-fact integration/env var; **real-subprocess tests** for actual SIGKILL + respawn behaviour; JSX-depth heuristic coverage (depth estimator counts nested components, routes large TSX to regex pre-emptively)
+- **test_degraded_extraction_signal.py (6)** — `FileSymbols.extracted_via` field, `find_symbol` per-result tagging, `file_outline` dict-wrap shape change when regex fallback fires
+
 ## Extension Service Tests (node:test)
 
 ```bash
@@ -378,10 +422,12 @@ jobs:
 
 ```bash
 cd backend
-pytest                                        # 所有测试 (1300+)
+pytest                                        # 所有测试 (1777+)
 pytest -k "test_code_tools"                  # 代码工具测试
 pytest -k "test_agent_loop"                  # agent loop 测试
 pytest -k "test_repo_graph"                  # repo graph 测试
+pytest -k "test_scratchpad"                  # Phase 9.15 Fact Vault 测试
+pytest -k "test_pr_brain"                    # PR Brain 编排器测试
 pytest -v --tb=short                         # 详细输出
 pytest --cov=. --cov-report=html             # 覆盖率报告
 
@@ -393,26 +439,49 @@ make test-parity                              # 合约检查 + 形状验证 + �
 
 | 文件 | 测试数 | 覆盖 |
 |------|--------|------|
-| `tests/test_code_tools.py` | 98 | 24 个代码工具 + 调度器 + 多语言 |
-| `tests/test_agent_loop.py` | 47 | Agent loop + 三层提示词 + 完整性检查 |
+| `tests/test_code_tools.py` | 139 | 全部 32 个代码工具 + 调度器 + 多语言 + ToolMetadata + 空白字符保留回归（Phase 9.18 step 3）|
+| `tests/test_agent_loop.py` | 55 | Agent loop + 四层提示词 + 上下文清理 |
+| `tests/test_brain.py` | 64 | Brain 编排器、AgentToolExecutor、4 种分发模式 |
+| `tests/test_pr_brain.py` | 32 | PRBrainOrchestrator 6 阶段流水线、Fact Vault 接线、cleanup |
+| `tests/test_file_edit_tools.py` | 32 | file_edit + file_write（读前写、新鲜度检查、密钥检测）|
+| `tests/test_backend_only_tools.py` | 8 | git_hotspots / list_endpoints / extract_docstrings / db_schema 烟测 |
 | `tests/test_budget_controller.py` | 20 | Token 预算信号、跟踪、边界情况 |
-| `tests/test_session_trace.py` | 15 | SessionTrace、IterationTrace、保存/加载 |
-| `tests/test_evidence.py` | 14 | 证据评估器（文件引用、工具调用、预算检查） |
+| `tests/test_session_trace.py` | 23 | SessionTrace、IterationTrace、保存/加载 |
+| `tests/test_evidence.py` | 19 | 证据评估器（文件引用、工具调用、预算检查）|
 | `tests/test_symbol_role.py` | 24 | 符号角色分类 + 排序 + 装饰器检测 |
-| `tests/test_output_policy.py` | 19 | 每工具截断策略、预算自适应 |
-| `tests/test_query_classifier.py` | 26 | 关键词 + LLM 分类、动态工具集、filter_tools |
+| `tests/test_output_policy.py` | 21 | 每工具截断策略、预算自适应、glob |
 | `tests/test_compressed_tools.py` | 24 | compressed_view、module_summary、expand_symbol |
+| `tests/test_detect_patterns.py` | 34 | 架构模式抽取（detect_patterns 工具）|
 | `tests/test_langextract.py` | 57 | Bedrock 提供商、目录、服务、路由 |
-| `tests/test_repo_graph.py` | 72 | 解析器 + 图构建 + PageRank + 服务 |
-| `tests/test_config_new.py` | 27 | 配置 + 密钥 |
-| `tests/test_chat_persistence.py` | — | ChatPersistenceService micro-batch 写入、刷新计时器 |
-| `tests/test_browser_tools.py` | — | 浏览器工具（Playwright service mocked）|
-| `tests/test_git_workspace.py` | — | Git 工作区生命周期 |
+| `tests/test_repo_graph.py` | 67 | 解析器 + 图构建 + PageRank + 服务 |
+| `tests/test_repo_graph_timeout.py` | 23 | Phase 9.18 step 1+2：子进程解析池、SIGKILL、skip_facts、JSX-depth 启发式 |
+| `tests/test_degraded_extraction_signal.py` | 6 | Agent 可见的 `extracted_via` 标记（regex fallback 后的符号降级信号）|
+| **Scratchpad（Phase 9.15 Fact Vault）** | | |
+| `tests/test_scratchpad_keys.py` | 21 | 24 个工具的规范缓存键、范围抽取、路径规范化 |
+| `tests/test_scratchpad_store.py` | 22 | FactStore put/get/range_lookup、WAL 并发、task_id meta、sweep_orphans |
+| `tests/test_scratchpad_cached_executor.py` | 10 | CachedToolExecutor 命中/未命中、范围交集、负缓存、skip-list |
+| `tests/test_scratchpad_cli.py` | 7 | `python -m app.scratchpad` list/dump/sweep |
+| `tests/test_scratchpad_search_facts.py` | 11 | search_facts 工具分发、过滤器、Pydantic 验证 |
+| `tests/test_scratchpad_inflight.py` | — | key_lock 在飞去重（防止冷缓存踩踏）|
+| **工具一致性（parity）** | | |
+| `tests/test_tool_parity.py` | 68 | get_dependencies / get_dependents / test_outline 一致性（直接调用 vs TS 扩展）|
+| `tests/test_tool_parity_ast.py` | 26 | AST 工具一致性（file_outline 等 6 个）|
+| `tests/test_tool_parity_deep.py` | 34 | 深度一致性（trace_variable / compressed_view 等）|
+| `tests/test_tool_parity_subprocess.py` | 60+ | Python 直调用 vs Python CLI 形状一致性。Phase 9.18 step 3 新增 4 类：glob、ast_search、file_edit、file_write |
+| `tests/test_local_tools_parity.py` | 23 | 本地模式合约验证 |
+| **其他** | | |
 | `tests/test_ai_provider.py` | 131 | 三个 AI 提供商 + chat_with_tools + TokenUsage |
+| `tests/test_bedrock_tool_repair.py` | 64 | Bedrock 工具调用修复 + 异常响应处理 |
+| `tests/test_prompt_builder.py` | 64 | 4 层提示词组装、skill 注入 |
+| `tests/test_shared.py` | 55 | 共享代码审查函数（证据门控、dedup、排序）|
+| `tests/test_chat_persistence.py` | 16 | ChatPersistenceService micro-batch 写入、刷新计时器 |
+| `tests/test_browser_tools.py` | 35 | 浏览器工具（Playwright service mocked）|
+| `tests/test_git_workspace.py` | 75 | Git 工作区生命周期 |
+| `tests/test_config_new.py` | 19 | 配置 + 密钥 |
 
-### 代码工具测试要点（98 项）
+### 代码工具测试要点（139 项）
 
-- **24 个工具** 均使用真实文件系统（`tmp_path` fixture）
+- **32 个工具** 均使用真实文件系统（`tmp_path` fixture）
 - grep/read_file/list_files：基础导航与正则搜索
 - find_symbol：带角色分类（route_entry / business_logic / domain_model / infrastructure / utility / test）的 AST 符号查找
 - get_callers / get_callees：跨文件函数调用图
