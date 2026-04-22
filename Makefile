@@ -165,20 +165,27 @@ integration-test: ensure-backend-deps
 	cd backend && $(PYTHON) -m pytest tests/ -v -s -m integration
 
 ## PR Brain regression harness — runs requests + greptile-sentry +
-## greptile-grafana + greptile-keycloak in parallel under the current
-## coordinator config, logs each suite's summary to
-## /tmp/brain-regression-<suite>-<tag>.log, and prints a consolidated
-## composite + Judge table on completion.
+## greptile-grafana + greptile-keycloak **sequentially** (one suite at
+## a time) under the current coordinator config, logs each suite's
+## summary to /tmp/brain-regression-<suite>-<tag>.log, and prints a
+## consolidated composite + Judge table on completion.
 ##
 ## Usage:
 ##   make eval-brain-regression TAG=v2k
 ##   make eval-brain-regression TAG=p3-p2 MODEL=eu.anthropic.claude-sonnet-4-6
-##   PARALLELISM=3 make eval-brain-regression TAG=fast   # override (risky on large Java repos)
+##   PARALLELISM=3 make eval-brain-regression TAG=fast   # override case-level concurrency
 ##
-## Default PARALLELISM is 2 — higher values can trigger OOM-kill on the
-## largest Java/Go repos (observed with 3 concurrent keycloak cases
-## hitting ~14 GB RSS per worker). Override only if your machine has
-## ≥32 GB RAM.
+## **Suite scheduling is serial**, not parallel. Each suite runs its
+## own process (sharing a per-repo tree-sitter graph internally), and
+## PARALLELISM controls case-level concurrency within that one
+## process. Running suites in parallel was the historical default,
+## but on machines with < 40 GB RAM it OOM-kills — 4 concurrent
+## tree-sitter graphs at 12-15 GB each (sentry / grafana / keycloak)
+## exhaust memory and the OOM-killer drops runs at random.
+##
+## Default PARALLELISM is 2 (case-level). On truly RAM-constrained
+## boxes drop to PARALLELISM=1; on ≥32 GB override to 3+. This
+## dimension is independent of suite scheduling and safe to tune.
 ##
 ## Requires valid AWS_PROFILE / AWS_SESSION_TOKEN for Bedrock.
 eval-brain-regression: ensure-backend-deps
@@ -187,20 +194,20 @@ eval-brain-regression: ensure-backend-deps
 	 EXPLORER=$${EXPLORER:-eu.anthropic.claude-haiku-4-5-20251001-v1:0}; \
 	 PARALLELISM=$${PARALLELISM:-2}; \
 	 TAG=$(TAG); \
-	 echo "=== PR Brain regression suite: TAG=$$TAG MODEL=$$MODEL PARALLELISM=$$PARALLELISM ==="; \
-	 PIDS=""; \
+	 echo "=== PR Brain regression suite: TAG=$$TAG MODEL=$$MODEL PARALLELISM=$$PARALLELISM (serial suites) ==="; \
+	 FAIL=0; \
 	 for suite in requests greptile-sentry greptile-grafana greptile-keycloak; do \
 	   LOG=/tmp/brain-regression-$$suite-$$TAG.log; \
-	   echo "[$$(date +%H:%M:%S)] launching $$suite -> $$LOG"; \
-	   CONDUCTOR_PR_BRAIN_V2=1 $(PYTHON) eval/code_review/run.py --brain \
+	   echo "[$$(date +%H:%M:%S)] running $$suite -> $$LOG"; \
+	   if CONDUCTOR_PR_BRAIN_V2=1 $(PYTHON) eval/code_review/run.py --brain \
 	     --provider bedrock --model $$MODEL --explorer-model $$EXPLORER \
 	     --filter $$suite --parallelism $$PARALLELISM --verbose \
-	     > $$LOG 2>&1 & \
-	   PIDS="$$PIDS $$!"; \
-	 done; \
-	 FAIL=0; \
-	 for pid in $$PIDS; do \
-	   wait $$pid || FAIL=$$((FAIL + 1)); \
+	     > $$LOG 2>&1; then \
+	     echo "[$$(date +%H:%M:%S)] $$suite OK"; \
+	   else \
+	     echo "[$$(date +%H:%M:%S)] $$suite FAILED (exit $$?)"; \
+	     FAIL=$$((FAIL + 1)); \
+	   fi; \
 	 done; \
 	 echo ""; \
 	 echo "=== Consolidated results (TAG=$$TAG) ==="; \
