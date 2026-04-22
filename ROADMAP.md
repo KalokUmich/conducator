@@ -842,6 +842,36 @@ Azure DevOps PR trigger → Pipeline YAML step (HTTP POST)
 - [ ] Reuses `formatter.py` logic + `PRBrainOrchestrator` pipeline
 - [ ] GitLab CI `.gitlab-ci.yml` step template
 
+#### 7.8.5 PR Size Gates + Split-Assistant Agent (PLANNED)
+
+Current ADO review pipeline only runs when the PR is in the useful
+size band (**50 ≤ changed_lines ≤ 2200**). Out-of-band PRs are
+skipped with a PR-level comment explaining why:
+- **Too small (< 50 lines)**: `_small_pr_skip_message` — "human review
+  is faster / more reliable than an LLM pass for changes this small."
+- **Too large (> 2200 lines)**: `_large_pr_skip_message` — single
+  review pass can't fit the change into usable model context; the
+  valuable intervention is to split, not to review.
+
+The large-PR message currently recommends the author split manually.
+Dedicated assistant to replace that manual step:
+
+- [ ] **PR Splitter Agent** (`config/agents/pr_splitter.md` or new role):
+  - Input: the oversized diff + PR title/description
+  - Output: a proposed split plan — N logically-independent chunks
+    each in the reviewable size band, with a one-line rationale per
+    chunk ("schema migration", "handler logic", "tests", "docs",
+    "unrelated cleanup to revert")
+  - Suggest stacked-PR topology where dependencies exist
+- [ ] Backend endpoint: `POST /api/integrations/azure-devops/suggest-split`
+  accepting `{ org, project, repo, pr_id }`, returns the split plan
+  + optional per-chunk patch files
+- [ ] UI integration: post the plan as a PR-level comment; author can
+  accept / modify via follow-up prompt
+- [ ] Scoring / eval: measure split-plan quality against a handful
+  of known-oversized real PRs — primary metric is whether each
+  suggested chunk compiles / tests independently
+
 ### Dependency Graph
 ```
 7.0 (DB Foundation) ──> 7.1 (Jira OAuth) ──┬──> 7.2 (Jira API) ──┬──> 7.4 (Ticket UI)

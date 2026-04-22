@@ -91,21 +91,77 @@ async def review_pull_request(
 
         await fetch_latest(main_workspace)
         _total_changed = _count_changed_lines(main_workspace, diff_spec)
-        _MIN_REVIEW_LINES = 30
 
+        # PR size band: AI review only makes sense in the middle of the
+        # distribution. Below the floor, a careful human reading is faster
+        # and cheaper than any LLM review; above the ceiling, a single
+        # pass cannot fit the change into model context usefully and the
+        # right intervention is to split the PR, not to review it.
+        #
+        # Out-of-band PRs still get a PR-level comment explaining WHY we
+        # skipped — silence would be a bad UX (authors wouldn't know
+        # whether the bot is broken or deliberately abstaining).
+        _MIN_REVIEW_LINES = 50
+        _MAX_REVIEW_LINES = 2200
+
+        # Out-of-band PRs return merge_recommendation="skipped_*" and
+        # vote=0 (no vote). An AI "approve" on a PR we deliberately did
+        # NOT review would be actively harmful — authors could be
+        # misled into thinking the AI had checked the change and signed
+        # off. vote=0 leaves the decision to human reviewers.
         if _total_changed < _MIN_REVIEW_LINES:
             logger.info(
-                "[AzureDevOps] PR #%d has %d lines — below %d, skipping",
-                req.pr_id,
-                _total_changed,
-                _MIN_REVIEW_LINES,
+                "[AzureDevOps] PR #%d has %d lines — below %d, posting "
+                "human-review nudge and skipping AI review",
+                req.pr_id, _total_changed, _MIN_REVIEW_LINES,
             )
+            try:
+                await client.create_thread(
+                    project=req.project,
+                    repo=req.repo,
+                    pr_id=req.pr_id,
+                    content=_small_pr_skip_message(
+                        _total_changed, _MIN_REVIEW_LINES,
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AzureDevOps] Failed to post small-PR notice: %s", exc,
+                )
             return AzureDevOpsReviewResponse(
                 status="ok",
                 pr_id=req.pr_id,
                 threads_created=0,
                 findings_count=0,
-                merge_recommendation="approve",
+                merge_recommendation="skipped_too_small",
+                vote=0,
+            )
+
+        if _total_changed > _MAX_REVIEW_LINES:
+            logger.info(
+                "[AzureDevOps] PR #%d has %d lines — above %d, posting "
+                "split-recommended notice and skipping AI review",
+                req.pr_id, _total_changed, _MAX_REVIEW_LINES,
+            )
+            try:
+                await client.create_thread(
+                    project=req.project,
+                    repo=req.repo,
+                    pr_id=req.pr_id,
+                    content=_large_pr_skip_message(
+                        _total_changed, _MAX_REVIEW_LINES,
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AzureDevOps] Failed to post large-PR notice: %s", exc,
+                )
+            return AzureDevOpsReviewResponse(
+                status="ok",
+                pr_id=req.pr_id,
+                threads_created=0,
+                findings_count=0,
+                merge_recommendation="skipped_too_large",
                 vote=0,
             )
 
@@ -302,6 +358,44 @@ async def review_pull_request(
             pr_id=req.pr_id,
             error=str(exc),
         )
+
+
+def _small_pr_skip_message(changed_lines: int, floor: int) -> str:
+    """PR-level comment posted when a PR is below the AI-review floor."""
+    return (
+        "## 🤖 Conductor AI Code Review — skipped\n"
+        "\n"
+        f"This PR touches **{changed_lines} lines** of change, which is "
+        f"below our AI review floor of **{floor}**. For changes this "
+        "small, a careful human read is faster and more reliable than "
+        "an LLM pass — so we're deferring review to the usual human "
+        "reviewer rather than adding machine-generated noise.\n"
+        "\n"
+        "_No action required from the AI side. Please proceed with "
+        "normal peer review._"
+    )
+
+
+def _large_pr_skip_message(changed_lines: int, ceiling: int) -> str:
+    """PR-level comment posted when a PR is above the AI-review ceiling."""
+    return (
+        "## 🤖 Conductor AI Code Review — split recommended\n"
+        "\n"
+        f"This PR touches **{changed_lines} lines** of change, which is "
+        f"above our AI review ceiling of **{ceiling}**. A single review "
+        "pass cannot fit a change this large into the model's usable "
+        "context — findings would be shallow, and the most valuable "
+        "intervention here is to split the PR into reviewable units.\n"
+        "\n"
+        "**Suggested next step**: break the change into logically "
+        "independent commits / PRs (e.g. one per concern: schema "
+        "migration, handler logic, tests, docs). Rebase or create "
+        "stacked PRs so each piece can be reviewed — by humans and by "
+        "AI — with full context.\n"
+        "\n"
+        "_A dedicated PR-splitting assistant is on the roadmap; until "
+        "then this review has been skipped._"
+    )
 
 
 def _count_changed_lines(worktree_path: str, diff_spec: str) -> int:
