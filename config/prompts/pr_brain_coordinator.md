@@ -341,6 +341,79 @@ decoding." Single file, single invariant, pattern-matchable — Haiku
 handles this fine. Upgrading to strong here just burns money.
 </example>
 
+**dispatch_dimension_worker** (P12b — full-diff sweep through one lens):
+a second primitive, complementary to `dispatch_subagent`. Where
+`dispatch_subagent` decomposes by **file-range** (each worker sees 1-5
+files and answers 3 checks), `dispatch_dimension_worker` decomposes by
+**bug class** — the worker reads the entire PR diff through one role
+lens (`security`, `correctness`, `concurrency`, `reliability`,
+`performance`, `test_coverage`, `api_contract`) and hunts that class of
+bug across every changed file.
+
+**When to pick dimension over scoped dispatch**:
+- A changed function is called from ≥3 distinct files — scoped dispatch
+  would split caller contexts into separate unrelated slices and miss
+  the cross-file break. Phase 1 surfaces these as "Dimension-worker
+  opportunities" when present.
+- The PR introduces a new contract (exception type, return shape,
+  signature change) that multiple call sites must honour. A lens-swept
+  worker sees all callers in one pass; scoped workers each see a subset.
+- Shared utility / middleware / decorator modified — every consumer is
+  in scope but which ones are broken is the question.
+
+**When to stay with scoped dispatch**:
+- Suspicion is already localised to one invariant at one line (the
+  original P11 / v2 sweet spot).
+- Small PR (<5 files) — dimension cap is 0.
+- You have 3 concrete falsifiable yes/no questions. Then scoped + checks
+  is strictly sharper.
+
+**Cap** (enforced by Phase 1 renderer):
+- PR <5 files: **0** dimension workers
+- 5-14 files: up to **1**
+- ≥15 files: up to **2**
+
+**Model tier**: Haiku default (cross-file pattern matching is Haiku's
+lane). Escalate to `strong` only when the worker must carry out
+**cross-file logical inference** — saga unwind, multi-step state
+machine invariant, subtle caller/callee semantic divergence.
+
+<example type="dimension-worker-justified">
+PR modifies `TokenService.issue()` to return `Tuple[Token, RefreshToken]`
+instead of `Token`. Phase 1 flags: 8 distinct caller files, hotspot
+symbols include `AuthController.login`, `MobileApiHandler.refresh`,
+`AdminCli.impersonate`. Scoped dispatch would give each worker 1-2
+caller files — the one where destructuring is wrong is easy to miss in
+isolation. Dimension sweep is correct:
+
+```python
+dispatch_dimension_worker(
+    dimension="api_contract",
+    direction_hint=(
+        "TokenService.issue() now returns (Token, RefreshToken) — verify "
+        "every caller destructures the tuple correctly, updates variable "
+        "types, and forwards the refresh token where required. Flag any "
+        "caller that assigns the tuple to a single `token` variable."
+    ),
+    triggering_symbols=["TokenService.issue"],
+    success_criteria=(
+        "For each caller of TokenService.issue, report whether the "
+        "destructuring is correct and the RefreshToken is propagated. "
+        "Violation = high severity."
+    ),
+    budget_tokens=150000,
+    model_tier="explorer",  # pattern match across callers — Haiku fine
+)
+```
+</example>
+
+<example type="dimension-worker-unjustified">
+PR edits 2 files in one feature with 3 total callers. No cross-cutting
+pattern — just a targeted logic change. Stay with `dispatch_subagent`
+scoped to the 2 files + 3 specific checks. Firing a dimension worker
+here burns 150K budget reading files the coordinator already surveyed.
+</example>
+
 ### 3. Execute
 
 Dispatch all planned investigations in parallel:

@@ -406,6 +406,101 @@ def _detect_required_dispatches(
     return requirements
 
 
+# P12b — Dimension-worker triggers (Tier 3, opt-in)
+# ------------------------------------------------------------------
+# The previous detectors (Tier 1 path, Tier 2 content) FORCE a
+# role dispatch. Dimension triggers are SUGGESTIONS: a multi-caller
+# changed file is a natural candidate for cross-file sweep. The
+# coordinator decides whether to actually fire dispatch_dimension_worker
+# or stay with scoped dispatches — dimension is expensive (180K-ish),
+# so we don't make it mandatory.
+_DIMENSION_TRIGGER_MIN_CALLER_FILES = 3
+_DIMENSION_TRIGGER_MIN_SYMBOLS = 5
+
+
+def _detect_dimension_triggers(
+    workspace_path: str,
+    pr_context,
+) -> List[Dict[str, Any]]:
+    """Scan changed files for cross-file caller footprints. A file with
+    ≥3 distinct caller files (or ≥5 calling symbols across files) is
+    a natural dimension-worker target — file-range dispatch would split
+    the caller graph into separate unrelated slices.
+
+    Output shape per entry:
+        {
+            "file": "path/to/changed.py",
+            "caller_files": ["a.py", "b.py", "c.py", ...],
+            "caller_count": 7,
+            "hotspot_symbols": ["Foo.bar", "Foo.baz", ...],
+        }
+
+    Fail-soft: any exception during dependency lookup returns the
+    triggers we have so far (never crashes Phase 1).
+    """
+    try:
+        from app.code_tools.tools import get_dependents
+    except ImportError:
+        return []
+
+    biz_files = []
+    try:
+        biz_files = pr_context.business_logic_files()
+    except Exception:
+        return []
+    if not biz_files:
+        return []
+
+    triggers: List[Dict[str, Any]] = []
+    for f in biz_files[:15]:
+        try:
+            result = get_dependents(workspace=workspace_path, file_path=f.path)
+        except Exception:
+            continue
+        if not (result.success and result.data):
+            continue
+
+        caller_files: List[str] = []
+        hotspot_symbols_set: set = set()
+        for d in result.data[:20]:
+            cf = d.get("file_path") or ""
+            if cf and cf != f.path:
+                caller_files.append(cf)
+            for sym in (d.get("symbols") or [])[:5]:
+                if sym:
+                    hotspot_symbols_set.add(sym)
+
+        caller_files_distinct = sorted(set(caller_files))
+        fires = (
+            len(caller_files_distinct) >= _DIMENSION_TRIGGER_MIN_CALLER_FILES
+            or len(hotspot_symbols_set) >= _DIMENSION_TRIGGER_MIN_SYMBOLS
+        )
+        if fires:
+            triggers.append({
+                "file": f.path,
+                "caller_files": caller_files_distinct[:10],
+                "caller_count": len(caller_files_distinct),
+                "hotspot_symbols": sorted(hotspot_symbols_set)[:10],
+            })
+
+    return triggers
+
+
+def _dimension_dispatch_cap(n_files: int) -> int:
+    """Return the max number of dimension workers allowed for a PR of
+    this size.
+
+    <5 files → 0 (not worth the budget)
+    5-14    → 1
+    ≥15     → 2
+    """
+    if n_files < 5:
+        return 0
+    if n_files < 15:
+        return 1
+    return 2
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -782,6 +877,7 @@ class PRBrainOrchestrator:
             "get_callers", "get_callees", "get_dependencies",
             "git_diff", "git_diff_files", "git_show", "git_log",
             "dispatch_subagent",
+            "dispatch_dimension_worker",
         ]
 
         coordinator_params = {
@@ -1439,6 +1535,57 @@ class PRBrainOrchestrator:
                 ", ".join(
                     f"{r['role']}(T{r.get('_tier', 1)})" for r in required
                 ),
+            )
+
+        # P12b — Dimension-worker trigger hints. OPT-IN, not mandatory.
+        # These surface changed files whose cross-file caller footprint is
+        # large enough that file-range dispatch would split the pattern.
+        # The coordinator decides whether to actually fire
+        # dispatch_dimension_worker; we just tell it "here's where
+        # a cross-file sweep would pay off".
+        dim_triggers = _detect_dimension_triggers(
+            self._workspace_path, pr_context,
+        )
+        n_files_for_cap = len(pr_context.files)
+        dim_cap = _dimension_dispatch_cap(n_files_for_cap)
+        if dim_triggers and dim_cap > 0:
+            lines.append("## Dimension-worker opportunities (P12b)")
+            lines.append("")
+            lines.append(
+                f"Phase 1 spotted {len(dim_triggers)} changed file(s) with "
+                f"a cross-file caller footprint that file-range dispatch "
+                f"would split up. These are CANDIDATES for "
+                f"`dispatch_dimension_worker` (not mandatory). "
+                f"You may fire **up to {dim_cap} dimension worker(s)** "
+                f"for this PR — reserve them for cases where a pattern "
+                f"(new contract, signature change, shared middleware "
+                f"edit) must be verified at every caller site, and a "
+                f"bunch of narrow scoped dispatches would miss the "
+                f"cross-cut. Haiku default @ 150K budget; escalate to "
+                f"`model_tier=\"strong\"` only when cross-file logical "
+                f"inference is required."
+            )
+            lines.append("")
+            for trig in dim_triggers[:6]:
+                lines.append(f"### `{trig['file']}`")
+                lines.append("")
+                lines.append(
+                    f"- Caller files: {trig['caller_count']} distinct "
+                    f"({', '.join(f'`{c}`' for c in trig['caller_files'][:5])}"
+                    f"{'...' if len(trig['caller_files']) > 5 else ''})"
+                )
+                if trig['hotspot_symbols']:
+                    lines.append(
+                        "- Hotspot symbols: "
+                        f"{', '.join(f'`{s}`' for s in trig['hotspot_symbols'][:5])}"
+                    )
+                lines.append("")
+            logger.info(
+                "[PR Brain v2] P12b dimension triggers: %d candidate file(s), "
+                "cap=%d: %s",
+                len(dim_triggers),
+                dim_cap,
+                ", ".join(t["file"] for t in dim_triggers[:5]),
             )
 
         # Dispatch cap scales with PR size (your skill covers the "why"

@@ -561,6 +561,8 @@ class AgentToolExecutor(ToolExecutor):
             return await self._transfer_to_brain(params)
         elif tool_name == "dispatch_subagent":
             return await self._dispatch_subagent(params)
+        elif tool_name == "dispatch_dimension_worker":
+            return await self._dispatch_dimension_worker(params)
         # All other tools (grep, read_file, ask_user, etc.) pass through
         return await self._inner.execute(tool_name, params)
 
@@ -1003,6 +1005,241 @@ class AgentToolExecutor(ToolExecutor):
 
         return ToolResult(
             tool_name="dispatch_subagent",
+            success=True,
+            data=parsed,
+        )
+
+    async def _dispatch_dimension_worker(self, params: Dict[str, Any]) -> ToolResult:
+        """P12b — dispatch a worker that reads the entire diff through one
+        role lens (no file-range scope). Complement to dispatch_subagent.
+
+        The worker gets the full PR diff + the role's lens + optional
+        triggering_symbols. It hunts its bug class across every changed
+        file — valuable when a pattern spans files that a file-range
+        dispatch would split up.
+
+        Shares the plan_memory + recap infrastructure with _dispatch_subagent
+        so coordinator sees all dispatches (scoped and dimension) in the
+        same recap stream.
+        """
+        # Recursion guard — dimension workers can only be fired by the
+        # coordinator (depth 0). A scoped sub-agent calling dispatch_dimension
+        # doesn't make sense (sub-agent sees one file range; if it wants a
+        # cross-file sweep it should return `unclear` and let coordinator
+        # decide).
+        if self._current_depth >= self._max_depth:
+            return ToolResult(
+                tool_name="dispatch_dimension_worker",
+                success=False,
+                error=(
+                    f"dispatch_dimension_worker rejected: you are at "
+                    f"recursion depth {self._current_depth} (≥2 hard wall). "
+                    "Only the coordinator dispatches dimension workers."
+                ),
+            )
+
+        dimension = (params.get("dimension") or "").strip().lower()
+        direction_hint = params.get("direction_hint") or ""
+        triggering_symbols = params.get("triggering_symbols") or []
+        success_criteria = params.get("success_criteria", "")
+        budget_tokens = params.get("budget_tokens", 150_000)
+        model_tier = params.get("model_tier", "explorer")
+
+        if dimension not in _VALID_FACTORY_ROLES:
+            return ToolResult(
+                tool_name="dispatch_dimension_worker",
+                success=False,
+                error=(
+                    f"Unknown dimension '{dimension}'. Must be one of "
+                    f"{sorted(_VALID_FACTORY_ROLES)}."
+                ),
+            )
+        if not success_criteria or len(success_criteria) < 10:
+            return ToolResult(
+                tool_name="dispatch_dimension_worker",
+                success=False,
+                error=(
+                    "dispatch_dimension_worker requires success_criteria "
+                    "(≥10 chars) describing what 'done' looks like."
+                ),
+            )
+        if not 80_000 <= budget_tokens <= 200_000:
+            return ToolResult(
+                tool_name="dispatch_dimension_worker",
+                success=False,
+                error=(
+                    f"budget_tokens must be in [80K, 200K] (got "
+                    f"{budget_tokens}). Dimension workers need headroom "
+                    "for the full diff + internal reasoning."
+                ),
+            )
+
+        logger.info(
+            "[dispatch_dimension_worker] dimension=%s model=%s budget=%d "
+            "symbols=%d direction_hint=%r depth=%d",
+            dimension,
+            model_tier,
+            budget_tokens,
+            len(triggering_symbols),
+            (direction_hint[:60] + "...") if direction_hint and len(direction_hint) > 60 else direction_hint,
+            self._current_depth,
+        )
+
+        role_template = _load_role_template(dimension)
+        if role_template is None:
+            return ToolResult(
+                tool_name="dispatch_dimension_worker",
+                success=False,
+                error=(
+                    f"Dimension role '{dimension}' template missing at "
+                    f"config/agent_factory/{dimension}.md."
+                ),
+            )
+
+        # Build a "dimension scope" block — no file slots, just the
+        # intent that the worker sweeps the full diff. Pass the triggering
+        # symbols so the worker has concrete targets.
+        scope_lines = [
+            "**Scope: the entire PR diff.**",
+            "",
+            "You are a dimension-sliced worker — you read the whole diff "
+            f"through the {dimension} lens. Do not stay within a narrow "
+            "file range; your job is to catch patterns that span files.",
+        ]
+        if triggering_symbols:
+            scope_lines.extend([
+                "",
+                "**Triggering symbols** (cross-file callers / references "
+                "that motivated this dispatch):",
+                "",
+            ])
+            for sym in triggering_symbols[:20]:
+                scope_lines.append(f"- `{sym}`")
+            scope_lines.extend([
+                "",
+                "Prioritise these symbols in your sweep — the coordinator "
+                "suspects their callers / call sites are where the "
+                "cross-file pattern shows up.",
+            ])
+        scope_block = "\n".join(scope_lines)
+
+        # Plan memory: persist the dispatch so coordinator recap includes it.
+        plan_dispatch_index: Optional[int] = None
+        if self._current_depth == 0:
+            try:
+                from app.scratchpad import current_factstore
+
+                _store = current_factstore()
+                if _store is not None:
+                    plan_dispatch_index = _store.count_plan_entries() + 1
+                    _store.put_plan_entry(
+                        dispatch_index=plan_dispatch_index,
+                        mode="dimension",
+                        role=dimension,
+                        scope=(
+                            f"full diff — symbols={triggering_symbols[:5]}"
+                            if triggering_symbols else "full diff"
+                        )[:500],
+                        success_criteria=success_criteria,
+                        reason=direction_hint or None,
+                    )
+            except Exception as exc:
+                logger.debug("[P4] plan_memory put failed (non-fatal): %s", exc)
+
+        composed_perspective = _compose_role_system_prompt(
+            role=dimension,
+            role_template=role_template,
+            scope_block=scope_block,
+            direction_hint=direction_hint or None,
+            checks=None,
+            brain_context=None,
+            may_subdispatch=False,  # dimension workers never sub-dispatch
+        )
+
+        tools_hint = (
+            role_template["frontmatter"].get("tools_hint")
+            or role_template["frontmatter"].get("tools")
+            or [
+                "grep", "read_file", "find_symbol", "find_references",
+                "get_callers", "get_callees", "git_diff", "git_show",
+                "file_outline",
+            ]
+        )
+        if model_tier == "strong":
+            model_hint = "strong"
+        else:
+            model_hint = role_template["frontmatter"].get(
+                "model_hint", model_tier
+            )
+
+        task_query = (
+            f"Sweep the entire PR diff through your {dimension} lens. "
+            f"{success_criteria}"
+        )
+        delegated_params = {
+            "perspective": composed_perspective,
+            "tools": tools_hint,
+            "model": model_hint,
+            "query": task_query,
+            "budget_tokens": budget_tokens,
+            "budget_weight": 1.0,
+            "_subagent_kind": f"pr_dimension_{dimension}",
+        }
+        result = await self._dispatch_agent(delegated_params)
+
+        if not result.success:
+            return ToolResult(
+                tool_name="dispatch_dimension_worker",
+                success=False,
+                error=f"dimension worker dispatch failed: {result.error}",
+            )
+
+        condensed = result.data or {}
+        raw_answer = condensed.get("answer") or condensed.get("final_answer") or ""
+        parsed = _parse_subagent_json(raw_answer)
+
+        if parsed is None:
+            logger.warning(
+                "dispatch_dimension_worker: worker did not emit parseable "
+                "JSON. Returning raw answer (%d chars).",
+                len(raw_answer),
+            )
+            return ToolResult(
+                tool_name="dispatch_dimension_worker",
+                success=True,
+                data={
+                    "checks": [],
+                    "findings": [],
+                    "unexpected_observations": [],
+                    "raw_answer": raw_answer[:4000],
+                    "shape_warning": (
+                        "Dimension worker did not return structured JSON — "
+                        "raw answer included for Brain inspection."
+                    ),
+                    "iterations": condensed.get("iterations", 0),
+                    "total_input_tokens": condensed.get("total_input_tokens", 0),
+                    "total_output_tokens": condensed.get("total_output_tokens", 0),
+                },
+            )
+
+        # Enforce severity=null; tag findings with dispatch mode for synthesis.
+        for f in parsed.get("findings", []) or []:
+            if isinstance(f, dict):
+                f["severity"] = None
+                f.setdefault("_dispatched_by", f"dimension={dimension}")
+
+        parsed.setdefault("checks", [])
+        parsed.setdefault("findings", [])
+        parsed.setdefault("unexpected_observations", [])
+        parsed["iterations"] = condensed.get("iterations", 0)
+        parsed["total_input_tokens"] = condensed.get("total_input_tokens", 0)
+        parsed["total_output_tokens"] = condensed.get("total_output_tokens", 0)
+        parsed["files_accessed"] = condensed.get("files_accessed", [])
+        parsed["_dispatch_mode"] = "dimension"
+        parsed["_dimension"] = dimension
+
+        return ToolResult(
+            tool_name="dispatch_dimension_worker",
             success=True,
             data=parsed,
         )
