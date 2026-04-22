@@ -27,7 +27,7 @@ what worked, and what we reverted.
    often. Use both as signals — when they disagree, read the actual review
    text.
 
-## Current state — v2s (as of 2026-04-22 PM)
+## Current state — v2u (as of 2026-04-22 evening)
 
 - **Pipeline**: PR Brain coordinator (Sonnet) + sub-agent workers
   (Haiku). Phase 2 existence check runs before coordinator to verify
@@ -36,12 +36,14 @@ what worked, and what we reverted.
 - **Phase 2 hard timeout**: 120s orchestrator-level wall-clock cap on
   existence-check worker. P13 Python import verifier + P14 stub
   caller detector run alongside as deterministic safety nets.
-- **Coordinator prompt**: 650 lines. Cardinal rule (planner/synthesizer
+- **Coordinator prompt**: 720 lines. Cardinal rule (planner/synthesizer
   vs verifier distinction, ≥50-line PR dispatch floor, two grounding
   sources). Severity rubric, Suggested_fix specificity (generic examples
   only), "Don't pad" discipline, Findings-vs-secondary cutline, hard
   floors on correctness/security/DB-migration investigations. Adaptive
   model-tier selection (`model_tier=strong` for critical dispatches).
+  P12b dimension-worker guidance with when-to-pick-dimension-vs-scoped
+  rubric + 2 examples.
 - **Mandatory-dispatch detector (v2s, 2026-04-22)**: two-tier bypass-
   proof check in `pr_brain.py::_detect_required_dispatches` — Tier 1
   regex on changed file paths (auth/security/password/crypto/jwt/oauth
@@ -51,6 +53,22 @@ what worked, and what we reverted.
   (camelCase, IGNORECASE), retry/backoff/circuit-breaker (Java, Python,
   Go, TS/JS). Merged into the coordinator query so Layer A cannot
   survey-only on security-shaped PRs.
+- **Dimension-worker trigger (v2t, 2026-04-22)**: Tier 3 opt-in detector
+  via `_detect_dimension_triggers` — files with ≥3 distinct caller
+  files or ≥5 calling symbols surface as "Dimension-worker
+  opportunities" candidates in the coordinator query. Coordinator
+  decides whether to fire `dispatch_dimension_worker` (new primitive
+  that reads the whole diff through one role lens). Cap 0/1/2 by PR
+  size.
+- **Phase 2 reorder (v2u, 2026-04-22)**: `_run_v2_phase2_existence`
+  runs P13 (Python/Go/Java import scanners) BEFORE LLM dispatch,
+  persisting missing-symbol facts upfront. LLM worker sees a
+  "Pre-verified by P13 (DO NOT re-check)" block and has its task
+  shifted to 5 signature-level checks (method signatures, instantiation,
+  attributes, decorators, overloads). Timeout halved 120s → 60s. On
+  LLM timeout (still frequent on cold large repos), coordinator already
+  has P13 facts to work with — the v2t "timeout = zero contribution"
+  failure mode is closed.
 - **Per-language AST hint (P9b, 2026-04-21)**: Phase 2 worker prefers
   `find_symbol` over grep on `.java`/`.py`/`.go`/`.ts|tsx|js|jsx`
   files. Hints injected per-language based on diff extensions.
@@ -70,6 +88,15 @@ v2s measured (4-suite regression, 2026-04-22):
   suite where the mandatory-dispatch detector + cardinal rule pay off
   the most; v2r coordinator occasionally survey-only'd on these).
 - 4-suite mean **0.801** (Δ +0.004 vs v2r). Net positive.
+
+v2u sentry-only (serial PARALLELISM=1, 10 cases, 2026-04-22 evening):
+- Sentry composite **0.834** (Δ +0.038 vs v2s 0.796) / Judge 3.76 /
+  catch 8/10 (+1 vs v2p 7/10). LLM worker still times out 9/10 cases
+  (cold 17K-file repo bottleneck) but P13 facts are already persisted
+  before dispatch — coordinator no longer loses everything on timeout.
+  Wall-clock: 54 min for 10 cases at PARALLELISM=1; v2t would have
+  been ~30 min at PARALLELISM=2 if it hadn't OOM-killed. Keycloak /
+  grafana v2u regression pending.
 
 Known operational caveat:
 - `make eval-brain-regression PARALLELISM=3` OOM-kills concurrent
@@ -759,3 +786,5 @@ If a future P-item has no source backing it, flag as "hypothesis only" until we 
 | 2026-04-22 AM | **v2r** (commits 95f39d9 + 8858a74 + 78ddd7c) | **Legacy deletion + Azure DevOps productionisation.** 95f39d9 deletes the v1 `CodeReviewService` fleet pipeline entirely; adds `api_contract` role template (7th lens); bounds the LRU `_symbol_index_cache` to prevent OOM under parallel reviews. 8858a74 ships `translate_pr_summary` — Azure-DevOps-shaped 3-section markdown (`## Summary` / `## What went well` / `## What needs attention`) with fail-soft fallback. 78ddd7c lands PR size gates: 50–2200 line band, `skipped_too_small` / `skipped_too_large` comments with `vote=0`. Real-PR validation on #14247, #13874, #13815, #14227, #14234. |
 | 2026-04-22 PM | **v2s** (commit c911972) | **Mandatory dispatch + coordinator cardinal rule.** Triggered by PR #14227 (1339-line auth PR with plaintext password + timing attack that v2r coordinator approved via Survey-only). Tier 1 path-based `_detect_required_dispatches` fires on auth/security/password/crypto/jwt/oauth substrings (fixed prefix-match gap) and migrations/changelog/flyway/liquibase. Tier 2 content-based `_detect_required_dispatches_from_diff_content` scans added (`+`) diff lines in Java/Python/Go/TS/JS for password `==`/`String.equals`, JWT/secret literals, whitelist/allowlist keywords (camelCase/IGNORECASE), and reliability primitives (retry/backoff/circuit-breaker). Coordinator prompt gains cardinal rule section: planner/synthesizer vs verifier split, ≥50-line dispatch floor, two grounding sources (Phase 2 fact OR sub-agent verdict). `_normalize_evidence` coerces LLM char-list evidence (`['@', 'V', 'a', ...]`) back into strings (PR #14227 rendering bug). `total_tokens` propagated from `budget_summary` to done event. v2s 4-suite regression: requests 0.926 / sentry 0.796 / grafana 0.704 / keycloak **0.777** (Δ +0.033 on Java-heavy suite where mandatory dispatch pays off). 4-suite mean 0.801 — net positive. Follow-up manual re-review of #14227 confirmed coordinator now dispatches security role and surfaces the timing attack + plaintext password + filter-scope findings the original run missed. |
 | 2026-04-22 late PM | **v2s + scratchpad validation** | Re-ran sentry-006 standalone with `CONDUCTOR_SCRATCHPAD_ENABLED=1` to confirm Phase 9.15 MVP speed lift still holds post-v2s. Result: composite **0.908** / Judge **4.55** / catch 100% / wall-clock ~5 min (vs 9.15 MVP 7.5 min, original unmitigated 50 min). Scratchpad stats: 25 facts, 8 existence, 23 misses, 3 range_hits, 21 skip_facts. Cache hits stayed at 0 because a single-case run has no cross-dispatch reuse (that lever shows on multi-dispatch traffic within one PR). Skip-list (21 entries) is doing real work. |
+| 2026-04-22 evening | **v2t** (commit 6753446 + 79211cc + 5e59146) | **P12b dimension-sliced dispatch** — new `dispatch_dimension_worker` primitive that reads the whole PR diff through one role lens; trigger detector on cross-file caller count (≥3 files or ≥5 symbols); cap 0/1/2 by PR size. **7.8.5 PR splitter** — LLM-backed split plan for oversized PRs, appended to the skip comment (replaces generic "please split" message on PRs >2200 lines). Splitter prompt tuned to *teach* (author-learning rationales: "why these belong together" + "why separate"), 2000 max-tokens for substantive per-chunk reasoning. Regression attempt failed: OOM-kill on 3/4 suites at PARALLELISM=2 with 4 concurrent tree-sitter graphs (~14GB each × sentry/grafana/keycloak). Only requests completed (composite 0.928). Triggered two follow-ups — Makefile serial-suite fix (v2t+) and Phase 2 reorder (v2u). |
+| 2026-04-22 evening | **v2u** (commit cd88595) | **Phase 2 reorder — deterministic first, LLM worker fills gap.** Root cause v2t sentry/grafana/keycloak every case hit 120s Phase 2 timeout with LLM worker producing **zero** symbols (never finished cold tree-sitter on large repos). Reorder: P13 (Python/Go/Java deterministic scanners) now run BEFORE LLM dispatch, persist missing-symbol facts immediately, feed a "Pre-verified by P13 (DO NOT re-check)" block into the LLM worker's query with task shifted to **5 signature-level checks** (method call signatures, class instantiation shape, attribute access, decorator application, overload resolution — explicit "DO NOT re-verify import existence" clause). Timeout halved 120s → 60s. **Sentry v2u (serial, PARALLELISM=1, 10 cases): composite 0.834** (Δ +0.016 vs v2t partial, +0.020 vs v2p), Judge 3.76 flat, catch 8/10 (+1 vs v2p 7/10), zero OOM. LLM worker still times out on 9/10 cases (cold 17K-file repo remains the bottleneck) but P13 facts are already in the vault before dispatch — the "timeout = zero contribution" failure mode is fixed. 4 new unit tests for the reorder invariants. Follow-up: Makefile `eval-brain-regression` switched from parallel suites → serial to kill the OOM class (commit caee22c). |
