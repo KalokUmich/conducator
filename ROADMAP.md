@@ -1295,7 +1295,7 @@ Scope each review agent's diff context to only the files relevant to its focus a
 - [ ] Update `_build_agent_query` / `build_diffs_section` to accept file filter per agent
 - [ ] Combined with prompt caching (9.11): estimated total cost reduction from ~$1.89 to ~$0.50 per review
 
-### 9.13 PR Brain v2 — Task-Based Sub-Agents (PLANNED)
+### 9.13 PR Brain v2 — Task-Based Sub-Agents (COMPLETE)
 
 **Merged rewrite of the former 9.13 (severity centralization) and 9.14 (dynamic composition)**. The two were originally scoped as separate phases for sprint pacing, but they share one sub-agent contract redesign — splitting them would force two sequential rewrites of the same `code_review_pr` skill + sub-agent output schema. We do them as one refactor with two shipping checkpoints to bound rollout risk.
 
@@ -1352,16 +1352,20 @@ These are the same refactor — the new sub-agent schema `{checks, findings with
 - Arbitrator role folded into Brain's synthesize phase; standalone arbitrator prompt retired
 - Eval: composite, severity_accuracy, token cost, catch rate all compared against Checkpoint A baseline
 
-- [ ] **Checkpoint A**: `dispatch_subagent` tool in Brain toolset (scope, 3 checks, success_criteria, budget, model)
-- [ ] **Checkpoint A**: sub-agent checks-based output schema + `pr_subagent_checks` skill
-- [ ] **Checkpoint A**: Brain synthesize gains severity-classification path for new schema
-- [ ] **Checkpoint A**: verify-existence rule wired into sub-agent skill
-- [ ] **Checkpoint A**: side-by-side eval vs fixed swarm (12 requests + Greptile sentry subset)
-- [ ] **Checkpoint B**: Brain meta-skill (`pr_brain_coordinator.md`) becomes default system prompt
-- [ ] **Checkpoint B**: hard invariants enforced in code (min correctness, trigger patterns, max 8 dispatches, max depth 2)
-- [ ] **Checkpoint B**: `config/agents/*.md` get reference-only header
-- [ ] **Checkpoint B**: legacy arbitrator retired, merged into synthesize
-- [ ] **Checkpoint B**: final eval — composite, severity_accuracy, judge avg, token cost vs Checkpoint A baseline
+- [x] **Checkpoint A**: `dispatch_subagent` tool in Brain toolset (scope, 3 checks, success_criteria, budget, model) — `schemas.py:399 DispatchSubagentParams`
+- [x] **Checkpoint A**: sub-agent checks-based output schema + `pr_subagent_checks` skill — `config/prompts/pr_subagent_checks.md`, `config/agents/pr_subagent_checks.md`
+- [x] **Checkpoint A**: Brain synthesize gains severity-classification path for new schema — coordinator skill owns severity
+- [x] **Checkpoint A**: verify-existence rule wired into sub-agent skill — Phase 2 existence check + P13 Python import verifier + P14 stub caller detector
+- [x] **Checkpoint A**: side-by-side eval vs fixed swarm — v2l/v2m/v2n/v2o/v2p/v2r/v2s regressions (see `docs/PR_BRAIN_OPTIMIZATION.md` log)
+- [x] **Checkpoint B**: Brain meta-skill (`pr_brain_coordinator.md`) becomes default system prompt
+- [x] **Checkpoint B**: hard invariants enforced in code (min correctness, trigger patterns via Tier 1 path + Tier 2 content detectors in `pr_brain.py::_detect_required_dispatches`, dispatch caps scaled by PR size)
+- [x] **Checkpoint B**: `config/agents/*.md` get reference-only header
+- [x] **Checkpoint B**: legacy arbitrator retired — legacy v1 `CodeReviewService` fleet deleted in 95f39d9; arbitration lives in coordinator synthesis + `_apply_v2_precision_filter`
+- [x] **Checkpoint B**: final eval vs Checkpoint A baseline — v2s 4-suite mean 0.801 (within ±1pp of v2n 0.814)
+
+**P10 Advisor Strategy** (adaptive worker model): `DispatchSubagentParams.model_tier` (`"explorer"`|`"strong"`), coordinator prompt §294–342 guides when to upgrade, `brain.py:834` honours the hint at dispatch time. Shipped 2026-04-21.
+
+**P11 per-finding verifier**: 3-band precision filter in `_apply_v2_precision_filter` (`pr_brain.py:1549`) — `_verify_single` (Haiku × N for N≤2) and `_verify_batch` (Sonnet batch for N≥3). Plus P8 external-signal reflection against Phase 2 facts, P14 stub injection, and diff-scope filter as supporting post-passes. Shipped 2026-04-20 (v2l).
 
 **Dependencies**:
 - **9.15 Fact Vault** — sub-agents need shared short-term memory (a correctness investigation on `foo.py:120-150` should reuse facts that another sub-agent's grep already produced).

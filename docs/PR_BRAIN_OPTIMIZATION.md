@@ -27,7 +27,7 @@ what worked, and what we reverted.
    often. Use both as signals — when they disagree, read the actual review
    text.
 
-## Current state — v2p (as of 2026-04-21 evening)
+## Current state — v2s (as of 2026-04-22 PM)
 
 - **Pipeline**: PR Brain coordinator (Sonnet) + sub-agent workers
   (Haiku). Phase 2 existence check runs before coordinator to verify
@@ -36,11 +36,21 @@ what worked, and what we reverted.
 - **Phase 2 hard timeout**: 120s orchestrator-level wall-clock cap on
   existence-check worker. P13 Python import verifier + P14 stub
   caller detector run alongside as deterministic safety nets.
-- **Coordinator prompt**: 585 lines. Severity rubric, Suggested_fix
-  specificity (generic examples only), "Don't pad" discipline,
-  Findings-vs-secondary cutline, hard floors on correctness/security/
-  DB-migration investigations. Adaptive model-tier selection
-  (`model_tier=strong` for critical dispatches).
+- **Coordinator prompt**: 650 lines. Cardinal rule (planner/synthesizer
+  vs verifier distinction, ≥50-line PR dispatch floor, two grounding
+  sources). Severity rubric, Suggested_fix specificity (generic examples
+  only), "Don't pad" discipline, Findings-vs-secondary cutline, hard
+  floors on correctness/security/DB-migration investigations. Adaptive
+  model-tier selection (`model_tier=strong` for critical dispatches).
+- **Mandatory-dispatch detector (v2s, 2026-04-22)**: two-tier bypass-
+  proof check in `pr_brain.py::_detect_required_dispatches` — Tier 1
+  regex on changed file paths (auth/security/password/crypto/jwt/oauth
+  substrings; migrations/changelog/flyway/liquibase); Tier 2 scans `+`
+  diff content for password `==`/`String.equals`, timing-sensitive
+  primitives, JWT/secret literals, whitelist/allowlist keywords
+  (camelCase, IGNORECASE), retry/backoff/circuit-breaker (Java, Python,
+  Go, TS/JS). Merged into the coordinator query so Layer A cannot
+  survey-only on security-shaped PRs.
 - **Per-language AST hint (P9b, 2026-04-21)**: Phase 2 worker prefers
   `find_symbol` over grep on `.java`/`.py`/`.go`/`.ts|tsx|js|jsx`
   files. Hints injected per-language based on diff extensions.
@@ -52,13 +62,14 @@ what worked, and what we reverted.
   result cache + skip list + plan_memory (P4). Orphan sweep on
   backend startup (keeps `~/.conductor/scratchpad/` bounded).
 
-v2p measured (4-suite regression, 2026-04-21):
-- Requests (12 cases): composite **0.936**, Judge **4.87**, catch 12/12.
-- Sentry (10 cases): composite **0.814**, Judge **3.74**, catch 7/10,
-  recall 1.000. Every case hits Phase 2 120s timeout on cold repo —
-  P13/P14 deterministic fallbacks carry the load.
-- Grafana (10 cases): composite **0.729**, Judge **3.89**, catch 10/10.
-- Keycloak (9 cases): composite **0.778**, Judge **3.73**, catch 9/9.
+v2s measured (4-suite regression, 2026-04-22):
+- Requests: composite **0.926** (Δ -0.009 vs v2r — within variance).
+- Sentry: composite **0.796** (Δ 0.000).
+- Grafana: composite **0.704** (Δ -0.009 — within variance).
+- Keycloak: composite **0.777** (Δ **+0.033** — Java / security-heavy
+  suite where the mandatory-dispatch detector + cardinal rule pay off
+  the most; v2r coordinator occasionally survey-only'd on these).
+- 4-suite mean **0.801** (Δ +0.004 vs v2r). Net positive.
 
 Known operational caveat:
 - `make eval-brain-regression PARALLELISM=3` OOM-kills concurrent
@@ -744,3 +755,7 @@ If a future P-item has no source backing it, flag as "hypothesis only" until we 
 | 2026-04-21 midday | P12 supplementary | (1) `_build_v2_coordinator_query` now carries a dynamic **dispatch cap** section scaled by PR size: <5 files = 4 dispatches, 5-14 = 8, ≥15 = 12 (+ cluster-first guidance). (2) Telemetry: `_dispatch_subagent` emits a log line per dispatch capturing `mode=role|checks role=X scope_files=N depth=D` so future analysis can see which mode the coordinator actually chose. (3) Role-mode findings auto-tagged `_dispatched_by=role=X` in the tool-result so downstream dedup/synthesis can attribute. (4) `make eval-brain-regression` target extended to include `greptile-keycloak` suite (first time this suite is exercised under our brain — 10 new Java cases). (5) Smoke results: sentry-001 0.683 (single-run, noise), grafana-009 0.594 (P14 still fires — 3 MATCH + 1 extra), keycloak-003 0.666 (new; Y catch; 3 MATCH + 4 P14.java injected + 1 coordinator nit). P14.java extras on keycloak-003 are **real bugs Greptile's ground truth doesn't label** — unavoidable precision cost on unchecked ground truth. Full v2n regression launched (42 cases × 4 suites). |
 | 2026-04-21 noon | **v2n FINAL** | **All 42 cases (4 suites).** Requests 0.930 / 12/12 catch. Sentry 0.788 / 6/10 catch. Grafana 0.724 / 8/10 catch. Keycloak **0.771 avg** (range 0.66-0.92, first-time Java suite). **3-suite avg 0.814 vs v2m 0.817 = −0.003** — tied within LLM variance. Role-dispatch infrastructure fully landed and non-regressive. Keycloak baseline established. Net: +1 full language (Java) of eval coverage; same quality on existing suites. |
 | 2026-04-21 afternoon | **v2o iteration** | **Diagnosis-driven.** v2n catch-rate dip analysis revealed a single new miss (sentry-009) caused by **P13 false-positive on external packages**. Fix: `_module_is_first_party(workspace, module)` — P13 now skips imports whose module path doesn't resolve to a file in the workspace (e.g. `from arroyo import KafkaPayload` — `arroyo/` lives in `.venv`, not the source tree). Validation: sentry-001 still flags `OptimizedCursorPaginator` (first-party), sentry-009 now emits 0 false-positive ImportError injections (was 2). **Multi-role per cluster FLEXIBILITY landed per user feedback**: coordinator prompt explicitly allows 0-5 role dispatches per cluster, emphasising per-cluster judgment not default pair. **Budgets bumped** to give multi-role room: dispatch caps 4/8/12 → **5/10/16**, coordinator max_iterations 25 → **32**, coordinator budget 400K → **550K**. 120 pr_brain tests pass (+2 new for first-party detection edge cases). Smoke in flight. |
+| 2026-04-21 evening | **v2p** (commit c24a0b5) | **Baseline ship of v2 coordinator + deterministic verifiers.** Package: P9b per-language AST hint, agent_factory 6 roles, P8/P11-cheap/P13/P14 all wired, Phase 2 120s hard timeout. Coordinator prompt 585 lines with severity rubric + `suggested_fix` generic-examples discipline + hard floors on correctness/security/migration. First ship of the end-to-end agent-as-tool architecture. |
+| 2026-04-22 AM | **v2r** (commits 95f39d9 + 8858a74 + 78ddd7c) | **Legacy deletion + Azure DevOps productionisation.** 95f39d9 deletes the v1 `CodeReviewService` fleet pipeline entirely; adds `api_contract` role template (7th lens); bounds the LRU `_symbol_index_cache` to prevent OOM under parallel reviews. 8858a74 ships `translate_pr_summary` — Azure-DevOps-shaped 3-section markdown (`## Summary` / `## What went well` / `## What needs attention`) with fail-soft fallback. 78ddd7c lands PR size gates: 50–2200 line band, `skipped_too_small` / `skipped_too_large` comments with `vote=0`. Real-PR validation on #14247, #13874, #13815, #14227, #14234. |
+| 2026-04-22 PM | **v2s** (commit c911972) | **Mandatory dispatch + coordinator cardinal rule.** Triggered by PR #14227 (1339-line auth PR with plaintext password + timing attack that v2r coordinator approved via Survey-only). Tier 1 path-based `_detect_required_dispatches` fires on auth/security/password/crypto/jwt/oauth substrings (fixed prefix-match gap) and migrations/changelog/flyway/liquibase. Tier 2 content-based `_detect_required_dispatches_from_diff_content` scans added (`+`) diff lines in Java/Python/Go/TS/JS for password `==`/`String.equals`, JWT/secret literals, whitelist/allowlist keywords (camelCase/IGNORECASE), and reliability primitives (retry/backoff/circuit-breaker). Coordinator prompt gains cardinal rule section: planner/synthesizer vs verifier split, ≥50-line dispatch floor, two grounding sources (Phase 2 fact OR sub-agent verdict). `_normalize_evidence` coerces LLM char-list evidence (`['@', 'V', 'a', ...]`) back into strings (PR #14227 rendering bug). `total_tokens` propagated from `budget_summary` to done event. v2s 4-suite regression: requests 0.926 / sentry 0.796 / grafana 0.704 / keycloak **0.777** (Δ +0.033 on Java-heavy suite where mandatory dispatch pays off). 4-suite mean 0.801 — net positive. Follow-up manual re-review of #14227 confirmed coordinator now dispatches security role and surfaces the timing attack + plaintext password + filter-scope findings the original run missed. |
+| 2026-04-22 late PM | **v2s + scratchpad validation** | Re-ran sentry-006 standalone with `CONDUCTOR_SCRATCHPAD_ENABLED=1` to confirm Phase 9.15 MVP speed lift still holds post-v2s. Result: composite **0.908** / Judge **4.55** / catch 100% / wall-clock ~5 min (vs 9.15 MVP 7.5 min, original unmitigated 50 min). Scratchpad stats: 25 facts, 8 existence, 23 misses, 3 range_hits, 21 skip_facts. Cache hits stayed at 0 because a single-case run has no cross-dispatch reuse (that lever shows on multi-dispatch traffic within one PR). Skip-list (21 entries) is doing real work. |

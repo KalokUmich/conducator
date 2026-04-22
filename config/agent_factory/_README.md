@@ -7,9 +7,11 @@ kind: factory-doc
 
 This folder is **different** from `config/agents/`.
 
-- `config/agents/*.md` — full, self-contained agent definitions used by
-  v1's fixed-swarm dispatcher (`dispatch_agent("security")`). The v1 Brain
-  loads the entire file as the agent's system prompt.
+- `config/agents/*.md` — concrete v2 agent definitions that the Brain
+  dispatches as-is: `pr_existence_check` (Phase 2), `pr_subagent_checks`
+  (checks mode worker), `pr_verification_single` / `pr_verification_batch`
+  (P11 verifiers), plus business-flow explorers. The Brain loads the
+  whole file as the agent's system prompt.
 - `config/agent_factory/*.md` — **reference templates** for v2's
   role-based dispatch. The PR Brain v2 coordinator **learns from** these
   templates when it decides to dispatch a role-specialized worker, then
@@ -20,6 +22,9 @@ This folder is **different** from `config/agents/`.
        coordinator's own analysis)
 
 The factory file is a knowledge source, not a prompt to paste verbatim.
+If you want to ship a new dispatchable agent, add it under
+`config/agents/`. If you want to teach the coordinator a new review
+lens, add it here.
 
 ## Template shape (all 4 sections required)
 
@@ -54,10 +59,12 @@ severity_hint, suggested fix. These examples teach by shape.
 
 ## Why separate from `config/agents/`
 
-- The v1 files are stable and still used by the v1 legacy path. Don't touch them.
+- Different composition semantics: factory = "reference / teach",
+  agents = "paste as prompt".
 - The factory can evolve independently — new roles, new examples, new
-  investigation approaches — without breaking v1.
-- Different composition semantics: factory = "reference / teach", agents = "paste as prompt".
+  investigation approaches — without touching any active agent config.
+- v1's fixed `dispatch_agent("role")` path was deleted in commit
+  `95f39d9`; the factory is the only place role lenses live now.
 
 ## How coordinator uses the factory
 
