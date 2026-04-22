@@ -26,6 +26,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import UTC
 from pathlib import Path
 from typing import Optional
 
@@ -37,14 +38,17 @@ if str(_EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(_EVAL_DIR))
 
 # Backend imports (runner adds backend/ to sys.path)
-from runner import CaseConfig, RunResult, run_case_brain  # noqa: E402
-from gold_runner import GoldRunResult, run_gold_case  # noqa: E402
-from scorer import CaseScore, score_case  # noqa: E402
+from gold_runner import run_gold_case  # noqa: E402
 from judge import judge_case  # noqa: E402
 from report import (  # noqa: E402
-    EvalReport, build_report, print_report,
-    save_baseline, save_gold_baseline, load_latest_gold_baseline,
+    build_report,
+    load_latest_gold_baseline,
+    print_report,
+    save_baseline,
+    save_gold_baseline,
 )
+from runner import CaseConfig, run_case_brain  # noqa: E402
+from scorer import CaseScore, score_case  # noqa: E402
 
 # Directory for saving full gold traces (alongside gold_baselines/)
 _GOLD_TRACES_DIR = Path(__file__).resolve().parent / "gold_traces"
@@ -369,7 +373,6 @@ async def run_single_case(
             print(f"            {f.title}")
         if score.matches:
             for m in score.matches:
-                exp = case.expected_findings[m.expected_index]
                 sev_label = (
                     "exact" if m.severity_match >= 0.99
                     else "adj" if m.severity_match >= 0.49
@@ -539,8 +542,8 @@ async def run_all(args: argparse.Namespace) -> None:
         if not args.no_judge:
             judge_provider = create_provider(args.provider, args.model)
 
-        from datetime import datetime, timezone
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        from datetime import datetime
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
         for case, source_dir, patch_dir in cases:
             score, verdict, trace = await run_single_gold_case(
