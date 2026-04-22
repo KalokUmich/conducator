@@ -545,8 +545,8 @@ class DispatchDimensionWorkerParams(BaseModel):
     all in one pass.
 
     Budget is higher than scoped dispatch (full diff + caller context in
-    context window). Haiku default; escalate to ``model_tier='strong'``
-    only for genuinely cross-file invariant reasoning.
+    context window). ``model_tier='explorer'`` by default; escalate to
+    ``'strong'`` only for genuinely cross-file invariant reasoning.
 
     Cap (enforced by Brain meta-skill):
       - PR < 5 files:   0 dimension workers (not worth the budget)
@@ -604,18 +604,17 @@ class DispatchDimensionWorkerParams(BaseModel):
             "Token budget. Dimension dispatch reads the full diff + "
             "often traces callers across the repo, so budget is higher "
             "than scoped dispatch. 150K default leaves ~50K headroom "
-            "in Haiku's 200K context for internal reasoning + cache. "
-            "Bump to 180K only when diff itself is >40K tokens."
+            "in the explorer-tier context window for internal reasoning "
+            "+ cache. Bump to 180K only when diff itself is >40K tokens."
         ),
     )
     model_tier: str = Field(
         default="explorer",
         description=(
-            "'explorer' (Haiku, default — dimension work is "
-            "cross-file pattern matching, Haiku's lane) or 'strong' "
-            "(Sonnet, only when cross-file logical inference is "
-            "required — e.g. saga unwind, multi-step state machine "
-            "invariant)."
+            "'explorer' (default — dimension work is cross-file pattern "
+            "matching, which the fast tier handles well) or 'strong' "
+            "(only when cross-file logical inference is required — e.g. "
+            "saga unwind, multi-step state machine invariant)."
         ),
     )
 
@@ -1950,10 +1949,11 @@ BRAIN_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "caller files, the PR introduces a new contract that multiple "
             "call sites must now honour, or a shared utility/middleware is "
             "modified. File-range dispatch can't see the cross-file break.\n\n"
-            "Budget 150K default (Haiku ~200K context). Escalate to "
-            "`model_tier='strong'` ONLY for cross-file logical inference "
-            "(saga unwind, multi-step state-machine invariant) — "
-            "pattern-matching across files is Haiku's lane.\n\n"
+            "Budget 150K default (fits in explorer-tier context with "
+            "headroom). Escalate to `model_tier='strong'` ONLY for "
+            "cross-file logical inference (saga unwind, multi-step "
+            "state-machine invariant) — pattern-matching across files "
+            "is the explorer tier's lane.\n\n"
             "Cap: 0 dispatches on PRs <5 files, 1 on 5-14, 2 on ≥15. "
             "Per-PR dimension-worker budget is separate from the scoped "
             "dispatch cap — these investigations don't compete for the "

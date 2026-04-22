@@ -373,9 +373,9 @@ bug across every changed file.
 - 5-14 files: up to **1**
 - ≥15 files: up to **2**
 
-**Model tier**: Haiku default (cross-file pattern matching is Haiku's
-lane). Escalate to `strong` only when the worker must carry out
-**cross-file logical inference** — saga unwind, multi-step state
+**Model tier**: `explorer` default (cross-file pattern matching is the
+fast tier's lane). Escalate to `strong` only when the worker must carry
+out **cross-file logical inference** — saga unwind, multi-step state
 machine invariant, subtle caller/callee semantic divergence.
 
 <example type="dimension-worker-justified">
@@ -402,7 +402,7 @@ dispatch_dimension_worker(
         "Violation = high severity."
     ),
     budget_tokens=150000,
-    model_tier="explorer",  # pattern match across callers — Haiku fine
+    model_tier="explorer",  # pattern match across callers — fast tier fine
 )
 ```
 </example>

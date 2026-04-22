@@ -1561,9 +1561,9 @@ class PRBrainOrchestrator:
                 f"(new contract, signature change, shared middleware "
                 f"edit) must be verified at every caller site, and a "
                 f"bunch of narrow scoped dispatches would miss the "
-                f"cross-cut. Haiku default @ 150K budget; escalate to "
-                f"`model_tier=\"strong\"` only when cross-file logical "
-                f"inference is required."
+                f"cross-cut. `model_tier=\"explorer\"` default @ 150K "
+                f"budget; escalate to `model_tier=\"strong\"` only when "
+                f"cross-file logical inference is required."
             )
             lines.append("")
             for trig in dim_triggers[:6]:
