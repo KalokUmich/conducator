@@ -1,18 +1,14 @@
-"""AI Code Review module — multi-agent PR review system.
+"""Shared utilities for PR code review.
 
-Orchestrates specialized review agents (correctness, concurrency, security,
-reliability, test coverage) over a PR diff, then merges, deduplicates, and
-ranks findings into a structured review.
+This module no longer hosts an orchestrator — the legacy
+``CodeReviewService`` multi-agent pipeline was removed in favour of the
+Brain-as-coordinator design (``app.agent_loop.pr_brain.PRBrainOrchestrator``).
+What remains here is pure utilities reused by the v2 orchestrator:
 
-Usage:
-    from app.code_review.service import CodeReviewService
-
-    service = CodeReviewService(
-        provider=opus_provider,
-        classifier_provider=haiku_provider,
-    )
-    result = await service.review(
-        workspace_path="/path/to/ws",
-        diff_spec="main...feature/branch",
-    )
+* ``models`` — ``PRContext``, ``ChangedFile``, ``ReviewFinding``, ``RiskProfile``
+* ``diff_parser`` — ``parse_diff`` + file-category classification
+* ``risk_classifier`` — ``classify_risk`` over 5 dimensions
+* ``dedup`` — ``dedup_findings`` merge pass
+* ``ranking`` — ``score_and_rank`` composite scoring
+* ``shared`` — ``parse_findings`` / ``evidence_gate`` shared output parsing
 """

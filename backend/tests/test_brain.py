@@ -720,7 +720,9 @@ class TestBrainConfigLoading:
     def test_load_agent_registry(self):
         agents = load_agent_registry()
         assert len(agents) > 0
-        assert "correctness" in agents  # PR review agent (kept)
+        # After v1 fleet removal, agent_registry holds only v2 / swarm agents.
+        assert "explore_implementation" in agents       # swarm (business flow)
+        assert "pr_existence_check" in agents           # v2 Phase 2 worker
 
 
 # ---------------------------------------------------------------------------

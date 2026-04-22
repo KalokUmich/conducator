@@ -13,7 +13,7 @@ import logging
 import os
 import re
 import subprocess
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -540,9 +540,39 @@ def list_files(
     )
 
 
-_symbol_index_cache: Dict[str, tuple] = {}  # workspace → (index, git_head)
+# In-memory symbol index cache. Bounded to ``_SYMBOL_CACHE_MAX_WORKSPACES``
+# to prevent RSS accumulation when one process sequentially handles multiple
+# workspaces (e.g. the eval harness walking through 10 greptile-* cases —
+# previously OOM-killed keycloak runs at 14.7 GB RSS with 6-10 workspaces
+# retained in memory at once, ~1-1.5 GB each for the Java symbol index).
+#
+# LRU eviction: ``OrderedDict`` + ``move_to_end`` on access, ``popitem
+# (last=False)`` on overflow. ``MAX`` is deliberately small — the working
+# set is usually 1 (interactive review) or 2 (batch eval switching
+# between previous/next workspace). Override via env var.
+_SYMBOL_CACHE_MAX_WORKSPACES = int(
+    os.environ.get("CONDUCTOR_SYMBOL_CACHE_MAX", "2")
+)
+_symbol_index_cache: OrderedDict[str, tuple] = OrderedDict()
 _CONDUCTOR_DIR = ".conductor"
 _SYMBOL_INDEX_FILE = "symbol_index.json"
+
+
+def _lru_evict_symbol_cache() -> None:
+    """Evict oldest cache entries until size ≤ ``_SYMBOL_CACHE_MAX_WORKSPACES``.
+
+    Caller should ``move_to_end(workspace)`` on hit / before inserting to
+    mark the workspace as most-recently used; eviction then drops the
+    actual LRU entry. Called inside the `key_lock` section so safe from
+    concurrent writers."""
+    while len(_symbol_index_cache) > _SYMBOL_CACHE_MAX_WORKSPACES:
+        evicted_ws, _ = _symbol_index_cache.popitem(last=False)
+        logger.info(
+            "Symbol index LRU evict: workspace=%s (cache size=%d, cap=%d)",
+            evicted_ws,
+            len(_symbol_index_cache),
+            _SYMBOL_CACHE_MAX_WORKSPACES,
+        )
 
 
 def _get_git_head(workspace: str) -> Optional[str]:
@@ -670,6 +700,8 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
                 len(index),
                 (current_head or "")[:8],
             )
+            # LRU: mark this workspace as most-recently used
+            _symbol_index_cache.move_to_end(workspace)
             return index
 
     # Slow path — serialise cold-miss builders. The lock key includes the
@@ -698,6 +730,7 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
                         current_head[:8],
                     )
                     _symbol_index_cache[workspace] = (disk_index, current_head)
+                    _lru_evict_symbol_cache()
                     return disk_index
 
         # 3. Full scan
@@ -756,6 +789,7 @@ def _get_symbol_index(workspace: str) -> Optional[Dict[str, list]]:
 
         cache_head = current_head or ""
         _symbol_index_cache[workspace] = (index, cache_head)
+        _lru_evict_symbol_cache()
         # Only persist to disk if the index is non-trivial.
         # An empty or near-empty index may indicate the workspace wasn't fully
         # checked out yet (e.g. git worktree still in progress).  By skipping

@@ -13,45 +13,43 @@ eval/
 
 ## 1. Code Review Eval (`code_review/`)
 
-Measures PR review quality against 12 planted-bug cases in `requests` v2.31.0. Supports three modes: legacy pipeline (`CodeReviewService`), Brain pipeline (`PRBrainOrchestrator`), and gold-standard (`claude` CLI).
+Measures PR review quality across 4 suites (**42 cases**):
+`requests` (12), `greptile-sentry` (10), `greptile-grafana` (10), `greptile-keycloak` (9).
+Two modes: Brain pipeline (`PRBrainOrchestrator` v2, default) and gold-standard (`claude` CLI).
 
 ```bash
 cd backend
 
-# Legacy pipeline (CodeReviewService)
-python ../eval/code_review/run.py --provider anthropic --model claude-sonnet-4-20250514
-python ../eval/code_review/run.py --filter "requests-001" --no-judge
-
-# Brain pipeline (PRBrainOrchestrator) — uses transfer_to_brain
+# Brain pipeline (default)
 python ../eval/code_review/run.py --brain --provider bedrock --model eu.anthropic.claude-sonnet-4-6 \
-  --explorer-model eu.anthropic.claude-haiku-4-5-20251001-v1:0 --no-judge --verbose
+  --explorer-model eu.anthropic.claude-haiku-4-5-20251001-v1:0 --verbose
+python ../eval/code_review/run.py --brain --filter "greptile-grafana-009" --no-judge --verbose
 
 # Gold-standard ceiling (Claude Code CLI)
 python ../eval/code_review/run.py --gold --gold-model sonnet --save-baseline
 
-# 3-round comparison script (legacy vs brain)
-python ../eval/code_review/run_comparison.py
-
 # Save baseline for regression detection
-python ../eval/code_review/run.py --save-baseline
+python ../eval/code_review/run.py --brain --save-baseline
+
+# 4-suite parallel regression (convenience wrapper — see Makefile)
+make eval-brain-regression TAG=v2r
 ```
 
 **Scoring**: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%).
 
-**Flags**: `--brain` (PR Brain mode), `--verbose` (per-finding match details), `--gold` (Claude Code CLI), `--no-judge` (skip LLM judge), `--filter` (run subset).
+**Flags**: `--brain` (default on, coordinator-worker pipeline), `--verbose` (per-finding match details), `--gold` (Claude Code CLI baseline), `--no-judge` (skip LLM judge), `--filter` (run subset).
 
 ```
 code_review/
-├── run.py              CLI entrypoint (legacy + brain + gold modes)
-├── run_comparison.py   Multi-round legacy vs brain comparison
-├── runner.py           Workspace setup + CodeReviewService/PRBrain execution
+├── run.py              CLI entrypoint (brain + gold modes)
+├── runner.py           Workspace setup + PRBrainOrchestrator execution
 ├── scorer.py           Deterministic scoring
 ├── judge.py            LLM-as-Judge qualitative evaluation
 ├── report.py           Report generation + baseline comparison
 ├── gold_runner.py      Gold-standard (Claude Code CLI) runner
 ├── repos.yaml          Repo manifest
-├── repos/requests/     requests v2.31.0 source tree
-├── cases/requests/     12 case definitions + patches
+├── cases/              Per-suite cases (requests + greptile_{sentry,grafana,keycloak})
+├── repos/              Materialised source trees (hardlink-shared across cases)
 ├── gold_baselines/     Gold-standard baselines
 └── gold_traces/        Per-case gold agent traces
 ```

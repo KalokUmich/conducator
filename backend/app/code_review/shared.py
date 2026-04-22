@@ -1,8 +1,11 @@
-"""Shared functions for code review — used by both CodeReviewService and PRBrainOrchestrator.
+"""Shared utilities for PR review.
 
-Extracted from service.py and agents.py so that the legacy pipeline and the
-new Brain-based pipeline can reuse the same deterministic logic without
-duplication.
+Deterministic helpers consumed by ``PRBrainOrchestrator`` v2 coordinator:
+  * ``parse_findings`` — JSON-fenced / raw finding extraction from LLM output
+  * ``parse_findings_with_status`` — variant that preserves worker status tags
+  * ``build_diffs_section`` — PR diff formatting for sub-agent prompts
+  * ``FOCUS_DESCRIPTIONS`` — risk-lens focus hints
+  * ``evidence_gate`` — per-finding confidence/evidence threshold filter
 """
 
 from __future__ import annotations

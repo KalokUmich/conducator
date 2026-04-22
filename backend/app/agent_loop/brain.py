@@ -52,6 +52,7 @@ _VALID_FACTORY_ROLES = frozenset({
     "reliability",
     "performance",
     "test_coverage",
+    "api_contract",
 })
 
 

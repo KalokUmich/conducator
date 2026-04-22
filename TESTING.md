@@ -66,7 +66,9 @@ make update-contracts                         # regenerate after schema changes
 | `tests/test_bedrock_tool_repair.py` | 64 | Bedrock tool-call repair + malformed response handling |
 | `tests/test_prompt_builder.py` | 64 | 4-layer prompt assembly, skill injection |
 | `tests/test_shared.py` | 55 | Shared code-review functions (evidence gate, dedup, ranking) |
-| `tests/test_code_review.py` | 67 | Legacy CodeReviewService 10-step pipeline |
+| `tests/test_code_review.py` | — | Shared PR review utilities (diff parser, risk classifier, dedup, ranking, PRContext) |
+| `tests/test_pr_brain.py` | — | PRBrainOrchestrator v2 pipeline + P13 (Python/Go/Java) + P14 + phase-2 lang hints |
+| `tests/test_dispatch_subagent.py` | — | `dispatch_subagent` primitive + 7 agent_factory role templates |
 | `tests/test_auto_apply_policy.py` | 28 | Auto-apply policy enforcement |
 | `tests/test_chat_persistence.py` | 16 | ChatPersistenceService: micro-batch writes, flush timer, delete room |
 | `tests/test_browser_tools.py` | 35 | Browser tools (Playwright — mocked BrowserService) |

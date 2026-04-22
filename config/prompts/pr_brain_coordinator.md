@@ -70,6 +70,7 @@ call with narrow scope (**1–5 files** with line ranges).
    - `reliability` — error handling, retries, DB migrations, observability, graceful degradation
    - `performance` — N+1, unbounded work, cache-miss, regex in hot loop, allocation pressure
    - `test_coverage` — new behaviour without tests, weakened assertions, suspicious skips
+   - `api_contract` — gate / auth / validation coverage across alternate entry points; feature-flag bypass; new guard in one path but same resource reachable through another
 
    You may combine: `role="security", checks=[q1,q2,q3]` = specialist answering 3 specific questions (strongest dispatch).
 
@@ -77,6 +78,16 @@ call with narrow scope (**1–5 files** with line ranges).
 - ≥1 correctness investigation per PR (role or checks — your choice).
 - Diff touches `**/auth/**`, `**/crypto/**`, `**/session*` → dispatch with `role="security"`.
 - Diff contains a DB migration → dispatch with `role="reliability"`.
+- **Diff adds a gate / guard / flag check / auth middleware / validator** → **MUST dispatch `role="api_contract"`**. Trigger patterns (any one fires the rule):
+  * new `if !<featureFlag|flagField|helper>.IsEnabled|.Get|.HasPermission|.Allows|.CanAccess(...) { ... return ... }`
+  * new `if !<authState|ctx.authorized> { ... return ... 4(01|03) ... }`
+  * new router middleware registration (`.Use(`, `.With(`, `router.Handle*` with auth chain change)
+  * new input-validation step before a write / query construction
+  * new feature-flag return inside `case X:` / type-switch / dispatch table
+
+  **This rule is non-bypassable even on small PRs.** Gate bugs compile, pass review-by-survey, and ship because humans and LLMs both think one-site-is-enough. Bypass catches it. The cost is ~$0.30 and one extra dispatch — always worth it when a gate is present.
+
+  In rare cases where the gate is trivially scoped (e.g. a gate inside a single private helper with one caller, provably total), you may skip, but you must state in the Synthesis note: "api_contract skipped because target has provably one call site: <evidence>." Otherwise, dispatch.
 - Cap (set dynamically in your user-message): **5 / 10 / 16** dispatches for small / medium / large PRs. The per-PR cap lives in the "Dispatch budget for THIS PR" section of your task.
 
 **For large PRs (≥ 15 files): cluster-first.** In Survey, group files by
@@ -110,8 +121,8 @@ wastes budget on clusters where one lens suffices, and under-covers
 clusters where a third or fourth lens (concurrency / performance /
 test_coverage) matters more.
 
-All 6 available lenses: `security`, `correctness`, `concurrency`,
-`reliability`, `performance`, `test_coverage`. A cluster that touches
+All 7 available lenses: `security`, `correctness`, `concurrency`,
+`reliability`, `performance`, `test_coverage`, `api_contract`. A cluster that touches
 4-5 of these simultaneously earns the higher dispatch count.
 
 **Budget strategy**: allocate dispatch slots to high-signal clusters

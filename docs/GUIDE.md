@@ -419,15 +419,13 @@ backend/
 │   │   ├── openai_provider.py     # OpenAI Chat Completions
 │   │   └── resolver.py            # ProviderResolver — 健康检查 + 自动选优
 │   │
-│   ├── code_review/               # 多 Agent PR 评审管线（10 步）
-│   │   ├── service.py             # CodeReviewService — 编排评审流程
-│   │   ├── agents.py              # 专用评审 Agent（并行派发）
+│   ├── code_review/               # PR 评审共享工具（由 PR Brain v2 消费）
+│   │   ├── shared.py              # parse_findings + evidence_gate + FOCUS_DESCRIPTIONS
 │   │   ├── models.py              # PRContext、ReviewFinding、ReviewResult
 │   │   ├── diff_parser.py         # git diff → PRContext
 │   │   ├── risk_classifier.py     # 5 维度风险分类
 │   │   ├── ranking.py             # 发现结果评分排序
-│   │   ├── dedup.py               # 发现结果去重合并
-│   │   └── router.py              # /api/code-review/ 接口（含 SSE 流）
+│   │   └── dedup.py               # 发现结果去重合并
 │   │
 │   ├── git_workspace/             # Git 工作区管理
 │   │   ├── service.py             # GitWorkspaceService（裸仓库 + worktree）
@@ -1876,12 +1874,12 @@ eval/
 
 ### 18.1 代码评审评估（code_review/）
 
-在真实开源代码库中植入已知 bug（git patch），运行完整的 PR Brain / `CodeReviewService` 管线，检查发现的结果是否匹配预期。
+在真实开源代码库中植入已知 bug（git patch），运行 PR Brain v2（`PRBrainOrchestrator` — coordinator-worker / agent-as-tool 设计）管线，检查发现的结果是否匹配预期。
 
 两套 case 并存：
 
-- **12 个 requests-v2.31.0 legacy cases** — 最早的自产 case，难度梯度可控，适合单元式快速回归。
-- **50 个 Greptile benchmark cases** — 对齐 Greptile 公开的 AI Code Review Benchmark（sentry / cal.com / grafana / keycloak / discourse 五个大型 OSS 项目各 10 个真实 bug-fix PR），用于横向对比 Cursor / Copilot / CodeRabbit 等商用 reviewer 的 `catch_rate`。详细原理和数据管线见 `eval/code_review/GREPTILE_BENCHMARK.md`。
+- **12 个 requests-v2.31.0 cases** — 最早的自产 case，难度梯度可控，适合单元式快速回归。
+- **Greptile benchmark cases** — 对齐 Greptile 公开的 AI Code Review Benchmark（sentry / cal.com / grafana / keycloak / discourse 五个大型 OSS 项目各 10 个真实 bug-fix PR，当前常跑 sentry + grafana + keycloak 三个 suite 共 ~30 case），用于横向对比 Cursor / Copilot / CodeRabbit 等商用 reviewer 的 `catch_rate`。详细原理和数据管线见 `eval/code_review/GREPTILE_BENCHMARK.md`。
 
 ```bash
 cd backend

@@ -46,7 +46,7 @@ async def review_pull_request(
 
     Flow:
     1. Read PR metadata (branches)
-    2. Run PRBrainOrchestrator (or CodeReviewService) on the diff
+    2. Run PRBrainOrchestrator on the diff
     3. Post each finding as an inline PR thread
     4. Post summary comment
     5. Set vote on PR

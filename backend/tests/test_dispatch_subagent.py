@@ -376,13 +376,30 @@ class TestLoadRoleTemplate:
                         "## Finding-shape examples"):
             assert section in body, f"missing {section!r} in security template"
 
-    def test_all_6_factory_roles_parseable(self):
+    def test_all_7_factory_roles_parseable(self):
         from app.agent_loop.brain import _VALID_FACTORY_ROLES, _load_role_template
 
+        assert len(_VALID_FACTORY_ROLES) == 7
         for role in _VALID_FACTORY_ROLES:
             tpl = _load_role_template(role)
             assert tpl is not None, f"{role}.md failed to load"
             assert tpl["frontmatter"].get("name") == role
+
+    def test_api_contract_role_has_all_4_sections(self):
+        """api_contract is the newest role (gate-coverage lens). Ensure
+        its template matches the 4-section convention."""
+        from app.agent_loop.brain import _load_role_template
+
+        tpl = _load_role_template("api_contract")
+        assert tpl is not None
+        body = tpl["body"]
+        for section in (
+            "## Lens",
+            "## Typical concerns",
+            "## Investigation approach",
+            "## Finding-shape examples",
+        ):
+            assert section in body, f"missing {section!r} in api_contract"
 
     def test_unknown_role_returns_none(self):
         from app.agent_loop.brain import _load_role_template

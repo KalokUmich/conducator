@@ -2,19 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.agent_loop.pr_brain import (
-    ArbitrationVerdict,
-    PRBrainOrchestrator,
-)
-from app.workflow.models import PRBrainConfig
-
-# Read max_findings_per_agent from default config (same as config/brains/pr_review.yaml)
-_MAX_FINDINGS_PER_AGENT = PRBrainConfig().post_processing.max_findings_per_agent
+from app.agent_loop.pr_brain import PRBrainOrchestrator
 from app.code_review.models import (
     ChangedFile,
     FileCategory,
@@ -147,595 +139,6 @@ def _high_security_profile() -> RiskProfile:
     )
 
 
-# ---------------------------------------------------------------------------
-# ArbitrationVerdict
-# ---------------------------------------------------------------------------
-
-
-class TestArbitrationVerdict:
-    def test_verdict_defaults(self):
-        v = ArbitrationVerdict(index=0)
-        assert v.index == 0
-        assert v.counter_evidence == []
-        assert v.rebuttal_confidence == pytest.approx(0.0)
-        assert v.suggested_severity == ""
-        assert v.reason == ""
-
-    def test_verdict_with_data(self):
-        v = ArbitrationVerdict(
-            index=2,
-            counter_evidence=["code is guarded", "lock prevents race"],
-            rebuttal_confidence=0.85,
-            suggested_severity="warning",
-            reason="found guard at line 55",
-        )
-        assert v.index == 2
-        assert len(v.counter_evidence) == 2
-        assert v.rebuttal_confidence == pytest.approx(0.85)
-        assert v.suggested_severity == "warning"
-        assert v.reason == "found guard at line 55"
-
-    def test_verdict_counter_evidence_is_mutable(self):
-        v = ArbitrationVerdict(index=0)
-        v.counter_evidence.append("new evidence")
-        assert len(v.counter_evidence) == 1
-
-
-# ---------------------------------------------------------------------------
-# _select_agents
-# ---------------------------------------------------------------------------
-
-
-class TestSelectAgents:
-    def test_select_agents_all_low_risk(self):
-        brain = _make_pr_brain()
-        risk = _low_risk_profile()
-        ctx = _make_pr_context(total_changed_lines=500)  # not small PR
-        agents = brain._select_agents(risk, ctx)
-        # correctness and test_coverage always run; others need medium+ risk
-        assert "correctness" in agents
-        assert "test_coverage" in agents
-        # Security/concurrency/reliability should NOT run for low risk
-        assert "security" not in agents
-        assert "concurrency" not in agents
-        assert "reliability" not in agents
-
-    def test_select_agents_security_high(self):
-        brain = _make_pr_brain()
-        risk = _high_security_profile()
-        ctx = _make_pr_context(total_changed_lines=500)
-        agents = brain._select_agents(risk, ctx)
-        assert "security" in agents
-        assert "correctness" in agents
-        assert "test_coverage" in agents
-
-    def test_select_agents_small_pr_skips_concurrency(self):
-        brain = _make_pr_brain()
-        # Small PR with medium concurrency risk — should still skip
-        risk = RiskProfile(
-            correctness=RiskLevel.LOW,
-            concurrency=RiskLevel.MEDIUM,
-            security=RiskLevel.LOW,
-            reliability=RiskLevel.LOW,
-            operational=RiskLevel.LOW,
-        )
-        # Use a value strictly below the threshold (100) to trigger small-PR path
-        ctx = _make_pr_context(total_changed_lines=50)  # below 100 threshold → small
-        agents = brain._select_agents(risk, ctx)
-        # Concurrency should be SKIPPED for small PR even at medium risk
-        assert "concurrency" not in agents
-
-    def test_select_agents_small_pr_includes_high_concurrency(self):
-        brain = _make_pr_brain()
-        risk = RiskProfile(
-            correctness=RiskLevel.LOW,
-            concurrency=RiskLevel.HIGH,
-            security=RiskLevel.LOW,
-            reliability=RiskLevel.LOW,
-            operational=RiskLevel.LOW,
-        )
-        ctx = _make_pr_context(total_changed_lines=50)  # below 100 threshold → small
-        agents = brain._select_agents(risk, ctx)
-        # HIGH concurrency risk overrides the small-PR skip
-        assert "concurrency" in agents
-
-    def test_select_agents_small_pr_skips_reliability_low_risk(self):
-        brain = _make_pr_brain()
-        risk = RiskProfile(
-            correctness=RiskLevel.LOW,
-            concurrency=RiskLevel.LOW,
-            security=RiskLevel.LOW,
-            reliability=RiskLevel.MEDIUM,  # medium won't override small-PR skip
-            operational=RiskLevel.LOW,
-        )
-        ctx = _make_pr_context(total_changed_lines=50)  # very small
-        agents = brain._select_agents(risk, ctx)
-        assert "reliability" not in agents
-
-    def test_select_agents_medium_risk_adds_security(self):
-        brain = _make_pr_brain()
-        risk = RiskProfile(security=RiskLevel.MEDIUM)
-        ctx = _make_pr_context(total_changed_lines=500)
-        agents = brain._select_agents(risk, ctx)
-        assert "security" in agents
-
-
-# ---------------------------------------------------------------------------
-# _build_agent_query
-# ---------------------------------------------------------------------------
-
-
-class TestBuildAgentQuery:
-    def _make_brain_and_ctx(self):
-        brain = _make_pr_brain()
-        ctx = _make_pr_context()
-        risk = _low_risk_profile()
-        return brain, ctx, risk
-
-    def test_build_query_contains_focus(self):
-        brain, ctx, risk = self._make_brain_and_ctx()
-        query = brain._build_agent_query("correctness", ctx, risk, {}, "")
-        assert "Logic errors" in query or "correctness" in query.lower()
-
-    def test_build_query_contains_strategy(self):
-        brain, ctx, risk = self._make_brain_and_ctx()
-        query = brain._build_agent_query("security", ctx, risk, {}, "")
-        # Strategy hint for security mentions trace_variable or taint
-        assert "taint" in query.lower() or "trace" in query.lower() or "depth-first" in query.lower()
-
-    def test_build_query_contains_diffs(self):
-        brain, ctx, risk = self._make_brain_and_ctx()
-        file_diffs = {"app/file0.py": "diff --git a/app/file0.py\n+changed line"}
-        query = brain._build_agent_query("correctness", ctx, risk, file_diffs, "")
-        assert "diffs" in query.lower() or "diff" in query
-
-    def test_build_query_scopes_test_coverage(self):
-        brain = _make_pr_brain()
-        # test_coverage agent should see ALL files, including test files
-        ctx = PRContext(
-            diff_spec="HEAD~1..HEAD",
-            files=[
-                ChangedFile(path="app/service.py", additions=10, deletions=0, category=FileCategory.BUSINESS_LOGIC),
-                ChangedFile(path="tests/test_service.py", additions=5, deletions=0, category=FileCategory.TEST),
-            ],
-            total_additions=15,
-            total_deletions=0,
-            total_changed_lines=15,
-            file_count=2,
-        )
-        risk = _low_risk_profile()
-        query = brain._build_agent_query("test_coverage", ctx, risk, {}, "")
-        # test_coverage sees all files; test file should appear in the query
-        assert "tests/test_service.py" in query
-
-    def test_build_query_security_includes_config_files(self):
-        brain = _make_pr_brain()
-        ctx = PRContext(
-            diff_spec="HEAD~1..HEAD",
-            files=[
-                ChangedFile(path="app/auth.py", additions=10, deletions=0, category=FileCategory.BUSINESS_LOGIC),
-                ChangedFile(path="config/settings.yaml", additions=2, deletions=0, category=FileCategory.CONFIG),
-            ],
-            total_additions=12,
-            total_deletions=0,
-            total_changed_lines=12,
-            file_count=2,
-        )
-        risk = _low_risk_profile()
-        query = brain._build_agent_query("security", ctx, risk, {}, "")
-        # Security agent scopes to business_logic + config files
-        assert "config/settings.yaml" in query
-
-    def test_build_query_security_widens_to_security_sensitive_paths(self):
-        """Security agent picks up auth/crypto/session files even when
-        classified outside business_logic (e.g. INFRA, SCHEMA). Also
-        deduplicates when a file matches multiple scoping rules."""
-        brain = _make_pr_brain()
-        ctx = PRContext(
-            diff_spec="HEAD~1..HEAD",
-            files=[
-                # Classified as INFRA but matches auth path — should appear
-                ChangedFile(path="deploy/auth_middleware.py", additions=5, deletions=0, category=FileCategory.INFRA),
-                # Classified as SCHEMA but matches permission keyword — should appear
-                ChangedFile(path="migrations/0042_add_permissions.sql", additions=3, deletions=0, category=FileCategory.SCHEMA),
-                # Regular business logic — always in scope
-                ChangedFile(path="app/payment.py", additions=8, deletions=0, category=FileCategory.BUSINESS_LOGIC),
-                # Both BUSINESS_LOGIC AND security-sensitive — must dedup
-                ChangedFile(path="app/auth_service.py", additions=12, deletions=0, category=FileCategory.BUSINESS_LOGIC),
-                # INFRA, no security keyword — should NOT appear
-                ChangedFile(path="Dockerfile", additions=2, deletions=0, category=FileCategory.INFRA),
-            ],
-            total_additions=30,
-            total_deletions=0,
-            total_changed_lines=30,
-            file_count=5,
-        )
-        risk = _low_risk_profile()
-        query = brain._build_agent_query("security", ctx, risk, {}, "")
-        # Security-sensitive paths picked up regardless of category
-        assert "deploy/auth_middleware.py" in query
-        assert "migrations/0042_add_permissions.sql" in query
-        # Regular business logic still in scope
-        assert "app/payment.py" in query
-        # Dedup: auth_service.py appears exactly once, not twice
-        assert query.count("app/auth_service.py") == 1
-        # Non-matching infra file excluded
-        assert "Dockerfile" not in query
-
-    def test_build_query_non_security_unaffected_by_new_scoping(self):
-        """correctness/concurrency/reliability/performance still get only
-        business_logic files (no widening to security-sensitive paths)."""
-        brain = _make_pr_brain()
-        ctx = PRContext(
-            diff_spec="HEAD~1..HEAD",
-            files=[
-                ChangedFile(path="app/payment.py", additions=8, deletions=0, category=FileCategory.BUSINESS_LOGIC),
-                ChangedFile(path="deploy/auth_middleware.py", additions=5, deletions=0, category=FileCategory.INFRA),
-            ],
-            total_additions=13,
-            total_deletions=0,
-            total_changed_lines=13,
-            file_count=2,
-        )
-        risk = _low_risk_profile()
-        query = brain._build_agent_query("correctness", ctx, risk, {}, "")
-        assert "app/payment.py" in query
-        # correctness stays narrow — auth file classified as INFRA stays out
-        assert "deploy/auth_middleware.py" not in query
-
-    def test_build_query_contains_pr_context_section(self):
-        brain, ctx, risk = self._make_brain_and_ctx()
-        query = brain._build_agent_query("correctness", ctx, risk, {}, "")
-        assert "<pr_context>" in query
-        assert ctx.diff_spec in query
-
-    def test_build_query_includes_impact_context(self):
-        brain, ctx, risk = self._make_brain_and_ctx()
-        impact = "## Impact Graph\n`app/file0.py`:\n  ← app/caller.py"
-        query = brain._build_agent_query("correctness", ctx, risk, {}, impact)
-        assert "<impact_context>" in query
-        assert "Impact Graph" in query
-
-
-# ---------------------------------------------------------------------------
-# _post_process
-# ---------------------------------------------------------------------------
-
-
-class TestPostProcess:
-    @pytest.mark.asyncio
-    async def test_post_process_parses_findings(self):
-        brain = _make_pr_brain()
-        ctx = _make_pr_context()
-        findings_json = json.dumps(
-            [
-                {
-                    "title": "Null dereference",
-                    "severity": "warning",
-                    "confidence": 0.85,
-                    "file": "app/service.py",
-                    "start_line": 10,
-                    "end_line": 10,
-                    "evidence": ["line 10 dereferences optional"],
-                    "risk": "NullPointerException",
-                    "suggested_fix": "add null check",
-                }
-            ]
-        )
-        results = [_make_tool_result("correctness", f"```json\n{findings_json}\n```")]
-        output = await brain._post_process(results, ctx)
-        assert len(output) >= 1
-        assert output[0].title == "Null dereference"
-
-    @pytest.mark.asyncio
-    async def test_post_process_caps_per_agent(self):
-        brain = _make_pr_brain()
-        ctx = _make_pr_context()
-        # Create more than _MAX_FINDINGS_PER_AGENT findings
-        findings_list = [
-            {
-                "title": f"Finding {i}",
-                "severity": "warning",
-                "confidence": 0.85 - i * 0.01,  # descending confidence
-                "file": "app/service.py",
-                "start_line": i + 1,
-                "end_line": i + 1,
-                "evidence": [f"evidence {i}"],
-                "risk": f"risk {i}",
-                "suggested_fix": f"fix {i}",
-            }
-            for i in range(_MAX_FINDINGS_PER_AGENT + 3)
-        ]
-        answer = json.dumps(findings_list)
-        results = [_make_tool_result("correctness", answer, tool_calls_made=5)]
-        output = await brain._post_process(results, ctx)
-        # Should be capped at _MAX_FINDINGS_PER_AGENT per agent
-        assert len(output) <= _MAX_FINDINGS_PER_AGENT
-
-    @pytest.mark.asyncio
-    async def test_post_process_filters_test_files(self):
-        brain = _make_pr_brain()
-        # Create context with both source and test findings
-        ctx = PRContext(
-            diff_spec="HEAD~1..HEAD",
-            files=[
-                ChangedFile(path="app/service.py", additions=10, deletions=0, category=FileCategory.BUSINESS_LOGIC),
-                ChangedFile(path="tests/test_service.py", additions=5, deletions=0, category=FileCategory.TEST),
-            ],
-            total_additions=15,
-            total_deletions=0,
-            total_changed_lines=15,
-            file_count=2,
-        )
-        # Mix of source and test-file-only test_coverage findings
-        source_finding = {
-            "title": "Missing coverage for auth flow",
-            "severity": "warning",
-            "confidence": 0.85,
-            "file": "app/service.py",
-            "start_line": 10,
-            "end_line": 10,
-            "evidence": ["no test covers auth path"],
-            "risk": "untested code",
-            "suggested_fix": "add test",
-        }
-        test_file_finding = {
-            "title": "Test assertion too weak",
-            "severity": "warning",
-            "confidence": 0.82,
-            "file": "tests/test_service.py",
-            "start_line": 20,
-            "end_line": 20,
-            "evidence": ["only checks status code"],
-            "risk": "false confidence",
-            "suggested_fix": "assert response body",
-        }
-        answer = json.dumps([source_finding, test_file_finding])
-        results = [_make_tool_result("test_coverage", answer, tool_calls_made=5)]
-        output = await brain._post_process(results, ctx)
-        # The test-file-only finding should be dropped when source findings exist
-        test_files = [f for f in output if "tests/" in f.file]
-        source_files = [f for f in output if f.file == "app/service.py"]
-        assert len(source_files) >= 1
-        # test_service.py finding (test_coverage category) should be dropped
-        assert len(test_files) == 0
-
-    @pytest.mark.asyncio
-    async def test_post_process_handles_failed_agent(self):
-        brain = _make_pr_brain()
-        ctx = _make_pr_context()
-        failed_result = ToolResult(
-            tool_name="dispatch_agent",
-            success=False,
-            error="Agent timed out",
-        )
-        # Should not raise — failed results are silently skipped
-        output = await brain._post_process([failed_result], ctx)
-        assert isinstance(output, list)
-
-    @pytest.mark.asyncio
-    async def test_post_process_empty_results(self):
-        brain = _make_pr_brain()
-        ctx = _make_pr_context()
-        output = await brain._post_process([], ctx)
-        assert output == []
-
-    @pytest.mark.asyncio
-    async def test_post_process_repairs_truncated_output(self):
-        """When parse_findings fails on a substantive answer (>100 chars),
-        _post_process should call repair_output via the explorer provider
-        to recover findings. This catches the FORCE_CONCLUDE truncation
-        case where the agent ran out of budget mid-investigation but still
-        had evidence in its accumulated text."""
-        brain = _make_pr_brain()
-        ctx = _make_pr_context()
-
-        # Truncated agent output: prose with file refs but no JSON.
-        # 4 review agents had outputs like this in PR 13858 trace.
-        truncated = (
-            "I investigated the auth flow and found that the rate limiter "
-            "in app/service.py at line 42 has a fail-open Redis catch that "
-            "bypasses the throttle on errors. This means an attacker could "
-            "trigger Redis errors to bypass the throttle entirely. Severity: warning."
-        )
-        assert len(truncated) > 100  # sanity: triggers repair branch
-
-        # Mock the explorer provider's call_model (the repair LLM call)
-        # to return a properly-formatted JSON array.
-        repaired_json = json.dumps(
-            [
-                {
-                    "title": "Fail-open rate limiter bypass",
-                    "severity": "warning",
-                    "confidence": 0.85,
-                    "file": "app/service.py",
-                    "start_line": 42,
-                    "end_line": 42,
-                    "evidence": ["fail-open Redis catch at line 42"],
-                    "risk": "throttle bypass",
-                    "suggested_fix": "fail closed on Redis errors",
-                }
-            ]
-        )
-        brain._explorer_provider.call_model = MagicMock(return_value=repaired_json)
-
-        results = [_make_tool_result("correctness", truncated)]
-        output = await brain._post_process(results, ctx)
-
-        # Repair should have been called with the truncated answer
-        brain._explorer_provider.call_model.assert_called_once()
-        # And recovered the finding
-        assert len(output) == 1
-        assert output[0].title == "Fail-open rate limiter bypass"
-        assert output[0].file == "app/service.py"
-
-    @pytest.mark.asyncio
-    async def test_post_process_skips_repair_for_short_answer(self):
-        """If the answer is too short (<=100 chars) the repair LLM call
-        is skipped — there's nothing to recover."""
-        brain = _make_pr_brain()
-        ctx = _make_pr_context()
-        brain._explorer_provider.call_model = MagicMock(return_value="[]")
-
-        results = [_make_tool_result("correctness", "no findings")]  # 11 chars
-        output = await brain._post_process(results, ctx)
-
-        # Repair must NOT be called for short answers
-        brain._explorer_provider.call_model.assert_not_called()
-        assert output == []
-
-
-# ---------------------------------------------------------------------------
-# _parse_verdicts
-# ---------------------------------------------------------------------------
-
-
-class TestParseVerdicts:
-    def test_parse_verdicts_valid(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding(), _make_finding(title="Second finding")]
-        verdicts_json = json.dumps(
-            [
-                {
-                    "index": 0,
-                    "counter_evidence": ["no lock needed here"],
-                    "rebuttal_confidence": 0.7,
-                    "suggested_severity": "warning",
-                    "reason": "already guarded",
-                },
-                {
-                    "index": 1,
-                    "counter_evidence": [],
-                    "rebuttal_confidence": 0.1,
-                    "suggested_severity": "critical",
-                    "reason": "confirmed issue",
-                },
-            ]
-        )
-        answer = f"<result>\n{verdicts_json}\n</result>"
-        verdicts = brain._parse_verdicts(findings, answer)
-        assert len(verdicts) == 2
-        assert verdicts[0].rebuttal_confidence == pytest.approx(0.7)
-        assert verdicts[1].rebuttal_confidence == pytest.approx(0.1)
-
-    def test_parse_verdicts_missing_tags(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding()]
-        # No <result> tags → should return defaults
-        verdicts = brain._parse_verdicts(findings, "No structured output here")
-        assert len(verdicts) == 1
-        assert verdicts[0].rebuttal_confidence == pytest.approx(0.0)
-        assert verdicts[0].reason == "arbitration unavailable"
-
-    def test_parse_verdicts_fills_gaps(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding(), _make_finding(title="F2"), _make_finding(title="F3")]
-        # Only verdict for index 1 — indices 0 and 2 should get defaults
-        verdicts_json = json.dumps(
-            [
-                {
-                    "index": 1,
-                    "counter_evidence": ["found counter"],
-                    "rebuttal_confidence": 0.6,
-                    "suggested_severity": "nit",
-                    "reason": "minor",
-                },
-            ]
-        )
-        answer = f"<result>{verdicts_json}</result>"
-        verdicts = brain._parse_verdicts(findings, answer)
-        assert len(verdicts) == 3
-        # Sort by index to check
-        sorted_v = sorted(verdicts, key=lambda v: v.index)
-        assert sorted_v[0].reason == "not challenged"
-        assert sorted_v[1].rebuttal_confidence == pytest.approx(0.6)
-        assert sorted_v[2].reason == "not challenged"
-
-    def test_parse_verdicts_invalid_json_in_tags(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding()]
-        answer = "<result>not valid json</result>"
-        verdicts = brain._parse_verdicts(findings, answer)
-        assert len(verdicts) == 1
-        assert verdicts[0].rebuttal_confidence == pytest.approx(0.0)
-
-    def test_parse_verdicts_sorted_by_index(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding(), _make_finding(title="F2"), _make_finding(title="F3")]
-        # Return verdicts out of order
-        verdicts_json = json.dumps(
-            [
-                {
-                    "index": 2,
-                    "counter_evidence": [],
-                    "rebuttal_confidence": 0.3,
-                    "suggested_severity": "warning",
-                    "reason": "ok",
-                },
-                {
-                    "index": 0,
-                    "counter_evidence": [],
-                    "rebuttal_confidence": 0.9,
-                    "suggested_severity": "nit",
-                    "reason": "wrong",
-                },
-            ]
-        )
-        answer = f"<result>{verdicts_json}</result>"
-        verdicts = brain._parse_verdicts(findings, answer)
-        for i, v in enumerate(verdicts):
-            assert v.index == i
-
-
-# ---------------------------------------------------------------------------
-# _default_verdicts
-# ---------------------------------------------------------------------------
-
-
-class TestDefaultVerdicts:
-    def test_default_verdicts_length(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding() for _ in range(5)]
-        verdicts = brain._default_verdicts(findings)
-        assert len(verdicts) == 5
-
-    def test_default_verdicts_indices(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding() for _ in range(3)]
-        verdicts = brain._default_verdicts(findings)
-        for i, v in enumerate(verdicts):
-            assert v.index == i
-
-    def test_default_verdicts_values(self):
-        brain = _make_pr_brain()
-        findings = [_make_finding(severity=Severity.CRITICAL)]
-        verdicts = brain._default_verdicts(findings)
-        v = verdicts[0]
-        assert v.counter_evidence == []
-        assert v.rebuttal_confidence == pytest.approx(0.0)
-        assert v.suggested_severity == Severity.CRITICAL.value
-        assert v.reason == "arbitration unavailable"
-
-    def test_default_verdicts_empty_findings(self):
-        brain = _make_pr_brain()
-        verdicts = brain._default_verdicts([])
-        assert verdicts == []
-
-
-# ---------------------------------------------------------------------------
-# _MAX_FINDINGS_PER_AGENT constant
-# ---------------------------------------------------------------------------
-
-
-class TestConstants:
-    def test_max_findings_per_agent_value(self):
-        assert _MAX_FINDINGS_PER_AGENT == 3
-
-    def test_max_findings_per_agent_is_int(self):
-        assert isinstance(_MAX_FINDINGS_PER_AGENT, int)
-
-
-# ---------------------------------------------------------------------------
 # _inject_missing_symbol_findings (Phase 2 post-pass)
 # ---------------------------------------------------------------------------
 
@@ -1449,6 +852,485 @@ class TestScanNewPythonImportsForMissing:
         names = [f["name"] for f in found]
         assert "Missing" in names
         assert "Real" not in names
+
+
+# ---------------------------------------------------------------------------
+# _scan_new_go_references_for_missing (P13-Go — phantom bare-identifier)
+# ---------------------------------------------------------------------------
+
+
+class TestScanNewGoReferencesForMissing:
+    """P13-Go: deterministic catch for `go build` compile errors caused
+    by undefined bare identifiers in same-package diff additions.
+    Targets the grafana-003 class (`endpointQueryData` etc.).
+    """
+
+    def _diff(self, path: str, new_lines: list[str]) -> str:
+        body_plus = "\n".join(f"+{ln}" for ln in new_lines)
+        return (
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            f"@@ -0,0 +1,{len(new_lines)} @@\n"
+            f"{body_plus}"
+        )
+
+    def test_flags_phantom_bare_call(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "foo"
+        pkg.mkdir(parents=True)
+        (pkg / "existing.go").write_text(
+            "package foo\nfunc DefinedFunc() {}\n"
+        )
+        (pkg / "new.go").write_text("package foo\n")
+        diff = self._diff(
+            "pkg/foo/new.go",
+            ["package foo", "", "func UseIt() {",
+             "\tendpointQueryData(\"x\")", "}"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/foo/new.go": diff},
+        )
+        names = [f["name"] for f in found]
+        assert "endpointQueryData" in names
+        ev = next(f for f in found if f["name"] == "endpointQueryData")["evidence"]
+        assert "go build" in ev
+        assert "undefined" in ev
+
+    def test_defined_in_package_not_flagged(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "foo"
+        pkg.mkdir(parents=True)
+        (pkg / "helper.go").write_text(
+            "package foo\nfunc DefinedFunc() string { return \"\" }\n"
+        )
+        (pkg / "new.go").write_text("package foo\n")
+        diff = self._diff(
+            "pkg/foo/new.go",
+            ["package foo", "", "func UseIt() {",
+             "\tDefinedFunc()", "}"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/foo/new.go": diff},
+        )
+        assert found == []
+
+    def test_go_builtins_skipped(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "bar"
+        pkg.mkdir(parents=True)
+        (pkg / "new.go").write_text("package bar\n")
+        diff = self._diff(
+            "pkg/bar/new.go",
+            ["package bar", "",
+             "func Work(xs []int) int {",
+             "\ts := make([]int, 0)",
+             "\tfor _, x := range xs { s = append(s, x) }",
+             "\treturn len(s)",
+             "}"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/bar/new.go": diff},
+        )
+        # make, append, len all builtins — none flagged
+        assert found == []
+
+    def test_method_call_skipped(self, tmp_path):
+        """`obj.Method()` is not a bare call — skip."""
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "baz"
+        pkg.mkdir(parents=True)
+        (pkg / "new.go").write_text("package baz\n")
+        diff = self._diff(
+            "pkg/baz/new.go",
+            ["package baz", "",
+             "func Work(c Client) {", "\tc.DoSomething()", "}"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/baz/new.go": diff},
+        )
+        # DoSomething is a method call, not bare — not flagged
+        names = [f["name"] for f in found]
+        assert "DoSomething" not in names
+
+    def test_package_qualified_call_skipped(self, tmp_path):
+        """`pkg.Foo()` is package-qualified — scope-out per MVP."""
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "qux"
+        pkg.mkdir(parents=True)
+        (pkg / "new.go").write_text("package qux\n")
+        diff = self._diff(
+            "pkg/qux/new.go",
+            ["package qux", "", "import \"fmt\"", "",
+             "func Work() { fmt.Println(\"hi\") }"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/qux/new.go": diff},
+        )
+        names = [f["name"] for f in found]
+        assert "Println" not in names
+        assert "fmt" not in names
+
+    def test_func_declaration_not_self_flagged(self, tmp_path):
+        """A function declared in the diff should not flag itself as
+        a phantom caller."""
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "selfref"
+        pkg.mkdir(parents=True)
+        (pkg / "new.go").write_text("package selfref\n")
+        diff = self._diff(
+            "pkg/selfref/new.go",
+            ["package selfref", "", "func NewOne() int { return 42 }"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/selfref/new.go": diff},
+        )
+        names = [f["name"] for f in found]
+        assert "NewOne" not in names
+
+    def test_test_files_skipped(self, tmp_path):
+        """_test.go files get scope-out to avoid cross-package test helpers."""
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "a"
+        pkg.mkdir(parents=True)
+        (pkg / "new_test.go").write_text("package a\n")
+        diff = self._diff(
+            "pkg/a/new_test.go",
+            ["package a", "", "func TestSomething(t *T) {",
+             "\tsomeUndefinedHelper()", "}"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/a/new_test.go": diff},
+        )
+        assert found == []
+
+    def test_symbol_cap(self, tmp_path):
+        """Cap at max_symbols_checked (default 24)."""
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "many"
+        pkg.mkdir(parents=True)
+        (pkg / "new.go").write_text("package many\n")
+        calls = [f"\tmissing{i}()" for i in range(30)]
+        diff = self._diff(
+            "pkg/many/new.go",
+            ["package many", "", "func F() {"] + calls + ["}"],
+        )
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/many/new.go": diff},
+            max_symbols_checked=10,
+        )
+        assert len(found) <= 10
+
+    def test_grafana_003_three_phantoms(self, tmp_path):
+        """Reproducer for grafana-003: 3 phantom bare-call identifiers
+        in a single newly-added Go file. In production the patched file
+        exists on disk (eval runner materializes it before scan); we
+        mirror that here."""
+        from app.agent_loop.pr_brain import (
+            _scan_new_go_references_for_missing,
+        )
+        pkg = tmp_path / "pkg" / "clientmiddleware"
+        pkg.mkdir(parents=True)
+        # No helpers define endpoint* symbols.
+        (pkg / "logger_middleware.go").write_text(
+            "package clientmiddleware\n\n"
+            "type LoggerMiddleware struct {}\n"
+        )
+        # Materialise the patched file — the scanner reads it to check
+        # for dot-imports.
+        contextual = pkg / "contextual_logger.go"
+        contextual.write_text(
+            "package clientmiddleware\n\n"
+            "type ContextualLoggerMiddleware struct{ next Handler }\n\n"
+            "func (m *ContextualLoggerMiddleware) QueryData(ctx context.Context, req *QueryDataRequest) {\n"
+            "\tendpointQueryData(req)\n"
+            "}\n"
+        )
+        diff_lines = [
+            "package clientmiddleware",
+            "",
+            "type ContextualLoggerMiddleware struct{ next Handler }",
+            "",
+            "func (m *ContextualLoggerMiddleware) QueryData(ctx context.Context, req *QueryDataRequest) {",
+            "\tendpointQueryData(req)",
+            "}",
+            "",
+            "func (m *ContextualLoggerMiddleware) CallResource(ctx context.Context, req *CallResourceRequest) {",
+            "\tendpointCallResource(req)",
+            "}",
+            "",
+            "func (m *ContextualLoggerMiddleware) CheckHealth(ctx context.Context, req *CheckHealthRequest) {",
+            "\tendpointCheckHealth(req)",
+            "}",
+        ]
+        diff = self._diff("pkg/clientmiddleware/contextual_logger.go", diff_lines)
+        found = _scan_new_go_references_for_missing(
+            str(tmp_path), {"pkg/clientmiddleware/contextual_logger.go": diff},
+        )
+        names = {f["name"] for f in found}
+        assert "endpointQueryData" in names
+        assert "endpointCallResource" in names
+        assert "endpointCheckHealth" in names
+
+
+# ---------------------------------------------------------------------------
+# _scan_new_java_references_for_missing (P13-Java — phantom class refs)
+# ---------------------------------------------------------------------------
+
+
+class TestScanNewJavaReferencesForMissing:
+    """P13-Java: deterministic catch for `cannot find symbol` compile
+    errors caused by new class references (`new Foo(`, `Foo.static()`,
+    etc.) with no matching import or same-package definition."""
+
+    def _diff(self, path: str, new_lines: list[str]) -> str:
+        body_plus = "\n".join(f"+{ln}" for ln in new_lines)
+        return (
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            f"@@ -0,0 +1,{len(new_lines)} @@\n"
+            f"{body_plus}"
+        )
+
+    def _make_pkg_file(self, tmp_path, rel_path: str, content: str) -> None:
+        full = tmp_path / rel_path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content)
+
+    def test_flags_phantom_new_class(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "public class UseIt {\n"
+            "    void run() { new PhantomHelper(); }\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "public class UseIt {",
+             "    void run() { new PhantomHelper(); }",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        names = [f["name"] for f in found]
+        assert "PhantomHelper" in names
+        ev = next(f for f in found if f["name"] == "PhantomHelper")["evidence"]
+        assert "cannot find symbol" in ev
+
+    def test_imported_class_not_flagged(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "import com.bar.RealHelper;\n\n"
+            "public class UseIt {\n"
+            "    void run() { new RealHelper(); }\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "import com.bar.RealHelper;",
+             "",
+             "public class UseIt {",
+             "    void run() { new RealHelper(); }",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        assert found == []
+
+    def test_same_package_class_not_flagged(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/SiblingClass.java",
+            "package com.foo;\n\npublic class SiblingClass {}\n",
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "public class UseIt {\n"
+            "    void run() { new SiblingClass(); }\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "public class UseIt {",
+             "    void run() { new SiblingClass(); }",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        assert found == []
+
+    def test_java_lang_implicit_import_not_flagged(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "public class UseIt {\n"
+            "    void run() { new String(\"hi\"); "
+            "throw new IllegalStateException(); }\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "public class UseIt {",
+             "    void run() { new String(\"hi\"); "
+             "throw new IllegalStateException(); }",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        # String + IllegalStateException are java.lang.* implicit
+        assert found == []
+
+    def test_star_import_file_skipped(self, tmp_path):
+        """File with a `com.x.*` import is skipped to avoid false flags."""
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "import com.bar.*;\n\n"
+            "public class UseIt {\n"
+            "    void run() { new PhantomHelper(); }\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "import com.bar.*;",
+             "",
+             "public class UseIt {",
+             "    void run() { new PhantomHelper(); }",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        # Star import hides class visibility; MVP skips entire file
+        assert found == []
+
+    def test_generic_parameter_phantom(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "import java.util.List;\n\n"
+            "public class UseIt {\n"
+            "    List<PhantomType> items;\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "import java.util.List;",
+             "",
+             "public class UseIt {",
+             "    List<PhantomType> items;",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        names = [f["name"] for f in found]
+        assert "PhantomType" in names
+
+    def test_extends_phantom(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "public class UseIt extends PhantomBase {\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "public class UseIt extends PhantomBase {",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        names = [f["name"] for f in found]
+        assert "PhantomBase" in names
+
+    def test_primitive_type_skipped(self, tmp_path):
+        from app.agent_loop.pr_brain import (
+            _scan_new_java_references_for_missing,
+        )
+        self._make_pkg_file(
+            tmp_path,
+            "src/main/java/com/foo/UseIt.java",
+            "package com.foo;\n\n"
+            "public class UseIt {\n"
+            "    int count = 0;\n"
+            "    boolean flag = false;\n"
+            "}\n",
+        )
+        diff = self._diff(
+            "src/main/java/com/foo/UseIt.java",
+            ["package com.foo;", "",
+             "public class UseIt {",
+             "    int count = 0;",
+             "    boolean flag = false;",
+             "}"],
+        )
+        found = _scan_new_java_references_for_missing(
+            str(tmp_path), {"src/main/java/com/foo/UseIt.java": diff},
+        )
+        # int, boolean are primitives; even the UPPER-start matcher
+        # shouldn't pick them up since the pattern requires UPPER prefix
+        names = [f["name"] for f in found]
+        assert "int" not in names
+        assert "boolean" not in names
 
 
 # ---------------------------------------------------------------------------

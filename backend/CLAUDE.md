@@ -32,16 +32,13 @@ backend/app/
 │   ├── engine.py            # WorkflowEngine.run_brain_stream() — Brain orchestrator entry point
 │   ├── router.py            # /api/brain/swarms — Agent Swarm UI tab data source
 │   └── observability.py     # Langfuse @observe decorator (no-op when disabled)
-├── code_review/             # Multi-agent PR review pipeline
-│   ├── service.py           # CodeReviewService — legacy 10-step review pipeline
-│   ├── shared.py            # Shared functions (used by both CodeReviewService + PRBrain)
-│   ├── agents.py            # Specialized review agents (parallel dispatch)
+├── code_review/             # Shared PR review utilities (consumed by PR Brain v2)
+│   ├── shared.py            # parse_findings + evidence_gate + FOCUS_DESCRIPTIONS
 │   ├── models.py            # PRContext, ReviewFinding, ReviewResult, RiskProfile
 │   ├── diff_parser.py       # Parse git diff into PRContext
 │   ├── risk_classifier.py   # Risk classification (5 dimensions)
 │   ├── ranking.py           # Score and rank findings
-│   ├── dedup.py             # Merge and deduplicate findings
-│   └── router.py            # /api/code-review/ endpoints (+ SSE stream)
+│   └── dedup.py             # Merge and deduplicate findings
 ├── code_tools/              # 43 tools (code + file-edit + Jira + browser + Fact Vault) + ToolMetadata
 │   ├── schemas.py           # Pydantic models + TOOL_DEFINITIONS + ToolMetadata (43 entries)
 │   ├── tools.py             # Tool implementations (including glob, enhanced grep, search_facts)
@@ -95,24 +92,36 @@ Query → Brain (Sonnet, meta-tools: dispatch_agent, dispatch_swarm, transfer_to
 - **SWARM** (~5%): `dispatch_swarm("business_flow")` — predefined parallel presets. Brain must decompose queries into 3-6 search targets before dispatching.
 - **TRANSFER**: `transfer_to_brain("pr_review")` — one-way handoff to specialized Brain (PR reviews)
 
-**PR Brain** (`agent_loop/pr_brain.py`): Specialized deterministic pipeline for PR reviews. Activated via `transfer_to_brain("pr_review")`. Combines Brain's 4-layer prompts with CodeReviewService's deterministic post-processing:
+**PR Brain v2** (`agent_loop/pr_brain.py`): Coordinator-worker orchestrator for PR reviews. Activated via `transfer_to_brain("pr_review")`. **Agent-as-tool** design — a single Brain (Sonnet) surveys the PR, dispatches scope-bounded workers (Haiku) via `dispatch_subagent`, replans on surprises, and synthesises:
 
 ```
 transfer_to_brain("pr_review") → PRBrainOrchestrator
   Phase 1: Pre-compute (parse_diff, classify_risk, prefetch_diffs, impact_graph)
-  Phase 2: Dispatch review agents (correctness[strong], security, reliability, concurrency, test_coverage)
-  Phase 3: Post-process (evidence_gate → post_filter → dedup → score_and_rank)
-  Phase 4: Adversarial arbitration (pr_arbitrator tries to rebut each finding)
-  Phase 5: Merge recommendation (deterministic)
-  Phase 6: Synthesis — Brain as final judge (sees sub-agent evidence + arbitrator counter-evidence)
+  Phase 2: Existence check — LLM worker + deterministic scanners
+           ├─ P13 phantom-symbol verifiers (Python / Go / Java)
+           └─ P14 stub-call detector (Go / Python / Java stubs + their callers)
+  Phase 3: Coordinator loop (Sonnet)
+           ├─ Survey diff + impact graph
+           ├─ Dispatch sub-agents via dispatch_subagent (role or checks mode)
+           │    Roles loaded on the fly from config/agent_factory/<role>.md
+           ├─ Replan on unexpected observations
+           └─ Emit review + findings directly in its answer
+  Phase 4: Deterministic post-process
+           ├─ Missing-symbol injection (from Phase 2 facts)
+           ├─ P8 reflection against existence facts
+           ├─ P11 diff-scope filter (drop findings outside the diff)
+           └─ Dedup + rank
+  Phase 5: Merge recommendation
 ```
 
-Key design: The arbitrator is a **defense attorney** — it tries to rebut findings with counter-evidence and a rebuttal confidence score. It does NOT adjust severity. The synthesis LLM sees both sides (prosecution + defense) and makes the final call.
+Key design: **Role templates are reference, not paste-targets.** Brain composes each dispatched worker's system prompt from a role template (`config/agent_factory/<role>.md`) fused with PR-specific scope and direction_hint.
 
 **Configuration:**
 - `config/brain.yaml` — Brain limits (iterations, budget, concurrency, timeout) + core_tools
-- `config/brains/pr_review.yaml` — PR Brain config (agents, budget_weights, post_processing)
-- `config/agents/*.md` — Agent definitions (name, description, model, tools, limits + identity instructions)
+- `config/brains/pr_review.yaml` — PR Brain limits + post_processing settings
+- `config/agent_factory/*.md` — 7 role templates (security / correctness / concurrency / reliability / performance / test_coverage / api_contract)
+- `config/agents/*.md` — v2 worker agents (pr_existence_check, pr_subagent_checks, pr_verification_batch, pr_verification_single) + business-flow swarm agents
+- `config/prompts/pr_brain_coordinator.md` — coordinator skill (dispatch rubric + severity + hard floors)
 - `config/swarms/*.yaml` — Swarm presets (agent group + parallel/sequential mode + synthesis_guide)
 
 **Interactive AI:** Brain can `ask_user` for clarification when queries have multiple valid directions. Q&A answers are cached in session and injected into Brain's prompt for reuse across sub-agents.
@@ -134,18 +143,12 @@ Tools also accessible via `python -m app.code_tools <tool> <workspace> '<json_pa
 
 ## Code Review Pipeline
 
-**Two paths available:**
-
-1. **Legacy** (`CodeReviewService`): Hardcoded 10-step pipeline with Python `AgentSpec` definitions. Direct `POST /api/code-review/review` and `/review/stream` (SSE).
-
-2. **PR Brain** (`PRBrainOrchestrator`): Brain-based pipeline with 4-layer prompts, per-agent `.md` identity, adversarial arbitration. Activated via `transfer_to_brain("pr_review")` from the Brain chat flow.
-
-Both share the same post-processing code via `code_review/shared.py` (parse_findings, evidence_gate, dedup, ranking).
-
-```
-Legacy:  git diff → parse → risk → budget → impact → parallel agents → dedup → arbitration → synthesis
-PR Brain: transfer_to_brain → pre-compute → dispatch agents (4-layer) → post-process → adversarial arbitration → synthesis (judge)
-```
+**Single path**: `PRBrainOrchestrator` (see Brain Orchestrator section above).
+Activated via `transfer_to_brain("pr_review")` from the Brain chat flow or
+the Azure DevOps webhook. The legacy 10-step ``CodeReviewService`` fleet
+pipeline was removed in favour of the v2 coordinator-worker design (agent
+as tool). Shared post-processing helpers live in ``code_review/shared.py``
+(parse_findings, evidence_gate, dedup, ranking).
 
 ## Model A Git Workspace
 
@@ -235,9 +238,10 @@ tests/                                          # 1655 tests total
 ├── test_interactive.py             # 9 tests  — ask_user coordination (register/submit/cleanup)
 ├── test_prompt_builder.py          # 64 tests — 4-layer prompt assembly, skill injection, tool hints
 │   # Code review
-├── test_code_review.py             # 67 tests — CodeReviewService legacy pipeline
-├── test_shared.py                  # 55 tests — Shared code review functions (evidence gate, dedup, ranking)
-├── test_pr_brain.py                # 32 tests — PRBrainOrchestrator pipeline
+├── test_code_review.py             # Shared-utility tests: diff_parser + risk_classifier + dedup + ranking + PRContext
+├── test_shared.py                  # Shared code review helpers (evidence gate, parse_findings)
+├── test_pr_brain.py                # PRBrainOrchestrator v2 pipeline (+ P13-Go/Java, P14, phase-2 hints)
+├── test_dispatch_subagent.py       # dispatch_subagent primitive + 7 factory role templates
 │   # Code tools
 ├── test_code_tools.py              # 139 tests — 43 tools + dispatcher + multi-language + grep enhancements + glob + ToolMetadata
 ├── test_compressed_tools.py        # 24 tests — compressed_view, trace_variable, detect_patterns

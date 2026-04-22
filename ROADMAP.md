@@ -298,8 +298,8 @@ Adds a second quality gate after EvidenceEvaluator to ensure the answer is compl
 - [x] Improves stability of long agent answers at high token budgets
 
 #### Code Review Eval System (COMPLETE)
-Standalone eval system in `eval/` for measuring `CodeReviewService` quality against planted bugs.
-- [x] `runner.py` — workspace setup (copytree → git init → git apply → git commit) + CodeReviewService execution
+Standalone eval system in `eval/` for measuring `PRBrainOrchestrator` (v2 coordinator-worker) quality against planted bugs.
+- [x] `runner.py` — workspace setup (copytree → git init → git apply → git commit) + PRBrainOrchestrator execution
 - [x] `scorer.py` — deterministic scoring: recall (35%), precision (20%), severity (15%), location (10%), recommendation (10%), context (10%)
 - [x] `judge.py` — LLM-as-Judge: completeness, reasoning quality, actionability, false positive quality (1-5 scale)
 - [x] `report.py` — report generation + baseline comparison + regression detection (10% threshold)
@@ -618,7 +618,7 @@ Teams bot that summarizes channel discussions on demand. Primary use case: user 
 - Files to modify: `config.py` (add `SlackSettings`/`SlackSecrets`), `main.py`, settings YAML
 - Acceptance criteria:
   - [ ] Validates Slack request signatures
-  - [ ] `/conductor review` triggers CodeReviewService, posts formatted results
+  - [ ] `/conductor review` triggers PRBrainOrchestrator (v2), posts formatted results
   - [ ] `/conductor ask` triggers AgentLoopService, posts answer
   - [ ] Webhook URL configurable per channel
 

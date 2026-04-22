@@ -347,7 +347,7 @@ Additional test files:
 
 Three independent evaluation suites in `eval/` (excluded from Docker). See `eval/README.md` for full documentation.
 
-**Code Review Eval** (`eval/code_review/`) — measures `CodeReviewService` quality against 12 planted-bug cases in requests v2.31.0.
+**Code Review Eval** (`eval/code_review/`) — measures `PRBrainOrchestrator` (v2 coordinator-worker design) quality against 42 planted-bug cases across 4 suites (requests + greptile-sentry + greptile-grafana + greptile-keycloak).
 
 ```bash
 cd backend
@@ -640,7 +640,7 @@ pytest --cov=. --cov-report=html   # 覆盖率报告
 
 `eval/` 目录（通过 `.dockerignore` 排除在 Docker 镜像之外）包含三套独立评估套件，详见 `eval/README.md`。
 
-**代码评审评估**（`eval/code_review/`）— 衡量 `CodeReviewService` 质量，基于 requests v2.31.0 的 12 个植入 bug 用例。
+**代码评审评估**（`eval/code_review/`）— 衡量 `PRBrainOrchestrator`（v2 coordinator-worker 设计）质量，基于 4 个 suite 共 42 个植入 bug 用例（requests + greptile-sentry + greptile-grafana + greptile-keycloak）。
 
 ```bash
 cd backend

@@ -1,7 +1,8 @@
-"""Workspace setup and CodeReviewService execution for eval cases.
+"""Workspace setup and PR Brain execution for eval cases.
 
 Creates a temporary git repo from a source directory, applies a patch,
-commits it, and runs CodeReviewService.review() against the diff.
+commits it, and runs ``PRBrainOrchestrator.run_brain_stream()`` against
+the diff (see ``run_case_brain``).
 """
 
 import logging
@@ -24,7 +25,6 @@ if _BACKEND_DIR not in sys.path:
 
 from app.ai_provider.base import AIProvider  # noqa: E402
 from app.code_review.models import ReviewResult  # noqa: E402
-from app.code_review.service import CodeReviewService  # noqa: E402
 
 
 @dataclass
@@ -184,58 +184,6 @@ def cleanup_workspace(workspace_path: str) -> None:
     shutil.rmtree(workspace_path, ignore_errors=True)
 
 
-async def run_case(
-    case: CaseConfig,
-    source_dir: str,
-    patch_dir: str,
-    provider: AIProvider,
-    explorer_provider: Optional[AIProvider] = None,
-    max_agents: int = 5,
-) -> RunResult:
-    """Set up workspace, run code review, and return results.
-
-    Args:
-        case: Case configuration with patch path and expected findings.
-        source_dir: Path to the repo source directory.
-        patch_dir: Directory containing patch files.
-        provider: Main AI provider (strong model for synthesis).
-        explorer_provider: Optional lighter model for sub-agents.
-        max_agents: Maximum parallel agents for the review.
-
-    Returns:
-        RunResult with the review output or error.
-    """
-    patch_path = os.path.join(patch_dir, case.patch)
-    if not os.path.exists(patch_path):
-        return RunResult(case_id=case.id, error=f"Patch not found: {patch_path}")
-
-    workspace = None
-    try:
-        workspace = setup_workspace(source_dir, patch_path)
-
-        service = CodeReviewService(
-            provider=provider,
-            explorer_provider=explorer_provider,
-        )
-
-        result = await service.review(
-            workspace_path=workspace,
-            diff_spec="HEAD~1..HEAD",
-            max_agents=max_agents,
-        )
-
-        return RunResult(
-            case_id=case.id,
-            review_result=result,
-            workspace_path=workspace,
-        )
-
-    except Exception as e:
-        return RunResult(case_id=case.id, error=str(e))
-    finally:
-        if workspace:
-            cleanup_workspace(workspace)
-
 
 async def run_case_brain(
     case: CaseConfig,
@@ -244,11 +192,10 @@ async def run_case_brain(
     provider: AIProvider,
     explorer_provider: Optional[AIProvider] = None,
 ) -> RunResult:
-    """Set up workspace, run PR Brain review via PRBrainOrchestrator, and return results.
+    """Set up workspace, run PR Brain review via ``PRBrainOrchestrator``, and return results.
 
-    This is the Brain-pipeline equivalent of ``run_case()``.  It uses
-    ``PRBrainOrchestrator`` instead of ``CodeReviewService`` so that the two
-    pipelines can be compared directly on the same eval cases.
+    Drives the v2 coordinator-worker pipeline (the only PR review path
+    after legacy removal).
 
     Args:
         case: Case configuration with patch path and expected findings.

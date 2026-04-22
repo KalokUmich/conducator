@@ -166,10 +166,11 @@ python ../eval/code_review/run.py --brain \
     --verbose
 ```
 
-* `--brain` routes through `PRBrainOrchestrator` (the production code path)
-  rather than the legacy `CodeReviewService`.
-* `--filter greptile-` runs only the 50 Greptile cases (drop the flag to also
-  include the 12 legacy `requests` cases).
+* `--brain` routes through `PRBrainOrchestrator` v2 — the only production
+  path since the legacy fleet pipeline was removed. Kept as a flag name
+  for backward-compatibility with existing invocations.
+* `--filter greptile-` runs only the Greptile cases (drop the flag to also
+  include the 12 `requests` cases).
 * `--verbose` prints per-finding match results so you can see which
   expected_findings each agent caught.
 * Drop `--no-judge` to enable the LLM judge for qualitative scoring.

@@ -507,7 +507,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .auth.router import router as auth_router
     from .chat.router import router as chat_router
     from .chat.settings_router import router as chat_settings_router
-    from .code_review.router import router as code_review_router
     from .code_tools.router import router as code_tools_router
     from .files.router import router as files_router
     from .git_workspace.router import router as git_workspace_router
@@ -539,7 +538,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(todos_router)
     app.include_router(workspace_files_router)
     app.include_router(langextract_router)
-    app.include_router(code_review_router)
     app.include_router(brain_router)
     app.include_router(jira_router)
     app.include_router(azure_devops_router)

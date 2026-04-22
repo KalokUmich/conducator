@@ -459,6 +459,106 @@ class TestFindSymbol:
         assert len(result.data) == 0
 
 
+class TestSymbolIndexLRUCache:
+    """LRU bound on ``_symbol_index_cache`` (OOM prevention).
+
+    Sequential runs across multiple workspaces used to accumulate
+    unboundedly — keycloak's 10-case batch hit 14.7GB RSS. Cap set to
+    ``_SYMBOL_CACHE_MAX_WORKSPACES`` (default 2); oldest workspace is
+    evicted on insert."""
+
+    def setup_method(self):
+        # Reset module-level cache state for each test
+        from app.code_tools import tools as tools_module
+        self._saved = dict(tools_module._symbol_index_cache)
+        tools_module._symbol_index_cache.clear()
+
+    def teardown_method(self):
+        from app.code_tools import tools as tools_module
+        tools_module._symbol_index_cache.clear()
+        tools_module._symbol_index_cache.update(self._saved)
+
+    def _make_ws(self, tmp_path, name: str):
+        ws = tmp_path / name
+        ws.mkdir()
+        (ws / "x.py").write_text("class Foo: pass\n")
+        # Init git so _get_git_head returns a stable sha
+        import subprocess
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=ws, check=False)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "add", "-A"], cwd=ws, check=False,
+        )
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "init"], cwd=ws, check=False,
+        )
+        return str(ws)
+
+    def test_cap_evicts_oldest_on_overflow(self, tmp_path, monkeypatch):
+        """Populate 3 workspaces with cap=2; the oldest drops out."""
+        from app.code_tools import tools as tools_module
+
+        monkeypatch.setattr(tools_module, "_SYMBOL_CACHE_MAX_WORKSPACES", 2)
+        ws_a = self._make_ws(tmp_path, "a")
+        ws_b = self._make_ws(tmp_path, "b")
+        ws_c = self._make_ws(tmp_path, "c")
+
+        find_symbol(ws_a, "Foo")  # cache = [a]
+        find_symbol(ws_b, "Foo")  # cache = [a, b]
+        find_symbol(ws_c, "Foo")  # cache = [b, c] after a evicted
+
+        assert ws_a not in tools_module._symbol_index_cache
+        assert ws_b in tools_module._symbol_index_cache
+        assert ws_c in tools_module._symbol_index_cache
+        assert len(tools_module._symbol_index_cache) == 2
+
+    def test_hit_on_existing_refreshes_lru_order(self, tmp_path, monkeypatch):
+        """Touching workspace A makes B the LRU, so B gets evicted, not A."""
+        from app.code_tools import tools as tools_module
+
+        monkeypatch.setattr(tools_module, "_SYMBOL_CACHE_MAX_WORKSPACES", 2)
+        ws_a = self._make_ws(tmp_path, "a")
+        ws_b = self._make_ws(tmp_path, "b")
+        ws_c = self._make_ws(tmp_path, "c")
+
+        find_symbol(ws_a, "Foo")        # cache order: [a]
+        find_symbol(ws_b, "Foo")        # cache order: [a, b]
+        # Access A again — it's now most-recently-used, B becomes LRU
+        find_symbol(ws_a, "Foo")        # cache order: [b, a]
+        find_symbol(ws_c, "Foo")        # cache order: [a, c] after b evicted
+
+        assert ws_a in tools_module._symbol_index_cache
+        assert ws_b not in tools_module._symbol_index_cache
+        assert ws_c in tools_module._symbol_index_cache
+
+    def test_env_var_override(self, tmp_path, monkeypatch):
+        """CONDUCTOR_SYMBOL_CACHE_MAX env variable is respected on module
+        re-import (we read the constant at module-load time)."""
+        from app.code_tools import tools as tools_module
+
+        # Cap of 1 keeps only the most recent workspace
+        monkeypatch.setattr(tools_module, "_SYMBOL_CACHE_MAX_WORKSPACES", 1)
+        ws_a = self._make_ws(tmp_path, "a")
+        ws_b = self._make_ws(tmp_path, "b")
+
+        find_symbol(ws_a, "Foo")
+        find_symbol(ws_b, "Foo")
+        assert ws_a not in tools_module._symbol_index_cache
+        assert ws_b in tools_module._symbol_index_cache
+        assert len(tools_module._symbol_index_cache) == 1
+
+    def test_cap_never_exceeds_max(self, tmp_path, monkeypatch):
+        """Hammer the cache with many distinct workspaces — size stays bounded."""
+        from app.code_tools import tools as tools_module
+
+        monkeypatch.setattr(tools_module, "_SYMBOL_CACHE_MAX_WORKSPACES", 3)
+        for i in range(10):
+            ws = self._make_ws(tmp_path, f"ws_{i}")
+            find_symbol(ws, "Foo")
+            assert len(tools_module._symbol_index_cache) <= 3
+
+
 # ---------------------------------------------------------------------------
 # find_references
 # ---------------------------------------------------------------------------

@@ -419,15 +419,13 @@ backend/
 │   │   ├── openai_provider.py     # OpenAI Chat Completions
 │   │   └── resolver.py            # ProviderResolver — health check + auto-select best
 │   │
-│   ├── code_review/               # Multi-agent PR review pipeline (10 steps)
-│   │   ├── service.py             # CodeReviewService — orchestrates the review flow
-│   │   ├── agents.py              # Specialized review agents (parallel dispatch)
+│   ├── code_review/               # Shared PR review utilities (consumed by PR Brain v2)
+│   │   ├── shared.py              # parse_findings + evidence_gate + FOCUS_DESCRIPTIONS
 │   │   ├── models.py              # PRContext, ReviewFinding, ReviewResult
 │   │   ├── diff_parser.py         # git diff -> PRContext
 │   │   ├── risk_classifier.py     # 5-dimension risk classification
 │   │   ├── ranking.py             # Score and rank findings
-│   │   ├── dedup.py               # Dedup and merge findings
-│   │   └── router.py              # /api/code-review/ interface (incl. SSE stream)
+│   │   └── dedup.py               # Dedup and merge findings
 │   │
 │   ├── git_workspace/             # Git workspace management
 │   │   ├── service.py             # GitWorkspaceService (bare repo + worktree)
@@ -1877,12 +1875,12 @@ See `eval/README.md` for detailed docs.
 
 ### 18.1 Code Review Eval (code_review/)
 
-Plants known bugs (git patches) into real open-source codebases, runs the full PR Brain / `CodeReviewService` pipeline, and checks whether the findings match expectations.
+Plants known bugs (git patches) into real open-source codebases, runs PR Brain v2 (`PRBrainOrchestrator` — coordinator-worker / agent-as-tool design), and checks whether the findings match expectations.
 
 Two case sets coexist:
 
-- **12 requests-v2.31.0 legacy cases** — the original in-house cases with a controlled difficulty gradient, good for fast unit-style regression.
-- **50 Greptile benchmark cases** — aligned with Greptile's public AI Code Review Benchmark (10 real bug-fix PRs each from sentry / cal.com / grafana / keycloak / discourse). Used to compare `catch_rate` against commercial reviewers like Cursor / Copilot / CodeRabbit. Full details of the data pipeline in `eval/code_review/GREPTILE_BENCHMARK.md`.
+- **12 requests-v2.31.0 cases** — the original in-house cases with a controlled difficulty gradient, good for fast unit-style regression.
+- **Greptile benchmark cases** — aligned with Greptile's public AI Code Review Benchmark (10 real bug-fix PRs each from sentry / cal.com / grafana / keycloak / discourse; the 4-suite regression currently runs sentry + grafana + keycloak, ~30 cases). Used to compare `catch_rate` against commercial reviewers like Cursor / Copilot / CodeRabbit. Full details in `eval/code_review/GREPTILE_BENCHMARK.md`.
 
 ```bash
 cd backend

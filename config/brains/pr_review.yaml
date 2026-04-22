@@ -1,10 +1,13 @@
 # PR Brain — specialized Brain orchestrator for PR reviews.
-# Replaces the ad-hoc dispatch_swarm("pr_review") with a deterministic
-# pipeline that pre-computes context, dispatches review agents, runs
-# post-processing, arbitration, and synthesis.
+#
+# Drives the v2 "agent-as-tool" coordinator loop: ONE Brain (Sonnet)
+# surveys the PR, dispatches scope-bounded sub-agents via
+# ``dispatch_subagent``, replans on unexpected observations, and
+# synthesises. Sub-agent roles are composed on the fly from templates
+# in ``config/agent_factory/`` — no fixed fleet list lives here.
 
 name: pr_review
-description: "Specialized Brain for PR reviews — deterministic pipeline with 4-layer agent prompts"
+description: "PR review Brain — coordinator-worker loop with role-based dispatch"
 model: strong
 
 limits:
@@ -14,44 +17,16 @@ limits:
   sub_agent_timeout: 600
   reject_above: 6000
   max_depth: 2
-  small_pr_threshold: 100           # PRs under this many lines skip concurrency/reliability agents
+  small_pr_threshold: 100           # Size hint used by the coordinator prompt
 
-# Review agents dispatched in parallel (risk-gated)
-review_agents:
-  - correctness
-  - correctness_b
-  - concurrency
-  - security
-  - reliability
-  - performance
-  - test_coverage
-
-# Dedicated arbitration agent (has tools to verify findings)
-arbitrator: pr_arbitrator
-
-# Budget weights per agent (relative complexity)
-budget_weights:
-  correctness: 1.00
-  correctness_b: 0.80
-  concurrency: 0.85
-  security: 0.75
-  reliability: 0.70
-  performance: 0.70
-  test_coverage: 0.55
-
-# Deterministic post-processing settings
+# Deterministic post-processing settings (shared: dedup + ranking + filter)
 post_processing:
   min_confidence: 0.80
   max_findings: 10
-  max_findings_per_agent: 5         # Per-agent cap before merge (dedup + ranking does final filtering)
+  max_findings_per_agent: 5
 
 # Synthesis LLM call settings
 synthesis:
   max_tokens: 4096                  # Max output tokens for final review markdown
   max_diff_chars: 30000             # Total diff chars cap in synthesis prompt
   max_diff_snippet_chars: 4000      # Per-file diff snippet cap
-
-# Arbitration settings
-arbitration:
-  budget_tokens: 500000             # Token budget for the arbitrator agent
-  max_tokens: 2048                  # Max output tokens for lightweight arbitration

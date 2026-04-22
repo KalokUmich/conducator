@@ -1,61 +1,45 @@
-"""PR Brain — specialized deterministic pipeline for PR reviews.
+"""PR Brain — coordinator-worker orchestrator for PR reviews.
 
-Combines the Brain's 4-layer prompt architecture and agent dispatch with
-CodeReviewService's proven pre-computation, structured output, and
-deterministic post-processing.
+Agent-as-tool design: ONE Brain (Sonnet) acts as the coordinator. It
+surveys the diff, plans investigations, dispatches scope-bounded
+workers (Haiku, via ``dispatch_subagent``), replans on surprises, and
+synthesises a final review. Mechanical safety nets run alongside the
+LLM loop — Phase 2 existence check plus P13 / P14 deterministic
+verifiers catch compilation-class and stub-call bug classes regardless
+of LLM sampling.
 
 Flow:
   Phase 1: Pre-compute (parse diff, classify risk, prefetch diffs, impact graph)
-  Phase 2: Dispatch 5 review agents in parallel (via AgentToolExecutor)
-  Phase 3: Post-process (evidence gate, post_filter, dedup, score_and_rank)
-  Phase 4: Dispatch arbitration agent (pr_arbitrator with tools to verify)
+  Phase 2: Existence check (LLM + P13 phantom-symbol scanners + P14 stub detector)
+  Phase 3: Coordinator dispatch loop (survey + dispatch_subagent + synthesise)
+  Phase 4: Post-process (missing-symbol injection, reflection, diff-scope filter)
   Phase 5: Merge recommendation (deterministic)
-  Phase 6: Synthesis (strong model LLM call)
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.ai_provider.base import AIProvider
-from app.code_review.dedup import dedup_findings
 from app.code_review.diff_parser import parse_diff
 from app.code_review.models import (
-    FindingCategory,
     PRContext,
     ReviewFinding,
-    RiskLevel,
     RiskProfile,
-    Severity,
 )
-from app.code_review.ranking import score_and_rank
 from app.code_review.risk_classifier import classify_risk
 from app.code_review.shared import (
-    AGENT_CATEGORIES,
-    FOCUS_DESCRIPTIONS,
-    STRATEGY_HINTS,
-    build_diffs_section,
     build_impact_context,
-    build_summary,
     compute_budget_multiplier,
-    evidence_gate,
-    extract_relevant_diff,
-    merge_recommendation,
-    parse_findings_with_status,
-    post_filter,
     prefetch_diffs,
-    repair_output,
     should_reject_pr,
 )
 from app.code_tools.executor import ToolExecutor
-from app.code_tools.schemas import ToolResult
 from app.workflow.models import PRBrainConfig
 
 logger = logging.getLogger(__name__)
@@ -86,7 +70,7 @@ class WorkflowEvent:
         self.data = data
 
 
-# Synthesis system prompt — reused from CodeReviewService
+# Synthesis system prompt — shared with synthesis-style callers in review flow.
 _SYNTHESIS_SYSTEM_PROMPT = """\
 You are the **final judge** in a multi-agent code review. You receive:
 - Findings from specialized review agents (the **prosecution** — evidence FOR each issue)
@@ -133,26 +117,6 @@ arbitrator found concrete counter-evidence, take it seriously.
 <1 sentence justification>
 ```
 """
-
-
-@dataclass
-class ArbitrationVerdict:
-    """Arbitrator's challenge result for one finding.
-
-    Attributes:
-        index: Index into the findings list this verdict applies to.
-        counter_evidence: Reasons the finding might be wrong or overstated.
-        rebuttal_confidence: 0.0 means the finding is solid; 1.0 means it is
-            almost certainly wrong.
-        suggested_severity: Arbitrator's recommended severity after challenge.
-        reason: One-line rationale for the rebuttal assessment.
-    """
-
-    index: int
-    counter_evidence: List[str] = field(default_factory=list)
-    rebuttal_confidence: float = 0.0  # 0.0 = cannot rebut, 1.0 = finding is wrong
-    suggested_severity: str = ""  # arbitrator's recommended severity
-    reason: str = ""  # one-line rationale
 
 
 class PRBrainOrchestrator:
@@ -337,152 +301,18 @@ class PRBrainOrchestrator:
         )
 
         # ------------------------------------------------------------------
-        # Phase 2 (v2 branch): Brain-as-coordinator dispatch loop
+        # Phase 2: Brain-as-coordinator dispatch loop (agent-as-tool)
         # ------------------------------------------------------------------
-        # When CONDUCTOR_PR_BRAIN_V2=1, replace the fixed 7-agent swarm with a
-        # single Brain (Sonnet) driving the 5-phase coordinator loop described
-        # in config/prompts/pr_brain_coordinator.md. Brain surveys the PR,
+        # A single Brain (Sonnet) drives the coordinator loop described in
+        # config/prompts/pr_brain_coordinator.md. Brain surveys the PR,
         # plans investigations, dispatches scope-bounded sub-agents via
         # dispatch_subagent, replans on unexpected observations, and
         # synthesises with unified severity classification.
-        import os as _os_v2
-        if _os_v2.environ.get("CONDUCTOR_PR_BRAIN_V2", "0") == "1":
-            async for event in self._run_v2_coordinator(
-                pr_context, risk_profile, file_diffs, impact_context,
-                budget_multiplier, start_time,
-            ):
-                yield event
-            return
-
-        agents_to_run = self._select_agents(risk_profile, pr_context)
-        logger.info("Dispatching %d review agents: %s", len(agents_to_run), agents_to_run)
-
-        yield WorkflowEvent(
-            "agents_dispatching",
-            {
-                "agents": agents_to_run,
-                "budget_multiplier": budget_multiplier,
-            },
-        )
-
-        agent_results = await self._dispatch_agents(
-            agents_to_run,
-            pr_context,
-            risk_profile,
-            file_diffs,
-            impact_context,
-            budget_multiplier,
-        )
-
-        yield WorkflowEvent(
-            "agents_complete",
-            {
-                "agent_count": len(agent_results),
-            },
-        )
-
-        # ------------------------------------------------------------------
-        # Phase 3: Post-process (deterministic)
-        # ------------------------------------------------------------------
-
-        findings = await self._post_process(agent_results, pr_context)
-
-        yield WorkflowEvent(
-            "post_processing",
-            {
-                "findings_count": len(findings),
-            },
-        )
-
-        # ------------------------------------------------------------------
-        # Phase 3b: Verification — agent with tool access refutes findings
-        # Like Claude Code's bughunter "verifying" phase
-        # ------------------------------------------------------------------
-
-        if findings:
-            findings = await self._verify_findings(findings)
-            yield WorkflowEvent(
-                "verification_complete",
-                {
-                    "findings_survived": len(findings),
-                },
-            )
-
-        # ------------------------------------------------------------------
-        # Phase 4: Arbitration agent
-        # ------------------------------------------------------------------
-
-        verdicts = []
-        if findings:
-            verdicts = await self._arbitrate(findings, file_diffs)
-            yield WorkflowEvent(
-                "arbitration_complete",
-                {
-                    "findings_count": len(findings),
-                    "avg_rebuttal": sum(v.rebuttal_confidence for v in verdicts) / len(verdicts) if verdicts else 0,
-                },
-            )
-
-        # ------------------------------------------------------------------
-        # Phase 5: Merge recommendation (deterministic, based on sub-agent severity)
-        # ------------------------------------------------------------------
-
-        merge_rec = merge_recommendation(findings)
-        pr_summary = build_summary(pr_context, risk_profile, findings, merge_rec)
-
-        # ------------------------------------------------------------------
-        # Phase 6: Synthesis — Brain is the final judge
-        # Receives sub-agent findings (pro) + arbitrator verdicts (con)
-        # ------------------------------------------------------------------
-
-        synthesis = await self._synthesize(
-            pr_context,
-            risk_profile,
-            findings,
-            verdicts,
-            merge_rec,
-            file_diffs,
-        )
-
-        duration_ms = (time.monotonic() - start_time) * 1000  # Convert seconds to milliseconds
-        logger.info(
-            "PR Brain complete: %d findings, rec=%s, %.0fms",
-            len(findings),
-            merge_rec,
-            duration_ms,
-        )
-
-        # Collect token usage AND files actually opened by review agents.
-        # files_reviewed is the union of (a) files changed in the PR diff and
-        # (b) every file any dispatched review agent opened via read_file /
-        # file_outline / compressed_view. Required by the eval scorer's
-        # context_depth metric so cross-file investigation gets credit.
-        total_tokens = 0
-        total_iterations = 0
-        files_reviewed_set: set[str] = {f.path for f in pr_context.files}
-        for result in agent_results:
-            if result.success and isinstance(result.data, dict):
-                total_iterations += result.data.get("iterations", 0)
-                total_tokens += result.data.get("total_input_tokens", 0)
-                total_tokens += result.data.get("total_output_tokens", 0)
-                for fp in result.data.get("files_accessed", []):
-                    if fp:
-                        files_reviewed_set.add(fp)
-
-        yield WorkflowEvent(
-            "done",
-            {
-                "answer": synthesis or pr_summary,
-                "findings": [_finding_to_dict(f) for f in findings],
-                "files_reviewed": sorted(files_reviewed_set),
-                "merge_recommendation": merge_rec,
-                "duration_ms": duration_ms,
-                "total_iterations": total_iterations,
-                "agents_dispatched": len(agents_to_run),
-                "findings_before_arbitration": len(findings)
-                + len([f for f in findings if f.severity == Severity.PRAISE]),
-            },
-        )
+        async for event in self._run_v2_coordinator(
+            pr_context, risk_profile, file_diffs, impact_context,
+            budget_multiplier, start_time,
+        ):
+            yield event
 
     # ------------------------------------------------------------------
     # PR Brain v2 — coordinator loop
@@ -884,26 +714,31 @@ class PRBrainOrchestrator:
                 except Exception as exc:
                     logger.debug("put_existence failed for %s: %s", name, exc)
 
-        # P13 — Deterministic Python import verifier (belt-and-suspenders).
+        # P13 — Deterministic phantom-symbol verifiers (belt-and-suspenders).
         # Runs ALWAYS, regardless of LLM worker timeout / failure / empty
-        # output. Zero LLM cost; narrowly scoped to new Python imports
-        # so never overrides an LLM exists=True verdict.
+        # output. Zero LLM cost; narrowly scoped so never overrides an
+        # LLM exists=True verdict (covered by `already_named` check).
+        # Three language scanners run in sequence:
+        #   * Python — phantom `from X import Y` and `import X` names
+        #   * Go     — phantom bare-call identifiers (same-package)
+        #   * Java   — phantom class references (not imported / not same-pkg)
         added_from_ast = 0
         if store is not None:
             try:
                 already_named = {
                     sym.get("name") for sym in llm_symbols if isinstance(sym, dict)
                 }
-                for found in _scan_new_python_imports_for_missing(
-                    self._workspace_path, file_diffs,
-                ):
+
+                def _inject_phantom(found: Dict[str, str], *, kind: str) -> None:
+                    """Shared injection path for all 3 language scanners."""
+                    nonlocal added_from_ast, missing_count
                     name = found["name"]
                     if name in already_named:
-                        continue
+                        return
                     try:
                         store.put_existence(
                             symbol_name=name,
-                            symbol_kind="import",
+                            symbol_kind=kind,
                             referenced_at=found["referenced_at"],
                             exists=False,
                             evidence=found["evidence"],
@@ -917,9 +752,24 @@ class PRBrainOrchestrator:
                             "[PR Brain v2] P13 put_existence failed for %s: %s",
                             name, exc,
                         )
+
+                for found in _scan_new_python_imports_for_missing(
+                    self._workspace_path, file_diffs,
+                ):
+                    _inject_phantom(found, kind="import")
+
+                for found in _scan_new_go_references_for_missing(
+                    self._workspace_path, file_diffs,
+                ):
+                    _inject_phantom(found, kind="reference")
+
+                for found in _scan_new_java_references_for_missing(
+                    self._workspace_path, file_diffs,
+                ):
+                    _inject_phantom(found, kind="class")
             except Exception as exc:
                 logger.warning(
-                    "[PR Brain v2] P13 deterministic import scan failed "
+                    "[PR Brain v2] P13 deterministic scan failed "
                     "(non-fatal): %s", exc,
                 )
         if added_from_ast:
@@ -1617,66 +1467,6 @@ class PRBrainOrchestrator:
             "merge_recommendation": merge_rec or "comment",
         }
 
-    # ------------------------------------------------------------------
-    # Phase 2 helpers
-    # ------------------------------------------------------------------
-
-    def _select_agents(
-        self,
-        risk_profile: RiskProfile,
-        pr_context: Optional[PRContext] = None,
-    ) -> List[str]:
-        """Select which review agents to run based on risk profile and PR size.
-
-        Always-run agents (``correctness``, ``test_coverage``) are included
-        regardless of risk.  For small PRs (below ``limits.small_pr_threshold``
-        lines), ``concurrency`` and ``reliability`` are skipped unless their
-        associated risk dimension is HIGH or CRITICAL.
-
-        Args:
-            risk_profile: Classified risk levels across five dimensions.
-            pr_context: Optional PR metadata used to determine PR size.
-
-        Returns:
-            Ordered list of agent names to dispatch.
-        """
-        agents = []
-        risk_triggers = {
-            "correctness": [],  # always runs — most important reviewer
-            "concurrency": ["concurrency"],
-            "security": ["security"],
-            "reliability": ["reliability", "operational"],
-            "test_coverage": [],  # always runs
-        }
-
-        small_pr_threshold = self._config.limits.small_pr_threshold
-        is_small_pr = pr_context and pr_context.total_changed_lines < small_pr_threshold
-
-        for name in self._config.review_agents:
-            triggers = risk_triggers.get(name, [])
-            if not triggers:
-                # Always-run agent (test_coverage)
-                agents.append(name)
-                continue
-
-            # For small PRs, skip concurrency/reliability unless risk is HIGH or CRITICAL
-            if is_small_pr and name in ("concurrency", "reliability"):
-                high_risk = any(
-                    getattr(risk_profile, dim, RiskLevel.LOW) in (RiskLevel.HIGH, RiskLevel.CRITICAL)
-                    for dim in triggers
-                )
-                if not high_risk:
-                    logger.info("Small PR: skipping '%s' agent (risk too low)", name)
-                    continue
-
-            for dim in triggers:
-                level = getattr(risk_profile, dim, RiskLevel.LOW)
-                if level in (RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL):
-                    agents.append(name)
-                    break
-
-        return agents
-
     def cleanup(self) -> None:
         """Close and delete the session-owned Fact Vault, if any.
 
@@ -1723,834 +1513,6 @@ class PRBrainOrchestrator:
             logger.warning("Scratchpad cleanup failed: %s", e)
         self._scratchpad = None
         self._owns_scratchpad = False
-
-    async def _dispatch_agents(
-        self,
-        agents: List[str],
-        pr_context: PRContext,
-        risk_profile: RiskProfile,
-        file_diffs: Dict[str, str],
-        impact_context: str,
-        budget_multiplier: float,
-    ) -> List[ToolResult]:
-        """Dispatch review agents in parallel via AgentToolExecutor."""
-        from app.workflow.loader import load_brain_config, load_swarm_registry
-
-        from .brain import AgentToolExecutor, BrainBudgetManager
-        from .config import BrainExecutorConfig
-
-        brain_config = load_brain_config()
-        swarm_registry = load_swarm_registry()
-
-        budget_mgr = BrainBudgetManager(self._config.limits.total_session_tokens)
-
-        # Shared semaphore limits concurrent LLM API calls across all
-        # parallel agents — prevents Bedrock throttling.
-        llm_semaphore = asyncio.Semaphore(self._config.limits.llm_concurrency_limit)
-
-        # Shared executor config (depth/concurrency/timeout) — provider varies per agent
-        _executor_cfg = BrainExecutorConfig(
-            workspace_path=self._workspace_path,
-            current_depth=0,
-            max_depth=self._config.limits.max_depth,
-            max_concurrent=self._config.limits.max_concurrent_agents,
-            sub_agent_timeout=self._config.limits.sub_agent_timeout,
-        )
-
-        # Provider map: agents with model="strong" use the strong provider,
-        # others use the explorer (lightweight) provider.
-        def _get_provider_for(agent_name: str):
-            config = self._agent_registry.get(agent_name)
-            if config and getattr(config, "model", "explorer") == "strong":
-                return self._provider  # strong model (same as Brain)
-            return self._explorer_provider  # lightweight model
-
-        semaphore = asyncio.Semaphore(self._config.limits.max_concurrent_agents)
-
-        async def run_one(agent_name: str) -> ToolResult:
-            async with semaphore:
-                provider = _get_provider_for(agent_name)
-                executor = AgentToolExecutor(
-                    inner_executor=self._tool_executor,
-                    agent_registry=self._agent_registry,
-                    swarm_registry=swarm_registry,
-                    agent_provider=provider,
-                    config=_executor_cfg,
-                    brain_config=brain_config,
-                    trace_writer=self._trace_writer,
-                    event_sink=self._event_sink,
-                    budget_manager=budget_mgr,
-                    llm_semaphore=llm_semaphore,
-                )
-                query = self._build_agent_query(
-                    agent_name,
-                    pr_context,
-                    risk_profile,
-                    file_diffs,
-                    impact_context,
-                )
-                weight = self._config.budget_weights.get(agent_name, 1.0)
-                return await executor.execute(
-                    "dispatch_agent",
-                    {
-                        "agent_name": agent_name,
-                        "query": query,
-                        "budget_weight": weight * budget_multiplier,
-                    },
-                )
-
-        results = await asyncio.gather(
-            *[run_one(name) for name in agents],
-            return_exceptions=True,
-        )
-
-        # Convert exceptions to error ToolResults; tag each with agent_name
-        processed = []
-        for name, result in zip(agents, results):
-            if isinstance(result, Exception):
-                logger.error("Review agent '%s' raised: %s", name, result)
-                processed.append(
-                    ToolResult(
-                        tool_name="dispatch_agent",
-                        success=False,
-                        error=f"Agent '{name}' failed: {result}",
-                    )
-                )
-            else:
-                # Tag condensed data with the agent name so _post_process
-                # can assign the correct FindingCategory
-                if result.success and isinstance(result.data, dict):
-                    result.data["agent_name"] = name
-                processed.append(result)
-
-        return processed
-
-    def _build_agent_query(
-        self,
-        agent_name: str,
-        pr_context: PRContext,
-        risk_profile: RiskProfile,
-        file_diffs: Dict[str, str],
-        impact_context: str,
-    ) -> str:
-        """Build the Layer 4 user message for a review sub-agent.
-
-        Contains ONLY task-specific data: PR context, diffs, impact graph,
-        per-agent focus directive and strategy hint.  Agent identity (Layer 1)
-        and the provability framework (Layer 3) are handled by the agent's
-        ``.md`` file and the ``code_review_pr`` skill.
-
-        Args:
-            agent_name: Which review agent this message is for (determines
-                scoped file list and focus/strategy text).
-            pr_context: Parsed PR metadata (files, lines changed, diff spec).
-            risk_profile: Classified risk levels used in the prompt summary.
-            file_diffs: Pre-fetched per-file diff text (path → diff).
-            impact_context: Pre-computed dependency/caller graph for changed files.
-
-        Returns:
-            Formatted user-message string ready for injection as Layer 4.
-        """
-        # Scope files per agent type (9.12 diff sharding — keep per-agent input
-        # token count low; security widens to path-pattern-matched auth/crypto/
-        # session files so it sees helpers classified outside business_logic).
-        files = pr_context.business_logic_files()
-        if agent_name == "test_coverage":
-            files = pr_context.files
-        elif agent_name == "security":
-            # Deduplicate while preserving order — a file can match multiple
-            # scoping rules (e.g. auth_service.py is both business_logic AND
-            # security_sensitive).
-            seen: set = set()
-            combined = []
-            for f in (
-                pr_context.business_logic_files()
-                + pr_context.config_files()
-                + pr_context.security_sensitive_files()
-            ):
-                if f.path not in seen:
-                    seen.add(f.path)
-                    combined.append(f)
-            files = combined
-
-        diffs_section = build_diffs_section(files, file_diffs)
-
-        file_list = "\n".join(f"- `{f.path}` ({f.status}, +{f.additions}/-{f.deletions})" for f in files[:20])
-
-        risk_summary = (
-            f"correctness={risk_profile.correctness.value}, "
-            f"concurrency={risk_profile.concurrency.value}, "
-            f"security={risk_profile.security.value}, "
-            f"reliability={risk_profile.reliability.value}, "
-            f"operational={risk_profile.operational.value}"
-        )
-
-        focus = FOCUS_DESCRIPTIONS.get(agent_name, "General code quality")
-        strategy = STRATEGY_HINTS.get(agent_name, "Investigate the highest-impact issues first.")
-
-        impact_section = ""
-        if impact_context:
-            impact_section = f"\n<impact_context>\n{impact_context}\n</impact_context>\n"
-
-        # PR intent block — only shown when caller supplied title/description.
-        # Format: smart-colleague briefing. Agents read this to know what the
-        # PR SHOULD do, then check whether the diff actually achieves it.
-        intent_block = ""
-        pr_title = getattr(pr_context, "title", "") or ""
-        pr_desc = getattr(pr_context, "description", "") or ""
-        if pr_title or pr_desc:
-            intent_parts = ["<pr_intent>"]
-            if pr_title:
-                intent_parts.append(f"Title: {pr_title}")
-            if pr_desc:
-                # Bound description to keep token count controlled.
-                desc_snippet = pr_desc.strip()[:1500]
-                intent_parts.append(f"Description: {desc_snippet}")
-                if len(pr_desc.strip()) > 1500:
-                    intent_parts.append("[...description truncated...]")
-            intent_parts.append("</pr_intent>")
-            intent_parts.append(
-                "\nUse the intent above to judge whether the diff delivers "
-                "what the PR claims. A correctness defect includes: "
-                "(1) wrong code logic, AND (2) code that doesn't fulfil "
-                "the stated PR goal."
-            )
-            intent_block = "\n".join(intent_parts) + "\n\n"
-
-        return f"""\
-Review this PR for {agent_name.replace("_", " ")} issues.
-
-## Your Focus
-{focus}
-
-## Investigation Strategy
-{strategy}
-
-{intent_block}<pr_context>
-diff_spec: {pr_context.diff_spec}
-files: {pr_context.file_count} ({pr_context.total_changed_lines} lines changed)
-risk: {risk_summary}
-</pr_context>
-
-<file_list>
-{file_list}
-</file_list>
-
-<diffs>
-{diffs_section}
-</diffs>
-{impact_section}
-## Diff interpretation — understand intent before flagging
-When reviewing diffs, distinguish these categories:
-- **New code** (entirely new file or new method): Look for bugs in the new logic.
-- **Changed code** (old line replaced by new line): Understand WHY it changed.
-  Use git_show to see the BEFORE version. If the change is intentional (e.g.,
-  POST→GET, gRPC→REST migration, renamed method), do NOT flag the new pattern
-  as a defect unless it is provably broken.
-- **Moved/refactored code**: If logic is preserved but restructured, do NOT flag
-  pre-existing patterns as new issues introduced by this PR.
-
-## Instructions
-1. Analyze the diffs above for issues in your focus area.
-2. Use **read_file** with line ranges for broader context around changes.
-3. Use **git_show** with a commit ref and file path to see the code BEFORE the change.
-4. Use additional tools (find_references, get_callers, trace_variable, etc.) to trace impact.
-5. The file list and diffs are already provided — skip git_diff_files.
-6. When you have enough evidence, stop investigating and produce your findings JSON.
-7. **Report at most 5 findings.** Prioritize by real-world impact. One finding per root cause.
-"""
-
-    # ------------------------------------------------------------------
-    # Phase 3 helpers
-    # ------------------------------------------------------------------
-
-    async def _post_process(
-        self,
-        agent_results: List[ToolResult],
-        pr_context: PRContext,
-    ) -> List[ReviewFinding]:
-        """Run the deterministic post-processing pipeline on raw agent findings.
-
-        Steps (in order):
-          1. Parse JSON findings from each agent's answer text.
-          2. Apply evidence gate (downgrade under-evidenced criticals).
-          3. Cap each agent at its top 3 findings by confidence.
-          4. Post-filter (confidence floor + test-coverage severity cap).
-          5. Drop test-file-only test_coverage findings when source findings exist.
-          6. Dedup (merge overlapping findings from multiple agents).
-          7. Score and rank by impact.
-          8. Cap at ``max_findings`` from the pipeline config.
-
-        Args:
-            agent_results: Raw ToolResult list from dispatched review agents.
-            pr_context: PR metadata used during scoring and ranking.
-
-        Returns:
-            Ranked list of de-duplicated ReviewFinding objects.
-        """
-        all_findings: List[ReviewFinding] = []
-
-        for result in agent_results:
-            if not result.success or not result.data:
-                continue
-
-            data = result.data if isinstance(result.data, dict) else {}
-            agent_name = data.get("agent_name", "unknown")
-            answer = data.get("answer", "")
-            tool_calls_made = data.get("tool_calls_made", 0)
-            category = AGENT_CATEGORIES.get(agent_name, FindingCategory.CORRECTNESS)
-
-            # Parse JSON findings from agent answer. The boolean signals
-            # whether the agent emitted an explicit JSON array (even an
-            # empty []), which is the authoritative "no findings" answer
-            # — we must NOT trigger repair in that case.
-            findings, parsed_explicit_array = parse_findings_with_status(
-                answer, agent_name, category
-            )
-
-            # Repair fallback: only when parse genuinely failed (no array
-            # was emitted) AND the answer has substance (>100 chars). This
-            # catches truncated outputs from FORCE_CONCLUDE — the agent ran
-            # out of budget mid-investigation but still has evidence in its
-            # accumulated text. Skipping repair on legitimate empty answers
-            # avoids ~1K wasted tokens per agent that has nothing to report.
-            if not findings and not parsed_explicit_array and len(answer) > 100:
-                logger.info(
-                    "Attempting repair for %s agent (answer=%d chars)",
-                    agent_name,
-                    len(answer),
-                )
-                findings = await repair_output(
-                    answer, agent_name, category, self._explorer_provider
-                )
-
-            # Evidence gate (downgrade under-evidenced criticals)
-            if findings:
-                findings = evidence_gate(findings, tool_calls_made)
-
-            # Per-agent cap: keep top findings by confidence to reduce false positives
-            if len(findings) > self._config.post_processing.max_findings_per_agent:
-                findings.sort(key=lambda f: f.confidence, reverse=True)
-                logger.info(
-                    "Agent '%s' produced %d findings, capping to top %d",
-                    agent_name,
-                    len(findings),
-                    self._config.post_processing.max_findings_per_agent,
-                )
-                findings = findings[: self._config.post_processing.max_findings_per_agent]
-
-            all_findings.extend(findings)
-
-        logger.info("Raw findings from agents: %d", len(all_findings))
-
-        # Post-filter (confidence floor + severity caps)
-        filtered = post_filter(all_findings)
-
-        # Drop test_coverage findings that only point at test files —
-        # these are "missing test" observations, not real defects.
-        # Keep them only if no source-file finding exists.
-        _test_prefixes = ("tests/", "test_", "spec/", "__tests__/")
-        source_findings = [
-            f for f in filtered if not any(f.file.startswith(p) or f"/{p}" in f.file for p in _test_prefixes)
-        ]
-        if source_findings:
-            before = len(filtered)
-            filtered = [
-                f
-                for f in filtered
-                if not (
-                    f.category == FindingCategory.TEST_COVERAGE
-                    and any(f.file.startswith(p) or f"/{p}" in f.file for p in _test_prefixes)
-                )
-            ]
-            dropped = before - len(filtered)
-            if dropped:
-                logger.info("Dropped %d test-file-only findings (source findings exist)", dropped)
-
-        # Dedup (merge overlapping findings)
-        merged = dedup_findings(filtered)
-
-        # Score and rank
-        ranked = score_and_rank(merged, pr_context)
-
-        # Cap at max findings
-        max_findings = self._config.post_processing.max_findings
-        if len(ranked) > max_findings:
-            logger.info("Capping findings from %d to %d", len(ranked), max_findings)
-            ranked = ranked[:max_findings]
-
-        return ranked
-
-    # ------------------------------------------------------------------
-    # Phase 3b: Verification — tool-enabled agent reads code to confirm/refute
-    # ------------------------------------------------------------------
-
-    _VERIFY_PROMPT = """\
-You are a **code verification agent**. Your job is to DISPROVE the finding below.
-Try your hardest to find counter-evidence that makes this finding invalid.
-
-## The finding to verify
-- **Title**: {title}
-- **Severity**: {severity}
-- **File**: {file}:{start_line}
-- **Risk**: {risk}
-- **Evidence claimed**:
-{evidence}
-
-## Your task
-1. Read the actual code at the reported location using read_file.
-2. Check for context that would invalidate the finding:
-   - Is there a null check, try-catch, or guard clause nearby?
-   - Is this an intentional design change visible in the diff?
-   - Is the concern already handled by a framework, annotation, or parent caller?
-   - Does the caller validate inputs before reaching this code?
-3. Render your verdict as JSON:
-
-```json
-{{"verdict": "confirmed"|"refuted"|"weakened", "confidence": 0.0-1.0, "reason": "..."}}
-```
-
-- **confirmed**: The finding is real and code-provable. State what you verified.
-- **refuted**: You found concrete counter-evidence. Cite file:line.
-- **weakened**: The finding has some merit but is overstated. Explain why.
-
-Be thorough but fast — you have limited iterations."""
-
-    async def _verify_findings(
-        self,
-        findings: List[ReviewFinding],
-    ) -> List[ReviewFinding]:
-        """Run verification agent on each finding in parallel.
-
-        Refuted findings are dropped. Weakened findings get confidence reduced.
-        Confirmed findings get a small confidence boost.
-        """
-        from .budget import BudgetConfig
-        from .service import AgentLoopService
-
-        llm_semaphore = asyncio.Semaphore(2)
-
-        async def verify_one(finding: ReviewFinding) -> tuple:
-            evidence_lines = "\n".join(f"  - {e}" for e in finding.evidence[:5])
-            query = self._VERIFY_PROMPT.format(
-                title=finding.title,
-                severity=finding.severity.value,
-                file=finding.file,
-                start_line=finding.start_line,
-                risk=finding.risk,
-                evidence=evidence_lines,
-            )
-
-            budget = BudgetConfig(max_input_tokens=250_000, max_iterations=12)
-            agent = AgentLoopService(
-                provider=self._explorer_provider,
-                max_iterations=12,
-                budget_config=budget,
-                trace_writer=self._trace_writer,
-                _is_sub_agent=True,
-                llm_semaphore=llm_semaphore,
-            )
-
-            try:
-                result = await agent.run(query=query, workspace_path=self._workspace_path)
-                answer = result.answer or ""
-
-                verdict = "confirmed"
-                confidence = finding.confidence
-                reason = ""
-
-                json_match = re.search(r'\{[^}]*"verdict"[^}]*\}', answer, re.DOTALL)
-                if json_match:
-                    try:
-                        vdata = json.loads(json_match.group())
-                        verdict = vdata.get("verdict", "confirmed")
-                        confidence = float(vdata.get("confidence", finding.confidence))
-                        reason = vdata.get("reason", "")
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-
-                return finding, verdict, confidence, reason
-            except Exception as exc:
-                logger.warning("Verification failed for '%s': %s", finding.title, exc)
-                return finding, "confirmed", finding.confidence, ""
-
-        results = await asyncio.gather(*[verify_one(f) for f in findings])
-
-        verified = []
-        for finding, verdict, confidence, reason in results:
-            if verdict == "refuted":
-                logger.info("Verification: REFUTED '%s' — %s", finding.title, reason)
-                continue
-            elif verdict == "weakened":
-                finding.confidence = min(finding.confidence, confidence)
-                finding.reasoning = (finding.reasoning or "") + f"\n[verifier: weakened — {reason}]"
-                logger.info(
-                    "Verification: WEAKENED '%s' (confidence → %.2f) — %s",
-                    finding.title,
-                    finding.confidence,
-                    reason,
-                )
-            else:
-                finding.confidence = min(finding.confidence + 0.05, 1.0)
-                logger.info("Verification: CONFIRMED '%s'", finding.title)
-            verified.append(finding)
-
-        logger.info("Verification complete: %d/%d findings survived", len(verified), len(findings))
-        return verified
-
-    # ------------------------------------------------------------------
-    # Phase 4: Arbitration (adversarial verification)
-    #
-    # The arbitrator is a defense attorney — it tries to REBUT each
-    # finding. It does NOT adjust severity or drop findings. Instead
-    # it returns counter-evidence and a suggested severity for each.
-    # The synthesis LLM (Brain) sees both sides and makes the final call.
-    # ------------------------------------------------------------------
-
-    async def _arbitrate(
-        self,
-        findings: List[ReviewFinding],
-        file_diffs: Dict[str, str],
-    ) -> List[ArbitrationVerdict]:
-        """Dispatch the arbitration agent to challenge each finding.
-
-        The arbitrator acts as a defense attorney: it tries to REBUT each
-        finding and returns counter-evidence plus a suggested severity.  It
-        does NOT drop or modify findings — that is the synthesis LLM's job.
-
-        Fast-path: if there are no Critical findings, a single lightweight
-        LLM call is used instead of the full tool-enabled arbitrator agent.
-
-        Args:
-            findings: Post-processed list of ReviewFinding to challenge.
-            file_diffs: Pre-fetched per-file diffs for the arbitrator context.
-
-        Returns:
-            One ArbitrationVerdict per finding, in the same order as
-            ``findings``.  Missing verdicts are filled with defaults
-            (rebuttal_confidence=0.0, reason="not challenged").
-        """
-        has_critical = any(f.severity == Severity.CRITICAL for f in findings)
-
-        if not has_critical:
-            logger.info("No critical findings — using lightweight arbitration")
-            return await self._arbitrate_lightweight(findings, file_diffs)
-
-        from app.workflow.loader import load_brain_config, load_swarm_registry
-
-        from .brain import AgentToolExecutor, BrainBudgetManager
-        from .config import BrainExecutorConfig
-
-        brain_config = load_brain_config()
-        swarm_registry = load_swarm_registry()
-        budget_mgr = BrainBudgetManager(self._config.arbitration.budget_tokens)
-
-        executor = AgentToolExecutor(
-            inner_executor=self._tool_executor,
-            agent_registry=self._agent_registry,
-            swarm_registry=swarm_registry,
-            agent_provider=self._provider,
-            config=BrainExecutorConfig(
-                workspace_path=self._workspace_path,
-                current_depth=0,
-                max_depth=2,
-            ),
-            brain_config=brain_config,
-            trace_writer=self._trace_writer,
-            event_sink=self._event_sink,
-            budget_manager=budget_mgr,
-        )
-
-        findings_data = self._build_findings_for_arbitrator(findings, file_diffs)
-
-        query = (
-            f"You are the defense attorney. For each of the {len(findings)} findings below, "
-            f"try to REBUT it. Use read_file and grep to verify the cited evidence against "
-            f"actual code.\n\n"
-            f"For each finding, output:\n"
-            f"- counter_evidence: reasons the finding might be wrong or overstated\n"
-            f"- rebuttal_confidence: 0.0 (cannot rebut, finding is solid) to 1.0 (finding is wrong)\n"
-            f"- suggested_severity: your recommended severity after challenge\n"
-            f"- reason: one-line rationale\n\n"
-            f"Output a JSON array in <result> tags.\n\n"
-            f"{findings_data}"
-        )
-
-        logger.info("Dispatching pr_arbitrator with %d findings", len(findings))
-
-        result = await executor.execute(
-            "dispatch_agent",
-            {
-                "agent_name": self._config.arbitrator,
-                "query": query,
-            },
-        )
-
-        if not result.success:
-            logger.warning("Arbitrator failed: %s — returning empty verdicts", result.error)
-            return self._default_verdicts(findings)
-
-        answer = result.data.get("answer", "") if result.data else ""
-        return self._parse_verdicts(findings, answer)
-
-    async def _arbitrate_lightweight(
-        self,
-        findings: List[ReviewFinding],
-        file_diffs: Dict[str, str],
-    ) -> List[ArbitrationVerdict]:
-        """Lightweight arbitration — single LLM call, no tools."""
-        findings_data = self._build_findings_for_arbitrator(findings, file_diffs)
-
-        prompt = (
-            f"For each finding below, try to rebut it. Output a JSON array in <result> tags.\n"
-            f"Each element: {{index, counter_evidence (array), rebuttal_confidence (0-1), "
-            f"suggested_severity, reason}}.\n\n"
-            f"{findings_data}"
-        )
-
-        try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self._provider.call_model(prompt=prompt, max_tokens=self._config.arbitration.max_tokens),
-            )
-            return self._parse_verdicts(findings, response)
-        except Exception as exc:
-            logger.warning("Lightweight arbitration failed: %s", exc)
-            return self._default_verdicts(findings)
-
-    def _build_findings_for_arbitrator(
-        self,
-        findings: List[ReviewFinding],
-        file_diffs: Dict[str, str],
-    ) -> str:
-        """Build the findings + diff context string for arbitration."""
-        findings_data = []
-        diff_snippets: List[str] = []
-        seen_files: set = set()
-
-        for i, f in enumerate(findings):
-            loc = f.file
-            if f.start_line:
-                loc += f":{f.start_line}"
-            findings_data.append(
-                {
-                    "index": i,
-                    "title": f.title,
-                    "severity": f.severity.value,
-                    "confidence": f.confidence,
-                    "file": loc,
-                    "risk": f.risk,
-                    "evidence": f.evidence[:5],
-                    "agent": f.agent,
-                }
-            )
-
-            if f.file and f.file in file_diffs:
-                snippet = extract_relevant_diff(file_diffs[f.file], f.start_line, window=80)
-                if snippet and f.file not in seen_files:
-                    diff_snippets.append(f"### {f.file}\n```diff\n{snippet}\n```")
-                    seen_files.add(f.file)
-
-        result = f"<findings>\n{json.dumps(findings_data, indent=2)}\n</findings>\n\n"
-        if diff_snippets:
-            result += "## Code context\n\n" + "\n\n".join(diff_snippets)
-        return result
-
-    def _parse_verdicts(
-        self,
-        findings: List[ReviewFinding],
-        answer: str,
-    ) -> List[ArbitrationVerdict]:
-        """Parse arbitrator response into ArbitrationVerdict list."""
-        result_match = re.search(r"<result>\s*(.*?)\s*</result>", answer, re.DOTALL)
-        if not result_match:
-            logger.warning("Could not parse arbitrator verdicts")
-            return self._default_verdicts(findings)
-
-        try:
-            raw = json.loads(result_match.group(1))
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Arbitrator verdicts not valid JSON")
-            return self._default_verdicts(findings)
-
-        if not isinstance(raw, list):
-            return self._default_verdicts(findings)
-
-        verdicts = []
-        for item in raw:
-            idx = item.get("index", -1)
-            if idx < 0 or idx >= len(findings):
-                continue
-            verdicts.append(
-                ArbitrationVerdict(
-                    index=idx,
-                    counter_evidence=item.get("counter_evidence", []),
-                    rebuttal_confidence=float(item.get("rebuttal_confidence", 0.0)),
-                    suggested_severity=str(item.get("suggested_severity", findings[idx].severity.value)),
-                    reason=item.get("reason", ""),
-                )
-            )
-
-        # Fill in missing indices with defaults
-        covered = {v.index for v in verdicts}
-        for i in range(len(findings)):
-            if i not in covered:
-                verdicts.append(
-                    ArbitrationVerdict(
-                        index=i,
-                        counter_evidence=[],
-                        rebuttal_confidence=0.0,
-                        suggested_severity=findings[i].severity.value,
-                        reason="not challenged",
-                    )
-                )
-
-        verdicts.sort(key=lambda v: v.index)
-        logger.info(
-            "Arbitration: %d verdicts, avg rebuttal_confidence=%.2f",
-            len(verdicts),
-            sum(v.rebuttal_confidence for v in verdicts) / len(verdicts) if verdicts else 0,
-        )
-        return verdicts
-
-    def _default_verdicts(
-        self,
-        findings: List[ReviewFinding],
-    ) -> List[ArbitrationVerdict]:
-        """Return pass-through verdicts when arbitration fails."""
-        return [
-            ArbitrationVerdict(
-                index=i,
-                counter_evidence=[],
-                rebuttal_confidence=0.0,
-                suggested_severity=f.severity.value,
-                reason="arbitration unavailable",
-            )
-            for i, f in enumerate(findings)
-        ]
-
-    # ------------------------------------------------------------------
-    # Phase 6: Synthesis
-    # ------------------------------------------------------------------
-
-    async def _synthesize(
-        self,
-        pr_context: PRContext,
-        risk_profile: RiskProfile,
-        findings: List[ReviewFinding],
-        verdicts: List[ArbitrationVerdict],
-        merge_rec: str,
-        file_diffs: Dict[str, str],
-    ) -> str:
-        """Call the strong model to produce the final polished review.
-
-        Brain acts as the final judge.  It receives sub-agent findings
-        (prosecution — evidence FOR each issue) alongside the arbitrator's
-        counter-evidence (defense — evidence AGAINST), then decides final
-        severity and whether to include each finding.
-
-        Args:
-            pr_context: Parsed PR metadata (files, lines, diff spec).
-            risk_profile: Risk classification for the five review dimensions.
-            findings: Post-processed and ranked findings from review agents.
-            verdicts: Arbitration verdicts challenging each finding.
-            merge_rec: Deterministic merge recommendation (approve /
-                approve_with_followups / request_changes).
-            file_diffs: Pre-fetched per-file diffs injected as context.
-
-        Returns:
-            Markdown-formatted review string, or an empty string if the LLM
-            call fails (caller falls back to ``build_summary``).
-        """
-        # Build verdict lookup
-        verdict_map = {v.index: v for v in verdicts}
-
-        findings_text = []
-        for i, f in enumerate(findings):
-            loc = f.file
-            if f.start_line:
-                loc += f":{f.start_line}"
-                if f.end_line and f.end_line != f.start_line:
-                    loc += f"-{f.end_line}"
-
-            # Sub-agent's case (pro)
-            entry = (
-                f"{i + 1}. [{f.severity.value}] {f.title}\n"
-                f"   File: {loc}\n"
-                f"   Category: {f.category.value}\n"
-                f"   Agent confidence: {f.confidence:.2f}\n"
-                f"   Agent: {f.agent}\n"
-                f"   Risk: {f.risk}\n"
-                f"   Suggested fix: {f.suggested_fix}\n"
-                f"   Evidence FOR: {'; '.join(f.evidence[:3]) if f.evidence else 'none'}"
-            )
-
-            # Arbitrator's challenge (con)
-            v = verdict_map.get(i)
-            if v and (v.counter_evidence or v.rebuttal_confidence > 0.1):
-                counter = "; ".join(v.counter_evidence[:3]) if v.counter_evidence else "none"
-                entry += (
-                    f"\n   --- Arbitrator challenge ---\n"
-                    f"   Counter-evidence: {counter}\n"
-                    f"   Rebuttal confidence: {v.rebuttal_confidence:.2f}\n"
-                    f"   Suggested severity: {v.suggested_severity}\n"
-                    f"   Reason: {v.reason}"
-                )
-
-            findings_text.append(entry)
-
-        diff_snippets = []
-        total_diff_chars = 0
-        for f in findings:
-            if f.file and f.file in file_diffs and total_diff_chars < self._config.synthesis.max_diff_chars:
-                snippet = file_diffs[f.file][: self._config.synthesis.max_diff_snippet_chars]
-                diff_snippets.append(f"### {f.file}\n```diff\n{snippet}\n```")
-                total_diff_chars += len(snippet)
-
-        prompt = f"""\
-<pr_context>
-diff_spec: {pr_context.diff_spec}
-files_changed: {pr_context.file_count}
-lines: +{pr_context.total_additions}/-{pr_context.total_deletions} ({pr_context.total_changed_lines} total)
-max_risk: {risk_profile.max_risk().value}
-preliminary_recommendation: {merge_rec}
-</pr_context>
-
-<file_list>
-{chr(10).join(f"- {f.path} (+{f.additions}/-{f.deletions}, {f.category.value})" for f in pr_context.files[:30])}
-</file_list>
-
-<findings count="{len(findings)}">
-{chr(10).join(findings_text) if findings_text else "No issues found by any agent."}
-</findings>
-
-<diffs>
-{chr(10).join(diff_snippets) if diff_snippets else "No diff snippets available."}
-</diffs>
-"""
-
-        logger.info(
-            "Synthesis: calling strong model with %d findings, prompt ~%d chars",
-            len(findings),
-            len(prompt),
-        )
-
-        try:
-            loop = asyncio.get_event_loop()
-            synthesis = await loop.run_in_executor(
-                None,
-                lambda: self._provider.call_model(
-                    prompt=prompt,
-                    max_tokens=self._config.synthesis.max_tokens,
-                    system=_SYNTHESIS_SYSTEM_PROMPT,
-                ),
-            )
-            logger.info("Synthesis complete: %d chars", len(synthesis))
-            return synthesis
-        except Exception as exc:
-            logger.warning("Synthesis failed: %s", exc)
-            return ""
 
 
 _SEVERITY_RANK = {
@@ -3020,6 +1982,678 @@ def _python_symbol_defined_anywhere(
         return r.returncode != 1
     except Exception:
         return True
+
+
+# ---------------------------------------------------------------------------
+# P13-Go — deterministic bare-identifier phantom detector for Go.
+# ---------------------------------------------------------------------------
+# Targets the "call to undefined function in same package" class of bug
+# — a `go build` compile error the LLM worker routinely misses because
+# the identifier name LOOKS plausible (e.g. `endpointQueryData`). This
+# scanner reads the diff, extracts every bare call (no dot prefix) in
+# newly-added lines, and greps the package directory for a definition.
+# Zero matches → phantom; inject with severity=critical, conf=0.99.
+#
+# Scope-out by design (to avoid false positives):
+#   * `pkg.Foo(...)` — requires import resolution; MVP skips
+#   * `obj.Method(...)` — requires type inference; MVP skips
+#   * Files using dot-imports (`import . "..."`) — can't disambiguate
+# ---------------------------------------------------------------------------
+
+# Matches a bare call `name(` where `name` is not preceded by `.`, not
+# a function declaration, not a type keyword. Lookbehind for `.` is
+# emulated via a character-class preceding context filter.
+_GO_BARE_CALL_RE = re.compile(
+    r"""
+    (?:^|[\s=,;\[\]{}(+\-*/&|<>!])   # allowed preceding char (no `.`)
+    (?!func\s+)(?!type\s+)            # not a decl keyword directly
+    ([A-Za-z_][A-Za-z0-9_]*)          # the identifier
+    \s*\(                             # followed by (
+    """,
+    re.VERBOSE,
+)
+# Bare identifier at an argument position: `(name,` / `,name,` / `,name)`.
+# Captures identifiers passed as arguments that look substantial enough
+# to be package-level constants/vars/functions (>=6 chars OR camelCase).
+# Filters out obvious locals like `ctx`, `req`, `err`.
+_GO_BARE_ARG_RE = re.compile(
+    r"""
+    (?:\(|,)\s*                       # preceded by ( or , + ws
+    ([A-Za-z_][A-Za-z0-9_]*)          # the identifier
+    \s*(?=,|\))                       # followed by , or ) — arg position
+    """,
+    re.VERBOSE,
+)
+# Dot-import marker. Any file containing this is skipped.
+_GO_DOT_IMPORT_RE = re.compile(r'^\s*(?:import\s+)?\.\s+"[^"]+"\s*$', re.MULTILINE)
+# Same-line `func name(` declaration — used to drop self-matches where
+# the bare-call regex would fire on the function header itself.
+_GO_FUNC_DECL_RE = re.compile(
+    r"^\s*(?:func\s+(?:\(\s*\w+\s+\*?\w+(?:\[[^\]]*\])?\s*\)\s+)?)(\w+)\s*\(",
+)
+# Substantive identifier heuristic: >=6 chars, OR contains mixed case
+# (camelCase), OR contains underscore (snake_case). Filters out short
+# generic locals like `ctx`, `req`, `err`, `res`, `i`, `n`, `x`.
+_GO_SUBSTANTIVE_IDENT_RE = re.compile(
+    r"^(?:"
+    r"[A-Za-z_][A-Za-z0-9_]{5,}|"      # >= 6 chars
+    r"[a-z][a-z0-9]*[A-Z][A-Za-z0-9_]*|"  # camelCase
+    r"[A-Z][A-Za-z0-9]*[_A-Z][A-Z_]*|"   # UPPER_SNAKE
+    r"[A-Za-z]+_[A-Za-z_]+"              # snake_case (non-leading _)
+    r")$"
+)
+# Matches `func (recv *T) Name(` or `func Name(` and captures the
+# receiver name (group 1) and the func name (group 2).
+_GO_FUNC_SIG_START_RE = re.compile(
+    r"^\s*func\s+(?:\(\s*(\w+)\s+\*?[\w.\[\]]+(?:\[[^\]]*\])?\s*\)\s+)?(\w+)\s*\(",
+)
+# Matches a line that looks like a method signature: `Name(args) ret?`.
+# Supports: interface method decls (`Foo(x int) string`), function type
+# decls, and any "name + paren + optional return" shape-only lines.
+# CALLS are distinguished by their args lacking typed params.
+_GO_METHOD_SIG_RE = re.compile(
+    r"""
+    ^\s*
+    \w+\s*                               # method name
+    \(                                   # open paren
+    [^)]*                                # params (no nested parens — MVP)
+    \)                                   # close paren
+    \s*
+    (?:                                  # optional return type
+        \([^)]*\)                        #   multi-return `(T1, T2)`
+        |
+        [\w*.<>\[\],\s]+                 #   single return type
+    )?
+    \s*$
+    """,
+    re.VERBOSE,
+)
+# Typed parameter pattern inside parens: `name Type` (lowercase-start
+# identifier followed by whitespace followed by a type token). If
+# present, the parens contain typed params → signature. If absent,
+# the parens contain values/expressions → call.
+_GO_TYPED_PARAM_RE = re.compile(
+    r"[a-z_]\w*\s+(?:\*|\[\]|\.\.\.)*[\w.]"
+)
+
+# Go keywords + built-in identifiers + universe block. Covers every
+# identifier a Go file can reference without a definition in user code.
+_GO_BUILTINS: set[str] = {
+    # keywords
+    "break", "case", "chan", "const", "continue", "default", "defer",
+    "else", "fallthrough", "for", "func", "go", "goto", "if", "import",
+    "interface", "map", "package", "range", "return", "select",
+    "struct", "switch", "type", "var",
+    # pre-declared types
+    "bool", "byte", "complex64", "complex128", "error", "float32",
+    "float64", "int", "int8", "int16", "int32", "int64", "rune",
+    "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+    "any", "comparable",
+    # pre-declared values
+    "true", "false", "iota", "nil",
+    # built-in functions
+    "append", "cap", "clear", "close", "complex", "copy", "delete",
+    "imag", "len", "make", "max", "min", "new", "panic", "print",
+    "println", "real", "recover",
+}
+
+
+def _go_dir_has_dot_import(file_path: str, workspace_path: str) -> bool:
+    """True if the diff file uses dot-imports (skip entire file when so)."""
+    import os as _os
+    full = _os.path.join(workspace_path, file_path)
+    try:
+        with open(full, encoding="utf-8", errors="replace") as f:
+            return bool(_GO_DOT_IMPORT_RE.search(f.read(16384)))
+    except Exception:
+        return True  # fail-safe: if we can't read, skip scanning
+
+
+def _go_symbol_defined_anywhere(
+    workspace_path: str, name: str, *, timeout_s: float = 8.0,
+) -> bool:
+    """Workspace-wide grep for ANY Go top-level definition of `name`,
+    OR for `name` appearing as a function parameter anywhere.
+
+    Matches:
+      * `func NAME(` / `func (r R) NAME(` / `var NAME` / `const NAME`
+        / `type NAME` / `NAME :=` / `NAME = ` (package level)
+      * `(NAME Type` / `,NAME Type` — parameter position (handles the
+        common case where NAME is a function param in one file and used
+        as an argument in another file)
+
+    Workspace-wide plus parameter-aware matches prevent false positives
+    on (a) interface methods implemented in other packages and
+    (b) parameters used across files in the same enclosing function.
+
+    Returns True on any match; False on zero matches; True on error
+    (fail-safe — never false-positive when grep errors)."""
+    import subprocess
+
+    # POSIX ERE (grep -E): non-capture `(?:...)` isn't supported;
+    # use plain `(...)` groups. `\s` / `\w` work as GNU ERE extensions.
+    pattern = (
+        rf"^[[:space:]]*(func[[:space:]]+(\([^)]*\)[[:space:]]+)?{re.escape(name)}[[:space:]]*[(\[]|"
+        rf"var[[:space:]]+{re.escape(name)}[[:space:]]|"
+        rf"const[[:space:]]+{re.escape(name)}[[:space:]]|"
+        rf"type[[:space:]]+{re.escape(name)}[[:space:]]|"
+        rf"{re.escape(name)}[[:space:]]*:?=)|"
+        # parameter position: `(name Type` or `, name Type`
+        rf"[(,][[:space:]]*{re.escape(name)}[[:space:]]+(\*|\[\]|\.\.\.)*[[:alnum:]._]"
+    )
+    try:
+        r = subprocess.run(
+            [
+                "grep", "-r", "-E", pattern, workspace_path,
+                "--include=*.go", "--max-count=1", "-l",
+                "--exclude-dir=.git", "--exclude-dir=vendor",
+                "--exclude-dir=node_modules", "--exclude-dir=.venv",
+            ],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+        return r.returncode != 1
+    except Exception:
+        return True
+
+
+def _extract_go_locals_from_diff(diff_text: str) -> set[str]:
+    """Scan `+` lines for names that are LOCAL (not package-level):
+    method receivers, function parameters, and `:=` short-var decls.
+
+    We use this as a skip-list when looking for phantom references —
+    a reference to a local is not a compile error.
+    """
+    locals_set: set[str] = set()
+    for raw in diff_text.splitlines():
+        if not raw.startswith("+"):
+            continue
+        body = raw[1:]
+        stripped = body.lstrip()
+        if stripped.startswith("//") or not stripped:
+            continue
+        if "//" in body:
+            body = body.split("//", 1)[0]
+
+        # Short-var decl: `name, name2 := ...`
+        for m in re.finditer(
+            r"(?:^|[\s;{}])([a-z_][\w]*(?:\s*,\s*[a-z_][\w]*)*)\s*:=",
+            body,
+        ):
+            chunk = m.group(1)
+            for n in chunk.split(","):
+                n = n.strip()
+                if n.isidentifier():
+                    locals_set.add(n)
+
+        # Function signature: capture receiver + param names
+        sig_m = _GO_FUNC_SIG_START_RE.match(body)
+        if sig_m:
+            recv = sig_m.group(1)
+            if recv:
+                locals_set.add(recv)
+            # Extract param list — everything between the opening `(`
+            # of the signature's param list and the matching `)`.
+            open_idx = body.find("(", sig_m.end() - 1)
+            if open_idx != -1:
+                depth = 0
+                close_idx = -1
+                for idx in range(open_idx, len(body)):
+                    c = body[idx]
+                    if c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                        if depth == 0:
+                            close_idx = idx
+                            break
+                if close_idx != -1:
+                    params = body[open_idx + 1: close_idx]
+                    # Each param is `name Type` or `name1, name2 Type`.
+                    # Split on commas, extract leading identifier.
+                    for seg in params.split(","):
+                        seg = seg.strip()
+                        # seg can be `name Type`, `name`, or just
+                        # `Type` (unnamed result). Only keep first
+                        # token if it's followed by whitespace + Type.
+                        first = re.match(r"^([a-z_][\w]*)\s+", seg)
+                        if first:
+                            locals_set.add(first.group(1))
+    return locals_set
+
+
+def _extract_go_bare_references_from_diff(
+    diff_text: str,
+    *,
+    skip_names: Optional[set[str]] = None,
+) -> List[tuple[str, int]]:
+    """Yield (name, new_line_number) for every substantive bare-identifier
+    reference on `+` lines.
+
+    Captured positions:
+      * Function call: `name(`
+      * Function argument: `,name,` / `(name,` / `,name)`
+
+    Filters applied:
+      * Go keywords + built-ins (`len`, `make`, etc.)
+      * Method-on-obj / package-qualified (preceded by `.`)
+      * Function declaration self-match (`func X(` — X is the decl name)
+      * Local names (parameters / receivers / `:=` vars) via skip_names
+      * Interface method signatures (whole-line matching `Name(args) ret?`)
+      * Identifiers that are NOT substantive (locals like `ctx`, `req`,
+        `err`, `i`) — filtered via `_GO_SUBSTANTIVE_IDENT_RE`
+      * Comment / string / blank lines
+    """
+    skip_names = skip_names or set()
+    results: List[tuple[str, int]] = []
+    current_new_line = 0
+    for raw in diff_text.splitlines():
+        if raw.startswith("@@"):
+            m = _DIFF_HUNK_HEADER_RE.match(raw)
+            if m:
+                current_new_line = int(m.group(1))
+            continue
+        if raw.startswith("---") or raw.startswith("+++"):
+            continue
+        is_addition = raw.startswith("+")
+        if is_addition:
+            body = raw[1:]
+            stripped = body.strip()
+            if (
+                stripped.startswith("//")
+                or stripped.startswith("/*")
+                or stripped.startswith("*")
+                or not stripped
+            ):
+                if not raw.startswith("-"):
+                    current_new_line += 1
+                continue
+            if "//" in body:
+                body = body.split("//", 1)[0]
+
+            # Skip lines that look like a method signature (interface
+            # method decl): `Foo(x int) string`. Distinguished from a
+            # call (`foo("x")`) by having a TYPED param inside the
+            # parens — `name Type` pattern.
+            if (
+                not stripped.startswith("func ")
+                and _GO_METHOD_SIG_RE.match(body)
+            ):
+                # Extract content between outer `(` and matching `)`
+                open_idx = body.find("(")
+                if open_idx >= 0:
+                    depth = 0
+                    close_idx = -1
+                    for _idx in range(open_idx, len(body)):
+                        _c = body[_idx]
+                        if _c == "(":
+                            depth += 1
+                        elif _c == ")":
+                            depth -= 1
+                            if depth == 0:
+                                close_idx = _idx
+                                break
+                    if close_idx > open_idx:
+                        params = body[open_idx + 1: close_idx]
+                        if _GO_TYPED_PARAM_RE.search(params):
+                            # Typed param → signature → skip line
+                            if not raw.startswith("-"):
+                                current_new_line += 1
+                            continue
+            # Skip the function declaration on this line to avoid
+            # self-match against its own name.
+            decl_m = _GO_FUNC_DECL_RE.match(body)
+            decl_name = decl_m.group(1) if decl_m else None
+
+            # Inline accept-filter. Uses loop-locals deliberately
+            # (consumed within the same iteration; no closure capture
+            # escapes the loop body).
+            def _go_ident_accepted(name: str, start: int) -> bool:
+                if name in _GO_BUILTINS:
+                    return False
+                if name in skip_names:
+                    return False
+                if decl_name and name == decl_name:  # noqa: B023
+                    return False
+                if start > 0 and body[start - 1] == ".":  # noqa: B023
+                    return False
+                return bool(_GO_SUBSTANTIVE_IDENT_RE.match(name))
+
+            # Position 1: bare CALL sites (name followed by `(`)
+            for m in _GO_BARE_CALL_RE.finditer(body):
+                name = m.group(1)
+                if _go_ident_accepted(name, m.start(1)):
+                    results.append((name, current_new_line))
+            # Position 2: bare ARGUMENT positions (name between `(|,`
+            # and `,|)`). Captures constants/vars passed as arguments.
+            for m in _GO_BARE_ARG_RE.finditer(body):
+                name = m.group(1)
+                if _go_ident_accepted(name, m.start(1)):
+                    results.append((name, current_new_line))
+        if not raw.startswith("-"):
+            current_new_line += 1
+    return results
+
+
+# Backwards-compat alias for any in-tree callers / future re-use.
+_extract_go_bare_calls_from_diff = _extract_go_bare_references_from_diff
+
+
+def _scan_new_go_references_for_missing(
+    workspace_path: str,
+    file_diffs: Dict[str, str],
+    *,
+    max_symbols_checked: int = 24,
+    grep_timeout_s: float = 8.0,
+) -> List[Dict[str, str]]:
+    """P13-Go — Deterministic Go phantom bare-identifier detector.
+
+    Scans `.go` file diffs for newly-added bare call sites (no `pkg.`
+    prefix, not a method call) and verifies each name resolves to a
+    top-level definition in the SAME PACKAGE DIRECTORY. Names that
+    grep finds zero matches for are phantom — a `go build` compile
+    error the LLM worker routinely misses.
+
+    Guards:
+      * Skips files using dot-imports (can't disambiguate)
+      * Filters Go keywords + built-ins (`len`, `append`, `make`, …)
+      * Caps `max_symbols_checked` grep calls per PR
+      * `grep_timeout_s` subprocess timeout per symbol
+      * Fails soft — any exception returns current findings unchanged
+    """
+    if not workspace_path or not file_diffs:
+        return []
+
+    found: List[Dict[str, str]] = []
+    checked = 0
+    seen_names: set = set()
+
+    for file_path, diff_text in file_diffs.items():
+        if not file_path.endswith(".go"):
+            continue
+        # Test files routinely reference _test helpers that live across
+        # package boundaries; scope out to avoid noise.
+        if file_path.endswith("_test.go"):
+            continue
+        if _go_dir_has_dot_import(file_path, workspace_path):
+            continue
+        locals_set = _extract_go_locals_from_diff(diff_text)
+        for name, line in _extract_go_bare_references_from_diff(
+            diff_text, skip_names=locals_set,
+        ):
+            if name in seen_names:
+                continue
+            if checked >= max_symbols_checked:
+                break
+            seen_names.add(name)
+            checked += 1
+            if _go_symbol_defined_anywhere(
+                workspace_path, name, timeout_s=grep_timeout_s,
+            ):
+                continue
+            found.append({
+                "name": name,
+                "referenced_at": f"{file_path}:{line}",
+                "evidence": (
+                    f"Deterministic workspace-wide grep for "
+                    f"`func/var/const/type {name}` in any `.go` "
+                    f"file → 0 matches. Bare identifier reference "
+                    f"will fail `go build` with 'undefined: {name}'."
+                ),
+            })
+        if checked >= max_symbols_checked:
+            break
+    return found
+
+
+# ---------------------------------------------------------------------------
+# P13-Java — deterministic phantom class reference detector for Java.
+# ---------------------------------------------------------------------------
+# Targets phantom class references (can't compile) introduced by a PR:
+#   * `new Foo(...)`
+#   * `Foo var = ...` (type declaration)
+#   * `Foo.staticMethod(...)` (static entry)
+#   * `<Foo>` (generic parameter)
+# Verification: the class must be either
+#   (a) imported in the file (read actual file content, not just diff);
+#   (b) defined in same-package `.java` files; or
+#   (c) a java.lang.* implicit import.
+# ---------------------------------------------------------------------------
+
+_JAVA_CLASS_REF_PATTERNS: List[re.Pattern[str]] = [
+    # new ClassName(
+    re.compile(r"\bnew\s+([A-Z][A-Za-z0-9_]*)\s*[(<]"),
+    # ClassName.staticCall( — UPPER start disambiguates class from variable
+    re.compile(r"(?:^|[\s=,(\[{;])([A-Z][A-Za-z0-9_]*)\.[a-z_][A-Za-z0-9_]*\s*\("),
+    # <ClassName> or <ClassName, …> — generic parameters
+    re.compile(r"<\s*([A-Z][A-Za-z0-9_]*)\s*(?:,|>)"),
+    # extends/implements/throws ClassName
+    re.compile(r"\b(?:extends|implements|throws)\s+([A-Z][A-Za-z0-9_]*)"),
+]
+
+_JAVA_IMPORT_RE = re.compile(
+    r"^\s*import\s+(?:static\s+)?([\w.]+)(?:\.(\*|\w+))?\s*;\s*$",
+    re.MULTILINE,
+)
+_JAVA_PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+
+# java.lang.* classes are implicitly imported in every Java file.
+# List covers the standard classes + common exceptions. If a rare one
+# is missing (e.g. `ClassValue`) the scanner may over-flag — but these
+# are rare enough in PR diffs that we prefer the cleaner filter.
+_JAVA_LANG_CLASSES: set[str] = {
+    # primitives wrappers
+    "Boolean", "Byte", "Character", "Double", "Float", "Integer",
+    "Long", "Short", "Void",
+    # core
+    "Object", "String", "StringBuilder", "StringBuffer", "Math",
+    "System", "Thread", "ThreadGroup", "ThreadLocal", "Runtime",
+    "Process", "ProcessBuilder", "Class", "ClassLoader", "Package",
+    "Enum", "Record", "Number", "Comparable", "Iterable", "Readable",
+    "CharSequence", "AutoCloseable", "Cloneable", "Runnable",
+    # throwables
+    "Throwable", "Exception", "Error", "RuntimeException",
+    "NullPointerException", "IllegalArgumentException",
+    "IllegalStateException", "UnsupportedOperationException",
+    "ClassNotFoundException", "ClassCastException",
+    "ArrayIndexOutOfBoundsException", "IndexOutOfBoundsException",
+    "StringIndexOutOfBoundsException", "ArithmeticException",
+    "NumberFormatException", "InterruptedException",
+    "NoSuchMethodException", "NoSuchFieldException",
+    "SecurityException", "OutOfMemoryError", "StackOverflowError",
+    "AssertionError", "LinkageError", "NoClassDefFoundError",
+    "VerifyError", "AbstractMethodError", "IncompatibleClassChangeError",
+}
+# Java primitive keywords (never class references)
+_JAVA_PRIMITIVES: set[str] = {
+    "void", "boolean", "byte", "char", "short", "int", "long", "float",
+    "double",
+}
+
+
+def _parse_java_file_imports(workspace_path: str, file_path: str) -> tuple[set[str], set[str], str]:
+    """Return (imported_simple_names, star_imports_prefixes, own_package).
+
+    Reads the actual file on disk (head 16KB is enough — imports are at top).
+    Handles both `import com.foo.Bar;` (adds `Bar` to the simple-name set)
+    and `import com.foo.*;` (adds `com.foo` to the star set).
+    """
+    import os as _os
+    full = _os.path.join(workspace_path, file_path)
+    imported_simple: set[str] = set()
+    star_imports: set[str] = set()
+    own_package = ""
+    try:
+        with open(full, encoding="utf-8", errors="replace") as f:
+            head = f.read(16384)
+    except Exception:
+        return (imported_simple, star_imports, own_package)
+
+    pkg_m = _JAVA_PACKAGE_RE.search(head)
+    if pkg_m:
+        own_package = pkg_m.group(1)
+
+    for m in _JAVA_IMPORT_RE.finditer(head):
+        body = m.group(1)
+        tail = m.group(2)
+        if tail == "*":
+            star_imports.add(body)  # e.g. `com.foo` from `import com.foo.*;`
+        else:
+            simple = tail if tail else body.rsplit(".", 1)[-1]
+            imported_simple.add(simple)
+    return (imported_simple, star_imports, own_package)
+
+
+def _java_class_defined_in_package(
+    workspace_path: str, package_dir: str, name: str, *, timeout_s: float = 8.0,
+) -> bool:
+    """Grep package dir for a top-level class/interface/enum/record."""
+    import os as _os
+    import subprocess
+
+    full_dir = _os.path.join(workspace_path, package_dir)
+    if not _os.path.isdir(full_dir):
+        return True  # fail-safe when package dir unresolved
+
+    pattern = (
+        rf"^\s*(public\s+|private\s+|protected\s+)?"
+        rf"(abstract\s+|final\s+|static\s+|sealed\s+)*"
+        rf"(class|interface|enum|record|@interface)\s+{re.escape(name)}\b"
+    )
+    try:
+        r = subprocess.run(
+            ["grep", "-E", "-l", "--max-count=1", "--include=*.java", pattern]
+            + [_os.path.join(full_dir, f) for f in _os.listdir(full_dir)
+               if f.endswith(".java")],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+        return r.returncode != 1
+    except Exception:
+        return True
+
+
+def _extract_java_class_refs_from_diff(diff_text: str) -> List[tuple[str, int]]:
+    """Yield (class_name, new_line_number) for every class reference
+    in `+` lines. Best-effort: skips obvious comment/string-only lines."""
+    results: List[tuple[str, int]] = []
+    current_new_line = 0
+    for raw in diff_text.splitlines():
+        if raw.startswith("@@"):
+            m = _DIFF_HUNK_HEADER_RE.match(raw)
+            if m:
+                current_new_line = int(m.group(1))
+            continue
+        if raw.startswith("---") or raw.startswith("+++"):
+            continue
+        if raw.startswith("+"):
+            body = raw[1:]
+            stripped = body.strip()
+            if (
+                stripped.startswith("//")
+                or stripped.startswith("/*")
+                or stripped.startswith("*")
+                or stripped.startswith("import ")
+                or stripped.startswith("package ")
+                or not stripped
+            ):
+                if not raw.startswith("-"):
+                    current_new_line += 1
+                continue
+            # Drop inline // comment tail
+            if "//" in body:
+                body = body.split("//", 1)[0]
+            for pat in _JAVA_CLASS_REF_PATTERNS:
+                for m in pat.finditer(body):
+                    name = m.group(1)
+                    if name in _JAVA_PRIMITIVES:
+                        continue
+                    results.append((name, current_new_line))
+        if not raw.startswith("-"):
+            current_new_line += 1
+    return results
+
+
+def _scan_new_java_references_for_missing(
+    workspace_path: str,
+    file_diffs: Dict[str, str],
+    *,
+    max_symbols_checked: int = 24,
+    grep_timeout_s: float = 8.0,
+) -> List[Dict[str, str]]:
+    """P13-Java — Deterministic Java phantom class reference detector.
+
+    Scans `.java` file diffs for newly-referenced class names (via
+    `new X(`, `X var =`, `X.staticMethod(`, `<X>`, `extends X`, etc.).
+    A class name is a phantom if it is NOT:
+      * imported in the file (parsed from actual file content);
+      * covered by a `com.foo.*` star import (conservative: we skip
+        these, cannot verify without FQN resolution);
+      * defined in a same-package `.java` file;
+      * a java.lang.* implicit import.
+
+    Guards:
+      * Caps `max_symbols_checked` grep calls per PR
+      * `grep_timeout_s` subprocess timeout per symbol
+      * Fails soft on any error
+    """
+    import os as _os
+    if not workspace_path or not file_diffs:
+        return []
+
+    found: List[Dict[str, str]] = []
+    checked = 0
+    # Dedup globally across the PR — same (file, name) reported only
+    # once even if referenced multiple times.
+    seen: set = set()
+
+    for file_path, diff_text in file_diffs.items():
+        if not file_path.endswith(".java"):
+            continue
+        imported, star_imports, _pkg = _parse_java_file_imports(
+            workspace_path, file_path,
+        )
+        # If the file uses star-imports, MVP skips the file to avoid
+        # false positives. Star-imports hide which exact class names
+        # are available.
+        if star_imports:
+            continue
+        package_dir = _os.path.dirname(file_path)
+        for name, line in _extract_java_class_refs_from_diff(diff_text):
+            key = (file_path, name)
+            if key in seen:
+                continue
+            if checked >= max_symbols_checked:
+                break
+            seen.add(key)
+            # Filter: java.lang, explicitly imported, or same-package
+            if name in _JAVA_LANG_CLASSES:
+                continue
+            if name in imported:
+                continue
+            checked += 1
+            if _java_class_defined_in_package(
+                workspace_path, package_dir, name,
+                timeout_s=grep_timeout_s,
+            ):
+                continue
+            found.append({
+                "name": name,
+                "referenced_at": f"{file_path}:{line}",
+                "evidence": (
+                    f"Deterministic grep for `class/interface/enum/"
+                    f"record {name}` in Java package directory "
+                    f"`{package_dir}/` → 0 matches; `{name}` is not "
+                    f"imported in the file nor in `java.lang`. "
+                    f"Compilation will fail with 'cannot find symbol: "
+                    f"class {name}'."
+                ),
+            })
+        if checked >= max_symbols_checked:
+            break
+    return found
 
 
 # P14 — Mechanical stub-function detector (Python + Go).

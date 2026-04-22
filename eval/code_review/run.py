@@ -3,9 +3,10 @@
 
 Two modes:
 
-  Pipeline mode (default):
-    Runs CodeReviewService (10-step multi-agent pipeline) against eval cases.
-    python eval/run.py --provider anthropic --model claude-sonnet-4-20250514
+  Brain mode (default, pass ``--brain``):
+    Runs ``PRBrainOrchestrator`` (coordinator-worker v2 loop) against the
+    eval cases. This is the only production pipeline.
+    python eval/run.py --brain --provider bedrock --model <sonnet-id>
 
   Gold-standard mode (--gold):
     Invokes Claude Code CLI directly (own tools, own strategies).
@@ -14,12 +15,10 @@ Two modes:
     python eval/run.py --gold --gold-model opus --filter "requests-001"
 
 Examples:
-    python eval/run.py --filter "requests-001"
-    python eval/run.py --no-judge
-    python eval/run.py --save-baseline
+    python eval/run.py --brain --filter "requests-001"
+    python eval/run.py --brain --no-judge
     python eval/run.py --gold --save-baseline
     python eval/run.py --compare-gold
-    python eval/run.py --provider bedrock --model us.anthropic.claude-sonnet-4-5-20250929-v1:0
 """
 
 import argparse
@@ -38,7 +37,7 @@ if str(_EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(_EVAL_DIR))
 
 # Backend imports (runner adds backend/ to sys.path)
-from runner import CaseConfig, RunResult, run_case, run_case_brain  # noqa: E402
+from runner import CaseConfig, RunResult, run_case_brain  # noqa: E402
 from gold_runner import GoldRunResult, run_gold_case  # noqa: E402
 from scorer import CaseScore, score_case  # noqa: E402
 from judge import judge_case  # noqa: E402
@@ -96,8 +95,8 @@ def parse_args() -> argparse.Namespace:
         help="Max parallel agents per review (default: 5)",
     )
     parser.add_argument(
-        "--brain", action="store_true",
-        help="Use PR Brain orchestrator instead of CodeReviewService pipeline",
+        "--brain", action="store_true", default=True,
+        help="Run the PR Brain orchestrator (default; kept for backward-compat with existing invocations).",
     )
     parser.add_argument(
         "--verbose", action="store_true",
@@ -334,30 +333,19 @@ async def run_single_case(
     max_agents: int,
     use_judge: bool,
     judge_provider=None,
-    use_brain: bool = False,
+    use_brain: bool = True,
     verbose: bool = False,
 ) -> tuple:
-    """Run a single case through the pipeline and return (CaseScore, judge_verdict)."""
-    mode_label = "[brain]" if use_brain else "[legacy]"
-    print(f"  {mode_label} Running {case.id} ({case.difficulty})... ", end="", flush=True)
+    """Run a single case through the Brain pipeline and return (CaseScore, judge_verdict)."""
+    print(f"  [brain] Running {case.id} ({case.difficulty})... ", end="", flush=True)
 
-    if use_brain:
-        run_result = await run_case_brain(
-            case=case,
-            source_dir=source_dir,
-            patch_dir=patch_dir,
-            provider=provider,
-            explorer_provider=explorer_provider,
-        )
-    else:
-        run_result = await run_case(
-            case=case,
-            source_dir=source_dir,
-            patch_dir=patch_dir,
-            provider=provider,
-            explorer_provider=explorer_provider,
-            max_agents=max_agents,
-        )
+    run_result = await run_case_brain(
+        case=case,
+        source_dir=source_dir,
+        patch_dir=patch_dir,
+        provider=provider,
+        explorer_provider=explorer_provider,
+    )
 
     if run_result.error:
         print(f"ERROR: {run_result.error}")
@@ -528,13 +516,10 @@ async def run_all(args: argparse.Namespace) -> None:
         return
 
     is_gold = args.gold
-    is_brain = getattr(args, 'brain', False)
     if is_gold:
         mode_label = "gold-standard (Claude Code CLI)"
-    elif is_brain:
-        mode_label = "brain (PRBrainOrchestrator)"
     else:
-        mode_label = "pipeline (CodeReviewService)"
+        mode_label = "brain (PRBrainOrchestrator)"
     print(f"Loaded {len(cases)} case(s) — mode: {mode_label}")
 
     if is_gold:
