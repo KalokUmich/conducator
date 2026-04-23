@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from app.agent_loop.lifecycle import fire_hook
 from app.ai_provider.base import AIProvider
 from app.code_review.diff_parser import parse_diff
 from app.code_review.models import (
@@ -730,6 +731,22 @@ class PRBrainOrchestrator:
         impact_context = build_impact_context(self._workspace_path, pr_context)
         budget_multiplier = compute_budget_multiplier(pr_context)
 
+        # Phase 9.17 lifecycle hook — pre-coordinator survey complete.
+        # PR context, risk profile, impact graph all available; coordinator
+        # is about to start dispatching. Hook consumers can peek at the
+        # PR shape for telemetry / risk-classifier plugins / etc.
+        fire_hook(
+            "on_survey_complete",
+            orchestrator=self,
+            data={
+                "pr_context": pr_context,
+                "risk_profile": risk_profile,
+                "impact_context": impact_context,
+                "budget_multiplier": budget_multiplier,
+                "file_count": len(pr_context.files),
+            },
+        )
+
         logger.info(
             "Risk: correctness=%s, concurrency=%s, security=%s, reliability=%s, operational=%s | budget=%.1fx",
             risk_profile.correctness.value,
@@ -924,6 +941,20 @@ class PRBrainOrchestrator:
             coordinator_result, pr_context,
         )
 
+        # Phase 9.17 lifecycle hook — coordinator finished all dispatches
+        # and returned a draft. Precision filter / synthesis hasn't run
+        # yet. Hook consumers can read the coordinator-emitted findings
+        # before any post-processing reshapes them.
+        fire_hook(
+            "on_dispatch_complete",
+            orchestrator=self,
+            data={
+                "coordinator_success": coordinator_result.success,
+                "draft_findings": list(review_output.get("findings", [])),
+                "draft_finding_count": len(review_output.get("findings", [])),
+            },
+        )
+
         # ------------------------------------------------------------------
         # Phase 6 — Precision filter with adaptive verifier.
         #
@@ -954,6 +985,22 @@ class PRBrainOrchestrator:
             "v2_coordinator_complete",
             {
                 "finding_count": len(review_output["findings"]),
+            },
+        )
+
+        # Phase 9.17 lifecycle hook — synthesis finished, precision
+        # filter has run, findings + final synthesis text are ready.
+        # Consumers: telemetry / Langfuse export / extract reusable
+        # learnings → memory consolidation (future Phase 9.15
+        # long-term extension) / metrics aggregation.
+        fire_hook(
+            "on_synthesize_complete",
+            orchestrator=self,
+            data={
+                "findings": list(review_output.get("findings", [])),
+                "synthesis": review_output.get("synthesis", ""),
+                "merge_recommendation": review_output.get("merge_recommendation"),
+                "finding_count": len(review_output.get("findings", [])),
             },
         )
 
@@ -2148,7 +2195,23 @@ class PRBrainOrchestrator:
 
         Also resets the ContextVar binding so ``search_facts`` in any
         other concurrent task stops pointing at our (now-deleted) DB.
+
+        Phase 9.17 — fires the ``on_task_end`` lifecycle hook BEFORE
+        deleting the scratchpad so consumers (telemetry exporters,
+        consolidation extractors) can read the vault one last time.
         """
+        # Phase 9.17 — fire on_task_end first so hooks can still read
+        # scratchpad state. Hooks are fire-and-forget; failures don't
+        # block cleanup.
+        fire_hook(
+            "on_task_end",
+            orchestrator=self,
+            data={
+                "scratchpad_owned": self._owns_scratchpad,
+                "scratchpad_present": self._scratchpad is not None,
+            },
+        )
+
         # Reset the ContextVar binding regardless of ownership — if we
         # set it, we reset it, so concurrent search_facts calls won't hit
         # a deleted store.
