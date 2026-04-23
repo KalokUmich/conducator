@@ -259,6 +259,18 @@ class AgentLoopService:
         if self._interactive:
             yield AgentEvent(kind="session", data={"session_id": trace.session_id})
 
+        # Phase 9.9.3 — bind this agent's name to a contextvar so the
+        # update_notes tool can key notes by (agent, topic) without the
+        # agent explicitly passing its name. Setting without reset is
+        # fine here: contextvars are per-task, this run's state dies
+        # with the task. Absent agent_identity (legacy paths) → skip.
+        if self._agent_identity and self._agent_identity.get("name"):
+            try:
+                from app.scratchpad.context import _current_agent_name
+                _current_agent_name.set(self._agent_identity["name"])
+            except Exception:
+                pass  # best-effort, never crash the run on this
+
         layout, project_docs, risk_context = await self._initialize_workspace(workspace_path)
 
         async for event in self._classify_and_build_prompt(

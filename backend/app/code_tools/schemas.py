@@ -293,6 +293,61 @@ class SearchFactsParams(BaseModel):
     )
 
 
+class UpdateNotesParams(BaseModel):
+    """Phase 9.9.3 — sub-agent structured note-taking.
+
+    Sub-agents write scratch observations here mid-investigation.
+    Notes survive the 3-turn context-clearing policy (which truncates
+    tool_results and older thinking), so the agent can pick up on its
+    own prior reasoning after a clear. Also readable by other agents
+    and the coordinator via the same FactStore.
+
+    Keying is ``(agent, topic)``: same topic from the same agent
+    overwrites the prior note. Pick a short slug for ``topic`` (e.g.
+    ``"auth_flow_mapping"``, ``"validate_fn_signature"``) so one agent
+    can maintain 3-6 coherent running observations without collision.
+
+    Use when: you've spent ≥2 tool calls mapping something out and
+    your finding isn't yet confirmed (so you can't emit it as a
+    finding), but losing this observation to context clearing would
+    make you re-do the work. DO NOT use for fleeting thoughts — keep
+    those in your scratch text. DO NOT use to restate findings — the
+    findings schema is the output contract.
+    """
+
+    topic: str = Field(
+        ...,
+        min_length=2,
+        max_length=64,
+        description=(
+            "Short slug identifying what the note is about. Reuse the "
+            "same topic to UPDATE (overwrite) a prior note. Good "
+            "examples: 'auth_flow_trace', 'pkce_state_check', "
+            "'caller_of_refund'. Bad examples: 'note1', 'thoughts'."
+        ),
+    )
+    content: str = Field(
+        ...,
+        min_length=10,
+        max_length=4000,
+        description=(
+            "The observation itself. 1-3 paragraphs typical. Record "
+            "WHAT you saw (file:line references welcome) and WHY it "
+            "matters to the investigation — not just WHAT you did. "
+            "Max 4K chars; truncated if longer."
+        ),
+    )
+    file_hint: Optional[str] = Field(
+        default=None,
+        max_length=512,
+        description=(
+            "Optional file path the note is about. Used by the "
+            "coordinator's Synthesize step to cluster notes by file. "
+            "If the note spans files, pick the most relevant one."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Interactive tool parameter schemas
 # ---------------------------------------------------------------------------
@@ -837,6 +892,7 @@ TOOL_PARAM_MODELS: Dict[str, type] = {
     "db_schema": DbSchemaParams,
     # Scratchpad (Phase 9.15) — sub-agent queries over the session Fact Vault
     "search_facts": SearchFactsParams,
+    "update_notes": UpdateNotesParams,
     # File editing tools
     "file_edit": FileEditParams,
     "file_write": FileWriteParams,
@@ -1481,6 +1537,32 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         ),
         "input_schema": SearchFactsParams.model_json_schema(),
     },
+    {
+        "name": "update_notes",
+        "description": (
+            "Record a structured scratch observation for yourself (Phase 9.9.3).\n\n"
+            "Sub-agents clear older tool_results and thinking after 3 turns to "
+            "prevent context rot. Notes written with this tool survive that "
+            "clearing so you can pick up your own reasoning later in the "
+            "investigation, and the coordinator's Synthesize step can read "
+            "them across agents.\n\n"
+            "Keyed by (your agent name, topic slug). Writing the same topic "
+            "twice UPDATES the prior note — so you can refine an observation "
+            "as you learn more.\n\n"
+            "Use when:\n"
+            "- You've traced something meaningful across ≥2 tool calls\n"
+            "- The finding isn't confirmed yet (so no findings entry)\n"
+            "- Losing it to context clearing would force you to re-do work\n\n"
+            "Do NOT use for:\n"
+            "- Fleeting thoughts → keep those in your turn-level text\n"
+            "- Confirmed findings → those go in your output schema's "
+            "findings[] array, not in notes\n"
+            "- Echo-ing tool output verbatim → summarise WHY it matters\n\n"
+            "Good topics: 'auth_flow_trace', 'pkce_state_check', "
+            "'caller_of_refund'. Bad topics: 'note1', 'scratch'."
+        ),
+        "input_schema": UpdateNotesParams.model_json_schema(),
+    },
     # ------------------------------------------------------------------
     # File editing tools
     # ------------------------------------------------------------------
@@ -1733,6 +1815,12 @@ TOOL_METADATA: Dict[str, ToolMetadata] = {
     "search_facts": ToolMetadata(
         category="scratchpad",
         summary_template="search_facts tool={tool} path={path}: {_count} facts",
+    ),
+    "update_notes": ToolMetadata(
+        is_read_only=False,  # writes to the vault
+        is_concurrent_safe=True,  # SQLite WAL handles concurrent writes
+        category="scratchpad",
+        summary_template="update_notes topic={topic}: {_content_len} chars",
     ),
     # --- Brain orchestration (PR Brain v2) ---
     "dispatch_subagent": ToolMetadata(

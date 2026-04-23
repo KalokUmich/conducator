@@ -156,6 +156,7 @@ class TestStats:
             "existence_facts": 0,
             "missing_symbols": 0,
             "plan_entries": 0,
+            "notes": 0,
         }
 
 

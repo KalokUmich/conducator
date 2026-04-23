@@ -26,12 +26,20 @@ if TYPE_CHECKING:
     from .store import FactStore
 
 
-_current_store: contextvars.ContextVar[Optional["FactStore"]] = contextvars.ContextVar(
+_current_store: contextvars.ContextVar[Optional[FactStore]] = contextvars.ContextVar(
     "conductor_scratchpad_store", default=None
 )
 
+# Phase 9.9.3: track which sub-agent is currently executing so
+# `update_notes` can key notes by (agent, topic) without the agent
+# having to restate its name on every call. Set by AgentLoopService
+# at run() start, cleared at end.
+_current_agent_name: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "conductor_current_agent_name", default=None
+)
 
-def current_factstore() -> Optional["FactStore"]:
+
+def current_factstore() -> Optional[FactStore]:
     """Return the FactStore bound to the current task, or None.
 
     Safe to call anywhere in the backend — returns None when no PR review
@@ -40,8 +48,18 @@ def current_factstore() -> Optional["FactStore"]:
     return _current_store.get()
 
 
+def current_agent_name() -> Optional[str]:
+    """Return the name of the sub-agent currently executing (Phase 9.9.3).
+
+    Used by `update_notes` to key notes by (agent, topic) without the
+    agent explicitly passing its name. Returns None when called outside
+    an agent run.
+    """
+    return _current_agent_name.get()
+
+
 @contextmanager
-def bind_factstore(store: "FactStore") -> Iterator[None]:
+def bind_factstore(store: FactStore) -> Iterator[None]:
     """Bind ``store`` as the current session for the lifetime of the
     context manager. On exit, restore the previous binding (usually
     ``None``)."""
@@ -50,3 +68,14 @@ def bind_factstore(store: "FactStore") -> Iterator[None]:
         yield
     finally:
         _current_store.reset(token)
+
+
+@contextmanager
+def bind_agent_name(name: str) -> Iterator[None]:
+    """Bind ``name`` as the current agent for the lifetime of the
+    context manager. On exit, restore the previous binding."""
+    token = _current_agent_name.set(name)
+    try:
+        yield
+    finally:
+        _current_agent_name.reset(token)

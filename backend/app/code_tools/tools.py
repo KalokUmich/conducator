@@ -5387,6 +5387,85 @@ def search_facts(
 TOOL_REGISTRY["search_facts"] = search_facts
 
 
+def update_notes(
+    workspace: str,
+    topic: str,
+    content: str,
+    file_hint: Optional[str] = None,
+) -> ToolResult:
+    """Phase 9.9.3 — sub-agent structured note-taking.
+
+    Persists a scratch observation for the calling agent that survives
+    the 3-turn context-clearing policy. Keyed by (agent, topic) so an
+    agent can refine/overwrite its own prior note by reusing the topic.
+
+    The agent name is read from the ``current_agent_name`` contextvar,
+    which AgentLoopService binds at the start of each run. Outside an
+    agent context the tool falls back to ``"unknown_agent"``.
+
+    Returns success=False with a friendly message when no FactStore is
+    active (the tool is useful only inside a PR review).
+    """
+    from app.scratchpad import current_agent_name, current_factstore
+
+    store = current_factstore()
+    if store is None:
+        return ToolResult(
+            tool_name="update_notes",
+            success=False,
+            error=(
+                "No active scratchpad session. update_notes is only "
+                "useful during a PR review run (PRBrainOrchestrator "
+                "binds a FactStore)."
+            ),
+        )
+
+    topic_norm = (topic or "").strip()
+    content_norm = (content or "").strip()
+    if len(topic_norm) < 2:
+        return ToolResult(
+            tool_name="update_notes",
+            success=False,
+            error="topic must be at least 2 characters.",
+        )
+    if len(content_norm) < 10:
+        return ToolResult(
+            tool_name="update_notes",
+            success=False,
+            error="content must be at least 10 characters — don't record empty thoughts.",
+        )
+
+    agent_name = current_agent_name() or "unknown_agent"
+    try:
+        store.put_note(
+            agent=agent_name,
+            topic=topic_norm,
+            content=content_norm,
+            file_hint=(file_hint or "").strip() or None,
+        )
+    except Exception as e:
+        logger.warning("update_notes failed: %s", e)
+        return ToolResult(
+            tool_name="update_notes",
+            success=False,
+            error=f"scratchpad write failed: {e}",
+        )
+
+    return ToolResult(
+        tool_name="update_notes",
+        success=True,
+        data={
+            "agent": agent_name,
+            "topic": topic_norm,
+            "content_len": len(content_norm),
+            "file_hint": (file_hint or "").strip() or None,
+        },
+    )
+
+
+TOOL_REGISTRY["update_notes"] = update_notes
+
+
 # --- Browser tools (Playwright) ---
 try:
     from app.browser.tools import BROWSER_TOOL_REGISTRY

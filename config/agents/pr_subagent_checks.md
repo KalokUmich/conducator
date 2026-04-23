@@ -3,7 +3,7 @@ name: pr_subagent_checks
 description: "PR Brain v2 worker — answer 3 falsifiable checks on a scope-bounded slice with evidence. Returns verdicts + findings (severity=null) + unexpected_observations."
 model: explorer
 skill: pr_subagent_checks
-tools: [grep, read_file, find_symbol, file_outline, find_references, get_callers, get_callees, get_dependencies]
+tools: [grep, read_file, find_symbol, file_outline, find_references, get_callers, get_callees, get_dependencies, search_facts, update_notes]
 limits:
   max_iterations: 10
   budget_tokens: 100000

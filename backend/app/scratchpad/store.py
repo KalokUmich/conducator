@@ -116,6 +116,31 @@ _SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS notes (
+        -- Phase 9.9.3: sub-agent structured note-taking. Sub-agents
+        -- write scratch observations here mid-investigation; notes
+        -- survive the 3-turn context-clearing policy that would
+        -- otherwise truncate tool_results and thinking.
+        --
+        -- The note is keyed by (agent, topic) so an agent can refine
+        -- or overwrite its own prior note without littering. Reads
+        -- are by agent name (for replay inside the SAME agent's
+        -- later iterations) or by topic (for coordinator / sibling
+        -- agents to peek at what this agent is noticing).
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent          TEXT NOT NULL,    -- worker role / template name
+        topic          TEXT NOT NULL,    -- short slug identifying the note
+        content        TEXT NOT NULL,    -- the actual observation (≤4K chars)
+        file_hint      TEXT,             -- optional file path the note is about
+        ts_written     INTEGER NOT NULL,
+        UNIQUE(agent, topic)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_notes_agent
+        ON notes(agent)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS meta (
         k TEXT PRIMARY KEY,
         v TEXT NOT NULL
@@ -180,6 +205,26 @@ class ExistenceFact:
     exists_flag: bool
     evidence: Optional[str]
     signature_info: Optional[Dict[str, Any]]  # for kind=method: param mismatches
+    ts_written: int
+
+
+@dataclass
+class Note:
+    """Phase 9.9.3 — a sub-agent's scratch observation persisted for its
+    own later iterations (surviving the 3-turn context clearing) and
+    cross-agent peeking.
+
+    Keyed by (agent, topic) — an agent can refine or overwrite its own
+    prior note without littering. The topic is a short slug ("auth_flow",
+    "validate_fn_signature") so the same agent can maintain a handful of
+    coherent running observations.
+    """
+
+    id: int
+    agent: str
+    topic: str
+    content: str
+    file_hint: Optional[str]
     ts_written: int
 
 
@@ -567,6 +612,82 @@ class FactStore:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    # --- Phase 9.9.3: sub-agent notes -------------------------------------
+
+    def put_note(
+        self,
+        *,
+        agent: str,
+        topic: str,
+        content: str,
+        file_hint: Optional[str] = None,
+    ) -> None:
+        """Upsert a note by (agent, topic). Idempotent — writing the
+        same (agent, topic) twice overwrites the prior content."""
+        self._conn().execute(
+            """
+            INSERT INTO notes (agent, topic, content, file_hint, ts_written)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(agent, topic) DO UPDATE SET
+                content = excluded.content,
+                file_hint = excluded.file_hint,
+                ts_written = excluded.ts_written
+            """,
+            (
+                agent[:64],
+                topic[:64],
+                content[:4000],
+                (file_hint or None) if not file_hint else file_hint[:512],
+                int(time.time() * 1000),
+            ),
+        )
+        self._conn().commit()
+
+    def iter_notes_by_agent(self, agent: str) -> List[Note]:
+        """All notes written by one agent, latest-first. Used by the
+        agent to restore its own observations after context clearing.
+
+        Tiebreaker ``id DESC`` ensures deterministic order when two
+        notes happen to share a ms timestamp.
+        """
+        rows = self._conn().execute(
+            "SELECT * FROM notes WHERE agent = ? ORDER BY ts_written DESC, id DESC",
+            (agent[:64],),
+        ).fetchall()
+        return [
+            Note(
+                id=r["id"],
+                agent=r["agent"],
+                topic=r["topic"],
+                content=r["content"],
+                file_hint=r["file_hint"],
+                ts_written=r["ts_written"],
+            )
+            for r in rows
+        ]
+
+    def iter_all_notes(self) -> List[Note]:
+        """All notes across all agents, latest-first. Used by the
+        coordinator's Synthesize step and by the INDEX CLI dump.
+
+        Tiebreaker ``id DESC`` ensures deterministic order when notes
+        share a ms timestamp.
+        """
+        rows = self._conn().execute(
+            "SELECT * FROM notes ORDER BY ts_written DESC, id DESC"
+        ).fetchall()
+        return [
+            Note(
+                id=r["id"],
+                agent=r["agent"],
+                topic=r["topic"],
+                content=r["content"],
+                file_hint=r["file_hint"],
+                ts_written=r["ts_written"],
+            )
+            for r in rows
+        ]
+
     # --- inspection --------------------------------------------------------
 
     def stats(self) -> Dict[str, int]:
@@ -581,6 +702,7 @@ class FactStore:
                 "SELECT COUNT(*) FROM existence_facts WHERE exists_flag = 0"
             ).fetchone()[0],
             "plan_entries": c.execute("SELECT COUNT(*) FROM plan_memory").fetchone()[0],
+            "notes": c.execute("SELECT COUNT(*) FROM notes").fetchone()[0],
         }
 
     def facts_by_tool(self, tool: str) -> List[Fact]:

@@ -28,7 +28,12 @@ Public surface:
         Root directory for session DBs, startup sweep of abandoned ones.
 """
 
-from .context import bind_factstore, current_factstore
+from .context import (
+    bind_agent_name,
+    bind_factstore,
+    current_agent_name,
+    current_factstore,
+)
 from .executor import CachedToolExecutor
 from .inflight import key_lock
 from .keys import (
@@ -45,6 +50,7 @@ from .store import (
     Fact,
     FactStore,
     NegativeFact,
+    Note,
     PlanEntry,
     sweep_orphans,
 )
@@ -59,9 +65,12 @@ __all__ = [
     "Fact",
     "FactStore",
     "NegativeFact",
+    "Note",
     "PlanEntry",
+    "bind_agent_name",
     "bind_factstore",
     "build_key",
+    "current_agent_name",
     "current_factstore",
     "extract_path",
     "extract_range",
