@@ -31,6 +31,8 @@ make test-parity    # validate Python↔TS tool parity
 make lint           # lint backend Python (ruff, auto-fix)
 make format         # format backend Python (black + ruff format)
 make lint-check     # lint + format check (CI mode, no changes)
+make typecheck-strict  # mypy on strict-audit modules (Phase 11.3; must pass)
+make typecheck      # mypy across full backend (informational — legacy has ~40 known errors)
 make langfuse-up    # start self-hosted Langfuse (port 3001)
 make update-prompt-library   # download latest prompts.chat CSV (agent design reference)
 ```
@@ -97,12 +99,14 @@ See `docs/GUIDE.md` §21.7 for the full variable reference.
 
 ## Code Quality
 
-Backend Python code is enforced by **ruff** (linter + isort) and **black** (formatter), configured in `pyproject.toml`.
+Backend Python code is enforced by **ruff** (linter + isort), **black** (formatter), and **mypy** (type checker on audited modules), all configured in `pyproject.toml`.
 
 - `make lint` — auto-fix lint issues
 - `make format` — auto-format with black + ruff
 - `make lint-check` — CI mode (no changes, exits non-zero on violation)
-- All new code must pass `make lint-check` before commit
+- `make typecheck-strict` — mypy on the Phase 11.3 strict-audit module list (`code_review/splitter.py`, `code_review/translate.py`, `scratchpad/`). Must pass.
+- `make typecheck` — mypy on the full backend, informational. Legacy modules (ai_provider resolver, older tool helpers) have known type debt; goal is to reduce the permissive-module list over time.
+- All new code must pass `make lint-check` + `make typecheck-strict` before commit
 - Pre-commit hooks available: `pip install pre-commit && pre-commit install`
 
 Extension TypeScript uses ESLint (`.eslintrc.json`) with safety rules (`semi`, `curly`, `eqeqeq`, `no-throw-literal`) set to `error`.

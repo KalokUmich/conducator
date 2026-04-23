@@ -562,9 +562,10 @@ class FactStore:
         ]
 
     def count_plan_entries(self) -> int:
-        return self._conn().execute(
+        row = self._conn().execute(
             "SELECT COUNT(*) FROM plan_memory"
-        ).fetchone()[0]
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     # --- inspection --------------------------------------------------------
 

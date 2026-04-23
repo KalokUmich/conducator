@@ -20,18 +20,18 @@ from __future__ import annotations
 
 import contextvars
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
 
 if TYPE_CHECKING:
     from .store import FactStore
 
 
-_current_store: contextvars.ContextVar[Optional[FactStore]] = contextvars.ContextVar(
+_current_store: contextvars.ContextVar[Optional["FactStore"]] = contextvars.ContextVar(
     "conductor_scratchpad_store", default=None
 )
 
 
-def current_factstore() -> Optional[FactStore]:
+def current_factstore() -> Optional["FactStore"]:
     """Return the FactStore bound to the current task, or None.
 
     Safe to call anywhere in the backend — returns None when no PR review
@@ -41,7 +41,7 @@ def current_factstore() -> Optional[FactStore]:
 
 
 @contextmanager
-def bind_factstore(store: FactStore):
+def bind_factstore(store: "FactStore") -> Iterator[None]:
     """Bind ``store`` as the current session for the lifetime of the
     context manager. On exit, restore the previous binding (usually
     ``None``)."""

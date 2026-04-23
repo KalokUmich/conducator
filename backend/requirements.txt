@@ -48,6 +48,7 @@ langfuse>=2.0,<3.0
 # After install: playwright install chromium
 playwright>=1.40
 
-# --- Dev tools (linting + formatting) ---
+# --- Dev tools (linting + formatting + typecheck) ---
 ruff>=0.11.0
 black>=25.1.0
+mypy>=1.14.0

@@ -483,6 +483,28 @@ lint-check:
 	cd backend && $(PYTHON) -m black --check .
 	@echo "All lint checks passed."
 
+## Type-check strict-audit modules (Phase 11.3). Expects zero errors.
+## Permissive across the rest of the codebase — legacy modules have
+## accumulated type debt that's out of scope for this phase.
+.PHONY: typecheck-strict
+typecheck-strict:
+	@echo "Type-checking strict modules..."
+	$(PYTHON) -m mypy \
+	  backend/app/code_review/splitter.py \
+	  backend/app/code_review/translate.py \
+	  backend/app/scratchpad/
+	@echo "Strict-module typecheck passed."
+
+## Type-check the whole backend (informational — does NOT gate CI yet).
+## Reports ~40 pre-existing errors mostly in ai_provider resolver +
+## older tool helpers. Used to track progress reducing the permissive
+## module list as legacy code gets annotated.
+.PHONY: typecheck
+typecheck:
+	@echo "Type-checking full backend (informational)..."
+	$(PYTHON) -m mypy backend/app || true
+	@echo "Full typecheck complete."
+
 # ===========================
 # Clean
 # ===========================

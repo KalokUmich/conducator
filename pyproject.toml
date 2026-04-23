@@ -53,3 +53,62 @@ known-first-party = ["app"]
 [tool.black]
 target-version = ["py312"]
 line-length = 120
+
+# ---------------------------------------------------------------------------
+# Mypy — static type checker (Phase 11.3)
+# ---------------------------------------------------------------------------
+# Strategy: the codebase has ~2000 existing type errors in legacy modules
+# (resolver.py, wrapper.py, older tool helpers). Rather than block on
+# fixing all of them, we check the SELECTED high-quality modules in
+# strict mode and keep the rest in permissive (ignore_errors) mode. New
+# code should ship under the strict-checked modules and reduce the
+# permissive list over time.
+#
+# Usage:
+#   make typecheck          # run mypy across the repo
+#   make typecheck-strict   # only the strict-checked modules
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "backend"
+explicit_package_bases = true
+namespace_packages = true
+# Base config — permissive. Override per-module below.
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = false
+warn_redundant_casts = true
+no_implicit_optional = false  # legacy code relies on implicit None defaults
+check_untyped_defs = false
+disallow_untyped_defs = false
+
+# --- Strict-checked modules (reviewed, fully annotated) ---
+[[tool.mypy.overrides]]
+module = [
+    "app.code_review.splitter",
+    "app.code_review.translate",
+    "app.scratchpad.*",
+]
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_return_any = true
+strict_equality = true
+check_untyped_defs = true
+
+# --- Legacy / 3rd-party stubs missing — ignore import errors ---
+[[tool.mypy.overrides]]
+module = [
+    "cocoindex.*",
+    "sentence_transformers.*",
+    "sqlite_vec.*",
+    "tree_sitter.*",
+    "tree_sitter_language_pack.*",
+    "ast_grep_py.*",
+    "networkx.*",
+    "playwright.*",
+]
+ignore_missing_imports = true
+
+# --- Tests — skip strict checking (many MagicMock / fixture patterns) ---
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import UTC, datetime
+from typing import Optional
 
 from .store import SCRATCHPAD_ROOT, FactStore, sweep_orphans
 
@@ -25,7 +26,7 @@ def _fmt_ts(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _cmd_list(_args) -> int:
+def _cmd_list(_args: argparse.Namespace) -> int:
     """List scratchpad session files with basic stats."""
     if not SCRATCHPAD_ROOT.exists():
         print(f"No scratchpad directory at {SCRATCHPAD_ROOT}", file=sys.stderr)
@@ -62,7 +63,7 @@ def _cmd_list(_args) -> int:
     return 0
 
 
-def _cmd_dump(args) -> int:
+def _cmd_dump(args: argparse.Namespace) -> int:
     """Render a session's facts as a paper-style markdown INDEX."""
     db_path = SCRATCHPAD_ROOT / f"{args.session_id}.sqlite"
     if not db_path.exists():
@@ -157,7 +158,7 @@ def _cmd_dump(args) -> int:
     return 0
 
 
-def _cmd_sweep(args) -> int:
+def _cmd_sweep(args: argparse.Namespace) -> int:
     """Remove session DBs older than --hours (default 24)."""
     removed = sweep_orphans(max_age_hours=args.hours)
     if not removed:
@@ -169,7 +170,7 @@ def _cmd_sweep(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m app.scratchpad",
         description="Inspect per-session Fact Vault SQLite files.",
