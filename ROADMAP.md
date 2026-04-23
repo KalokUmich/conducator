@@ -315,7 +315,7 @@ Standalone eval system in `eval/` for measuring `PRBrainOrchestrator` (v2 coordi
 The keyword/risk-pattern classifier + YAML route system has been **removed**. All
 multi-agent orchestration now goes through the **Brain orchestrator** (see
 "Brain Orchestrator" milestone). Agent definitions live in `config/agents/*.md`,
-swarm presets in `config/swarms/*.yaml`, brain configs in `config/brain.yaml`
+swarm presets in `config/swarms/*.yaml`, brain configs in `config/brains/*.yaml`
 and `config/brains/*.yaml`. The historical workflow engine modules
 (`classifier_engine.py`, `mermaid.py`, the `/api/workflows` REST endpoints, and
 `config/workflows/*.yaml`) were deleted.

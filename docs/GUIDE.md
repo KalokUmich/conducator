@@ -486,7 +486,7 @@ backend/
 ├── config/
 │   ├── conductor.settings.yaml    # 非敏感设置（已提交）
 │   ├── conductor.secrets.yaml     # API 密钥等敏感信息（gitignore）
-│   ├── brain.yaml                 # Brain 限制 + core_tools
+│   ├── brains/default.yaml        # 默认 Brain 限制 + core_tools（已从 config/brain.yaml 挪入 brains/）
 │   ├── brains/
 │   │   └── pr_review.yaml         # PR Brain 配置（review agents、budget weights、post_processing）
 │   ├── agents/                    # Agent 定义文件（YAML frontmatter + Markdown 正文）
@@ -863,7 +863,7 @@ L1: Identity（系统提示词，每个 Agent 独有）
     └── 答案格式：必须包含文件:行号引用，代码块引用实际代码
 
 L2: Tools（按查询类型精选工具集）
-    ├── brain.yaml core_tools ∪ agent .md 配置的专用工具
+    ├── brains/default.yaml core_tools ∪ agent .md 配置的专用工具
     └── 工具描述丰富化：3-4 句，何时用 / 何时不用 / 不返回什么
 
 L3: Skills & Guidelines（Agent 间共享上下文）

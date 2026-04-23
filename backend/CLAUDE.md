@@ -80,7 +80,7 @@ Query → Brain (Sonnet, meta-tools: dispatch_agent, dispatch_swarm, transfer_to
 
 **Sub-agent prompt assembly (4-layer):**
 - **Layer 1 (system prompt)**: Built per-agent from `.md` description + instructions — defines who this agent is. Includes anti-overexploration guidance ("commit to a direction, stop when you have enough evidence").
-- **Layer 2 (tools)**: `brain.yaml` core_tools ∪ agent `.md` tools ∪ signal_blocker. Tool descriptions enriched to 3-4 sentences each (when to use, when NOT to use, what it does NOT return).
+- **Layer 2 (tools)**: `brains/default.yaml` core_tools ∪ agent `.md` tools ∪ signal_blocker. Tool descriptions enriched to 3-4 sentences each (when to use, when NOT to use, what it does NOT return).
 - **Layer 3 (skills)**: Workspace layout, project docs, investigation patterns, risk signals, budget — shared across agents. PR review agents get `code_review_pr` skill. Business flow agents get 4-step investigation skill (identify targets → domain models → service code → separate mandatory vs conditional). Includes convergence guidance ("stop at iteration 6-7 if you have strong evidence").
 - **Layer 4 (user message)**: The query from Brain + optional code_context — no role injection
 
@@ -142,7 +142,7 @@ Key designs:
 - **Dimension vs scoped dispatch**: scoped (`dispatch_subagent`) decomposes by file-range, dimension (`dispatch_dimension_worker`) decomposes by bug class. Cross-file pattern (e.g. new contract on a function called from 3+ files) is dimension's case; localised invariant checks are scoped's.
 
 **Configuration:**
-- `config/brain.yaml` — Brain limits (iterations, budget, concurrency, timeout) + core_tools
+- `config/brains/default.yaml` — General Brain limits (iterations, budget, concurrency, timeout) + core_tools
 - `config/brains/pr_review.yaml` — PR Brain limits + post_processing settings
 - `config/agent_factory/*.md` — 7 role templates (security / correctness / concurrency / reliability / performance / test_coverage / api_contract)
 - `config/agents/*.md` — v2 worker agents (pr_existence_check, pr_subagent_checks, pr_verification_batch, pr_verification_single) + business-flow swarm agents

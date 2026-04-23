@@ -160,24 +160,29 @@ def load_agent(path: str) -> AgentConfig:
 
 
 def load_brain_config() -> BrainConfig:
-    """Load the Brain orchestrator configuration from brain.yaml.
+    """Load the general-purpose Brain orchestrator configuration from
+    ``config/brains/default.yaml``.
+
+    This is the "default" (general code-exploration) Brain; specialised
+    Brains live alongside in ``config/brains/*.yaml`` (e.g.
+    ``pr_review.yaml``).
 
     Returns:
         BrainConfig with limits, core_tools, and model settings.
-        Falls back to defaults if brain.yaml doesn't exist.
+        Falls back to defaults if brains/default.yaml doesn't exist.
     """
     try:
-        resolved = _resolve_path("brain.yaml")
+        resolved = _resolve_path("brains/default.yaml")
         data = yaml.safe_load(resolved.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            logger.warning("brain.yaml is not a mapping, using defaults")
+            logger.warning("brains/default.yaml is not a mapping, using defaults")
             return BrainConfig()
         return BrainConfig(**data)
     except FileNotFoundError:
-        logger.info("brain.yaml not found, using default Brain config")
+        logger.info("brains/default.yaml not found, using default Brain config")
         return BrainConfig()
     except Exception as exc:
-        logger.warning("Failed to load brain.yaml: %s — using defaults", exc)
+        logger.warning("Failed to load brains/default.yaml: %s — using defaults", exc)
         return BrainConfig()
 
 

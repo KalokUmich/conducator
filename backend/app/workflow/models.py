@@ -2,7 +2,7 @@
 
 Validates:
   - Agent .md frontmatter (YAML between --- markers)
-  - Brain config (``brain.yaml``) and PR Brain config (``brains/pr_review.yaml``)
+  - Brain configs (``brains/default.yaml``, ``brains/pr_review.yaml``)
   - Swarm preset configs (``swarms/*.yaml``)
 """
 
@@ -116,7 +116,7 @@ class AgentConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Brain orchestrator config (loaded from brain.yaml)
+# Brain orchestrator config (loaded from brains/default.yaml)
 # ---------------------------------------------------------------------------
 
 
@@ -132,7 +132,7 @@ class BrainLimits(BaseModel):
 
 
 class BrainConfig(BaseModel):
-    """Brain orchestrator configuration, loaded from brain.yaml."""
+    """Brain orchestrator configuration, loaded from brains/default.yaml."""
 
     model: str = "strong"
     limits: BrainLimits = Field(default_factory=BrainLimits)

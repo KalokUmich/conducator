@@ -488,7 +488,7 @@ backend/
 ├── config/
 │   ├── conductor.settings.yaml    # Non-sensitive settings (committed)
 │   ├── conductor.secrets.yaml     # Sensitive info like API keys (gitignored)
-│   ├── brain.yaml                 # Brain limits + core_tools
+│   ├── brains/default.yaml        # Default Brain limits + core_tools (moved from config/brain.yaml)
 │   ├── brains/
 │   │   └── pr_review.yaml         # PR Brain config (review agents, budget weights, post_processing)
 │   ├── agents/                    # Agent definition files (YAML frontmatter + Markdown body)
@@ -865,7 +865,7 @@ L1: Identity (system prompt, unique to each agent)
     └── Answer format: must include file:line references, code blocks must quote real code
 
 L2: Tools (curated tool set per query type)
-    ├── brain.yaml core_tools ∪ tools configured in the agent .md
+    ├── brains/default.yaml core_tools ∪ tools configured in the agent .md
     └── Enriched tool descriptions: 3-4 sentences, when to use / when not to / what it doesn't return
 
 L3: Skills & Guidelines (context shared across agents)

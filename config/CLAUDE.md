@@ -6,8 +6,8 @@
 config/
 ├── conductor.settings.yaml  # Non-sensitive settings (committed)
 ├── conductor.secrets.yaml   # Secrets (gitignored)
-├── brain.yaml               # Brain orchestrator config (limits, core_tools, model)
-├── brains/                  # Specialized Brain configs
+├── brains/                  # All Brain configs (general + specialised)
+│   ├── default.yaml         # General-purpose Brain (code exploration, Q&A) — limits, core_tools, model
 │   └── pr_review.yaml       # PR Brain v2 config (budget_weights, post_processing)
 ├── agents/                  # Active dispatchable agents (Brain loads the whole file as system prompt)
 │   ├── pr_existence_check.md      # Phase 2 LLM worker (signature-level checks post v2u)
