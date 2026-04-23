@@ -8,14 +8,16 @@ backend/app/
 ├── config.py                # Settings + Secrets from YAML
 ├── agent_loop/              # Agentic code intelligence (LLM + tools)
 │   ├── service.py           # AgentLoopService — LLM loop, tool dispatch
-│   ├── brain.py             # AgentToolExecutor — dispatch_agent/dispatch_swarm/transfer_to_brain
-│   ├── pr_brain.py          # PRBrainOrchestrator — deterministic PR review pipeline via Brain
+│   ├── brain.py             # AgentToolExecutor — dispatch_agent/dispatch_swarm/transfer_to_brain/dispatch_subagent/dispatch_dimension_worker
+│   ├── pr_brain.py          # PRBrainOrchestrator — v2 coordinator-worker PR review pipeline
+│   ├── forked.py            # Phase 9.16 fork_call primitive — cache-reuse verifier dispatch (bypasses AgentLoopService)
+│   ├── lifecycle.py         # Phase 9.17 hook registry — 4 extension points around the Brain pipeline
 │   ├── budget.py            # BudgetController — token-based budget management
 │   ├── trace.py             # SessionTrace — per-session trace (Postgres + local JSON fallback)
 │   ├── evidence.py          # EvidenceEvaluator — rule-based answer quality check
 │   ├── completeness.py      # CompletenessCheck — verifies answer covers all query aspects
 │   ├── interactive.py       # ask_user coordination (register/submit/cleanup)
-│   ├── prompts.py           # 4-layer prompt architecture (Identity + Tools + Skills + Task)
+│   ├── prompts.py           # 4-layer prompt architecture (Identity + Tools + Skills + Task); loads `config/skills/*.md`
 │   └── router.py            # POST /api/context/query
 ├── chat/                    # WebSocket chat + persistence
 │   ├── manager.py           # ConnectionManager — WebSocket room management
@@ -39,7 +41,7 @@ backend/app/
 │   ├── risk_classifier.py   # Risk classification (5 dimensions)
 │   ├── ranking.py           # Score and rank findings
 │   └── dedup.py             # Merge and deduplicate findings
-├── code_tools/              # 45 tools (code + file-edit + Jira + browser + Fact Vault + Brain primitives) + ToolMetadata
+├── code_tools/              # 46 tools (code + file-edit + Jira + browser + Fact Vault + notes + Brain primitives) + ToolMetadata
 │   ├── schemas.py           # Pydantic models + TOOL_DEFINITIONS + ToolMetadata (43 entries)
 │   ├── tools.py             # Tool implementations (including glob, enhanced grep, search_facts)
 │   ├── output_policy.py     # Per-tool truncation policies (budget-adaptive)
@@ -151,13 +153,17 @@ Key designs:
 
 **Interactive AI:** Brain can `ask_user` for clarification when queries have multiple valid directions. Q&A answers are cached in session and injected into Brain's prompt for reuse across sub-agents.
 
-**45 tools** across 3 registries + 1 Brain orchestration:
-- **Code tools** (32, `code_tools/tools.py`): `grep` (with output_mode, context_lines, case_insensitive, multiline, file_type), `read_file`, `list_files`, `glob`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `git_diff_files`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `git_hotspots`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`, `detect_patterns`, `run_test`, `list_endpoints`, `extract_docstrings`, `db_schema`, `file_edit`, `file_write`, **`search_facts`** (Phase 9.15).
+**46 tools** across 3 registries + 1 Brain orchestration:
+- **Code tools** (33, `code_tools/tools.py`): `grep` (with output_mode, context_lines, case_insensitive, multiline, file_type), `read_file`, `list_files`, `glob`, `find_symbol`, `find_references`, `file_outline`, `get_dependencies`, `get_dependents`, `git_log`, `git_diff`, `git_diff_files`, `ast_search`, `get_callees`, `get_callers`, `git_blame`, `git_show`, `git_hotspots`, `find_tests`, `test_outline`, `trace_variable`, `compressed_view`, `module_summary`, `expand_symbol`, `detect_patterns`, `run_test`, `list_endpoints`, `extract_docstrings`, `db_schema`, `file_edit`, `file_write`, **`search_facts`** (Phase 9.15), **`update_notes`** (Phase 9.9.3 — sub-agent scratch notes keyed by (agent, topic), survives context clearing).
 - **Jira tools** (5, `integrations/jira/tools.py`): `jira_search` (with convenience JQL: "my tickets", "my sprint", "blockers"), `jira_get_issue`, `jira_create_issue`, `jira_update_issue`, `jira_list_projects`.
 - **Browser tools** (6, `browser/tools.py`): `web_search`, `web_navigate`, `web_click`, `web_fill`, `web_screenshot`, `web_extract`.
 - **Brain orchestration tools** (6, `BRAIN_TOOL_DEFINITIONS`): `create_plan`, `dispatch_agent`, `dispatch_swarm`, **`dispatch_subagent`** (PR Brain v2 scoped primitive), **`dispatch_dimension_worker`** (P12b full-diff through one lens), `transfer_to_brain`. Only the coordinator sees these.
 
-**Tool metadata** (`code_tools/schemas.py`): `ToolMetadata` dataclass with `is_read_only`, `is_concurrent_safe`, `summary_template`, `category` for all 45 tools. Used by `_clear_old_tool_results()` for readable context compaction summaries.
+**Tool metadata** (`code_tools/schemas.py`): `ToolMetadata` dataclass with `is_read_only`, `is_concurrent_safe`, `summary_template`, `category` for all 46 tools. Used by `_clear_old_tool_results()` for readable context compaction summaries.
+
+**Forked agent pattern** (Phase 9.16, `app/agent_loop/forked.py`): the `fork_call(provider, system_prompt, user_message, max_tokens)` primitive replaces AgentLoopService-based dispatch for P11 verifier calls (single + batch). Bypasses the full agent-loop cold-start: no fresh tool definitions, no iteration tracking, no evidence gate. The caller composes a cache-stable system prompt (PR context prefix + verifier skill), and subsequent verifier calls within the same PR review hit the prompt cache → ~90% input-cost reduction on verifier dispatches.
+
+**Brain lifecycle hooks** (Phase 9.17, `app/agent_loop/lifecycle.py`): `register_hook(name, callback)` + `fire_hook(name, orchestrator, data)` for 4 extension points: `on_survey_complete` (after Phase 1 pre-compute), `on_dispatch_complete` (coordinator returned draft, before precision filter), `on_synthesize_complete` (findings + synthesis ready), `on_task_end` (cleanup beginning, fires BEFORE scratchpad delete so consumers can read vault one last time). Fire-and-forget — callback exceptions are logged and swallowed, never crash the Brain.
 
 **PR-review scratchpad** (Phase 9.15, `app/scratchpad/`): On each PR review start, `PRBrainOrchestrator` opens a per-session SQLite at `~/.conductor/scratchpad/{task_id}-{uuid}.sqlite` and wraps the tool executor with `CachedToolExecutor`. Sub-agent tool calls are transparently deduplicated via exact-key lookup or range-intersection (read_file 100-150 satisfies later 101-130). `search_facts` lets sub-agents query the vault metadata directly. Session file + WAL sidecars are deleted on `cleanup()`. Human-readable `task_id` (e.g. `ado-MyProject-pr-12345`) is folded into the filename so concurrent PR reviews are traceable in activity logs.
 

@@ -126,9 +126,12 @@ See [ROADMAP.md](ROADMAP.md). Near-term priorities (2026-04):
 
 **Recently shipped (PR Brain v2 productisation):**
 - **Phase 9.13 PR Brain v2** — coordinator-worker agent-as-tool architecture with `dispatch_subagent` (file-range scoped, 3 checks) + `dispatch_dimension_worker` (full-diff through one role lens); 7 agent_factory role templates; legacy v1 fleet deleted.
-- **Phase 9.15 Fact Vault** — task-scoped SQLite cache shared across sub-agents, existence facts, skip-list, plan memory.
+- **Phase 9.15 Fact Vault** — task-scoped SQLite cache shared across sub-agents, existence facts, skip-list, plan memory, + **Phase 9.9.3 structured notes** (`update_notes` tool lets sub-agents persist scratch observations that survive the 3-turn context-clearing policy).
+- **Phase 9.16 Forked agent pattern** — `fork_call` primitive replaces AgentLoopService dispatch for P11 verifier calls. Cache-stable PR-context prefix + ~90% input cost reduction per verifier call.
+- **Phase 9.17 Brain lifecycle hooks** — 4 extension points (`on_survey_complete`, `on_dispatch_complete`, `on_synthesize_complete`, `on_task_end`). Fire-and-forget; exceptions swallowed. First consumer: scratchpad cleanup on `on_task_end`. Platform for future telemetry / consolidation / risk-classifier plugins.
 - **Phase 9.18 tree-sitter hardening** — subprocess-isolated parser with SIGKILL-on-timeout; JSX-depth heuristic routes large TSX to regex; tree-sitter 0.25 + language-pack.
 - **Phase 7.8 Azure DevOps Auto Review** — size gates (50-2200 lines), `translate_pr_summary` platform-shaped comments, mandatory-dispatch detector (Tier 1 path + Tier 2 `+`-line content), PR splitter (7.8.5) with teach-not-command rationales.
+- **Phase 11.3 Type checking** — mypy strict-audit baseline on `code_review.splitter` / `translate` / `scratchpad/*`; CI gate for new annotated code. Full backend lint-checked with ~140 legacy debt entries tracked.
 - **v2u Phase 2 reorder** — P13 deterministic (Python/Go/Java import scanners) runs BEFORE LLM existence worker; worker sees "Pre-verified by P13" block and focuses on 5 signature-level checks; timeout 120s → 60s. Sentry composite 0.796 → 0.834 (+0.038), catch 7/10 → 8/10, zero OOM after Makefile serial-suite fix.
 
 **Immediate (Sprint 14–16):**

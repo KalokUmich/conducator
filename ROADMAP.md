@@ -1778,10 +1778,10 @@ Bridge the gap between AI Summaries and actionable outcomes. Applies to both Ext
 | **Phase 9.13+: v2s mandatory dispatch (path + content tiers, coordinator cardinal rule)** | **✅ Complete** | **Sprint 17** |
 | **Phase 9.13+: v2u Phase 2 reorder (P13 first, LLM signature-focus, 60s timeout)** | **✅ Complete** | **Sprint 17** |
 | **Phase 7.8.5: PR Splitter (single-shot, teach-not-command rationales)** | **✅ Complete** | **Sprint 17** |
-| **Phase 9.16: Forked Agent Pattern** | **🟡 Planned** | **Sprint 18** |
-| **Phase 9.17: Brain Lifecycle Hooks** | **🟡 Planned** | **Sprint 18** |
-| **Phase 9.9.3: Structured Note-Taking for sub-agents** | **🟡 Planned** | **Sprint 18** |
-| **Phase 11.3: Type Checking (mypy / pyright)** | **🟡 Planned** | **Sprint 18** |
+| **Phase 9.9.3: Structured Note-Taking for sub-agents** | **✅ Complete** | **Sprint 18** |
+| **Phase 9.16: Forked Agent Pattern (P11 verifier cache reuse)** | **✅ Complete** | **Sprint 18** |
+| **Phase 9.17: Brain Lifecycle Hooks (4 extension points)** | **✅ Complete** | **Sprint 18** |
+| **Phase 11.3: Type Checking (mypy strict-audit baseline)** | **✅ Complete** | **Sprint 18** |
 | Phase 10: Companion & Developer Experience | 🟡 Planned | — |
 | Phase 11: Engineering Infrastructure | 🟡 Planned | — |
 | **Phase 12: Team Knowledge Base** | **🔴 Next Up** | **Sprint 14–15** |
