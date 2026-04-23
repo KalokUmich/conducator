@@ -1841,11 +1841,20 @@ class PRBrainOrchestrator:
         refuted_count = 0
         unclear_after_verify: List[Dict[str, Any]] = []
 
+        # Phase 9.16 — build the verifier system prefix ONCE per
+        # _apply_v2_precision_filter call. Skill text + PR context are
+        # identical across every verifier invocation in this PR review,
+        # so structuring them as the cache-stable prefix lets calls 2..N
+        # hit the prompt cache (input cost ~10% of fresh).
+        verifier_prefix = self._build_verifier_system_prefix(
+            pr_context, file_diffs,
+        )
+
         if unclear:
             if len(unclear) <= 2:
-                # Haiku per-finding
+                # Fast tier per-finding (forked — no AgentLoopService overhead)
                 for f in unclear:
-                    verdict = await self._verify_single(executor, f, file_diffs)
+                    verdict = await self._verify_single(f, file_diffs, verifier_prefix)
                     if verdict == "confirmed":
                         confirmed_from_verifier.append(f)
                     elif verdict == "refuted":
@@ -1853,8 +1862,8 @@ class PRBrainOrchestrator:
                     else:
                         unclear_after_verify.append(f)
             else:
-                # Sonnet batch — amortize context via prompt cache
-                results = await self._verify_batch(executor, unclear, file_diffs)
+                # Strong tier batch (forked — same prefix amortized via cache)
+                results = await self._verify_batch(unclear, file_diffs, verifier_prefix)
                 for f, verdict in zip(unclear, results):
                     if verdict == "confirmed":
                         confirmed_from_verifier.append(f)
@@ -1926,11 +1935,51 @@ class PRBrainOrchestrator:
             },
         }
 
-    async def _verify_single(
-        self, executor, finding: Dict[str, Any], file_diffs: Dict[str, str],
+    def _build_verifier_system_prefix(
+        self, pr_context: PRContext, file_diffs: Dict[str, str],
     ) -> str:
-        """Dispatch one Haiku verifier on a single finding. Returns verdict
-        string: 'confirmed' | 'refuted' | 'unclear'."""
+        """Phase 9.16 — assemble the verifier's static system prefix.
+
+        Same content for every verifier invocation in this PR review.
+        Structured so calls 2..N hit the provider's prompt cache:
+
+            [pr_verification_check skill]      ← from INVESTIGATION_SKILLS
+            [PR title + description]           ← stable per-PR
+            [PR diff text]                     ← stable per-PR (≤30K chars)
+
+        The user message (per-finding details) is the only varying part
+        across verifier calls.
+        """
+        from app.agent_loop.forked import build_pr_context_prefix
+        from app.agent_loop.prompts import INVESTIGATION_SKILLS
+
+        skill_text = INVESTIGATION_SKILLS.get("pr_verification_check", "")
+        # Render the same per-file ```diff blocks the coordinator already uses
+        # — keeps the cache-key shape identical across verifier and coordinator
+        # calls within the session (free cache hits).
+        diff_block_lines: List[str] = []
+        for path, diff_text in file_diffs.items():
+            diff_block_lines.append(f"### `{path}`\n```diff\n{diff_text}\n```")
+        diff_text = "\n\n".join(diff_block_lines)
+
+        ctx_prefix = build_pr_context_prefix(
+            pr_title=self._pr_title,
+            pr_description=self._pr_description,
+            file_diffs_text=diff_text,
+        )
+        return f"{skill_text}\n\n{ctx_prefix}".strip()
+
+    async def _verify_single(
+        self, finding: Dict[str, Any], file_diffs: Dict[str, str],
+        system_prefix: str,
+    ) -> str:
+        """Phase 9.16 forked verifier — single finding via fork_call.
+
+        Uses the explorer-tier provider (fast). Returns verdict string:
+        'confirmed' | 'refuted' | 'unclear' (the latter on any failure).
+        """
+        from app.agent_loop.forked import fork_call
+
         title = finding.get("title", "")
         file_ = finding.get("file", "")
         start = finding.get("start_line", 0)
@@ -1939,41 +1988,43 @@ class PRBrainOrchestrator:
         if isinstance(evidence_hint, list):
             evidence_hint = "; ".join(str(e) for e in evidence_hint[:3])
 
-        diff_snippet = file_diffs.get(file_, "")[:4000]
-
-        query = (
+        user_message = (
             f"# Verify this single finding\n\n"
             f"**Title**: {title}\n"
             f"**File**: {file_}\n"
             f"**Lines**: {start}-{end}\n"
             f"**Original confidence**: {finding.get('confidence', 0)}\n"
             f"**Agent's evidence claim**: {evidence_hint}\n\n"
-            f"## File diff (relevant)\n\n"
-            f"```diff\n{diff_snippet}\n```\n\n"
             f"Return the JSON verdict from your system prompt."
         )
 
-        result = await executor.execute(
-            "dispatch_agent",
-            {
-                "template": "pr_verification_single",
-                "query": query,
-                "budget_weight": 0.3,
-            },
+        raw = await fork_call(
+            provider=self._explorer_provider,
+            system_prompt=system_prefix,
+            user_message=user_message,
+            max_tokens=600,
+            label=f"verify_single:{file_}:{start}",
         )
-        if not result.success:
+        if not raw:
             return "unclear"
-
-        data = result.data or {}
-        raw = data.get("answer") or data.get("final_answer") or ""
-        verdict = _extract_single_verdict(raw)
-        return verdict
+        return _extract_single_verdict(raw)
 
     async def _verify_batch(
-        self, executor, unclear: List[Dict[str, Any]], file_diffs: Dict[str, str],
+        self, unclear: List[Dict[str, Any]], file_diffs: Dict[str, str],
+        system_prefix: str,
     ) -> List[str]:
-        """Dispatch one Sonnet verifier on N>=3 findings. Returns list of
-        verdict strings, in the same order as input."""
+        """Phase 9.16 forked verifier — N>=3 findings via fork_call.
+
+        Uses the strong-tier provider (more capacity for cross-finding
+        reasoning). Returns one verdict per input finding, same order.
+
+        The PR diff is in the cached system_prefix already, so the
+        per-call user message only carries the findings list — no need
+        to re-include diff snippets here. That cuts ~10K tokens off
+        the per-call cost AND lets the cache prefix stay stable.
+        """
+        from app.agent_loop.forked import fork_call
+
         findings_block_lines: List[str] = []
         for i, f in enumerate(unclear):
             title = f.get("title", "")
@@ -1992,38 +2043,25 @@ class PRBrainOrchestrator:
                 f"- Agent's evidence claim: {ev_raw}\n"
             )
 
-        touched_files = {f.get("file", "") for f in unclear} - {""}
-        diff_snippets: List[str] = []
-        for path in sorted(touched_files):
-            snippet = file_diffs.get(path, "")[:3000]
-            if snippet:
-                diff_snippets.append(f"### `{path}` diff\n\n```diff\n{snippet}\n```")
-
-        query = (
+        user_message = (
             "# Verify these findings in batch\n\n"
             "For each finding, return confirmed|refuted|unclear with "
-            "file:line evidence. Cross-reference allowed.\n\n"
+            "file:line evidence (the PR diff is in your system context). "
+            "Cross-reference allowed.\n\n"
             + "\n".join(findings_block_lines)
-            + "\n\n## Diffs\n\n"
-            + "\n".join(diff_snippets)
             + "\n\nReturn the JSON verdicts object from your system prompt."
         )
 
-        result = await executor.execute(
-            "dispatch_agent",
-            {
-                "template": "pr_verification_batch",
-                "query": query,
-                "budget_weight": 1.0,
-            },
+        raw = await fork_call(
+            provider=self._provider,  # strong tier for batch
+            system_prompt=system_prefix,
+            user_message=user_message,
+            max_tokens=2000,
+            label=f"verify_batch:{len(unclear)}",
         )
-        if not result.success:
+        if not raw:
             return ["unclear"] * len(unclear)
-
-        data = result.data or {}
-        raw = data.get("answer") or data.get("final_answer") or ""
-        verdicts = _extract_batch_verdicts(raw, expected_count=len(unclear))
-        return verdicts
+        return _extract_batch_verdicts(raw, expected_count=len(unclear))
 
     def _parse_v2_coordinator_output(
         self,
