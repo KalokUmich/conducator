@@ -14,7 +14,24 @@ external creds — all because the coordinator decided
 
 from __future__ import annotations
 
+import pytest
+
 from app.agent_loop.pr_brain import _detect_required_dispatches
+
+
+@pytest.fixture(autouse=True)
+def _disable_scratchpad(monkeypatch):
+    """Skip Fact Vault creation in PRBrainOrchestrator construction.
+
+    These tests instantiate brains in helper methods to exercise the
+    coordinator-query renderer / mandatory-dispatch detector. Without
+    this fixture, each ``_make_brain()`` call binds a real FactStore
+    onto the ``current_factstore`` ContextVar without ever calling
+    ``cleanup()``, leaking the binding into the next test module
+    (e.g. test_scratchpad_search_facts breaks because its no-active-
+    session test sees a leftover store).
+    """
+    monkeypatch.setenv("CONDUCTOR_SCRATCHPAD_ENABLED", "0")
 
 
 def _diffs(*paths: str) -> dict:
