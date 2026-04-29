@@ -885,6 +885,103 @@ falls back to the generic skip message.
   oversized PRs — primary metric is whether each suggested chunk
   compiles / tests independently.
 
+#### 7.8.6 Atlassian Readonly Enrichment (SHIPPED)
+
+**Problem.** The PR Brain reviews the diff, but never reads the linked Jira
+ticket or design doc. Two failure modes follow: (a) the reviewer can't tell
+whether the diff actually delivers what the ticket asked for (intent drift),
+and (b) severity calibration is uniform — a defect that violates a stated
+acceptance criterion gets the same band as a generic anti-pattern. The
+existing 3LO Jira flow can't help here: it's per-user OAuth, requires consent,
+and the ADO webhook runs without a user session.
+
+**Approach.** A separate service-account path using a classic Atlassian API
+token + HTTP Basic auth. One token is account-level — covers both Jira and
+Confluence on the same site. Independent of the 3LO flow used by the
+extension. Used **only** server-side (PR review, future Teams summarizer).
+
+- [x] **Read-only clients** (`integrations/jira/readonly_client.py`,
+  `integrations/confluence/readonly_client.py`):
+  - `JiraReadonlyClient.get_issue(key, fields=...)` — REST v3 issue fetch
+  - `JiraReadonlyClient.myself()` — credential verification
+  - `ConfluenceReadonlyClient.get_page(id) / get_page_by_url / get_space_homepage` — v2 API
+  - `extract_page_id` / `extract_space_key` URL helpers (handles
+    `/wiki/spaces/KEY/pages/{id}/...` and `/wiki/display/KEY/Title?pageId=...`)
+- [x] **PR enrichment module** (`integrations/atlassian/enrichment.py`):
+  - `extract_ticket_keys` — regex `[A-Z]+-\d+` over branch / title / description; capped
+  - `extract_confluence_urls` — `*.atlassian.net/wiki/...` URLs from description; capped
+  - `adf_to_text` — Atlassian Document Format → markdown-lite (headings, lists,
+    code blocks, mentions); drops ~40% of body size that's pure JSON overhead
+  - `confluence_storage_to_text` — storage XHTML → markdown-lite; preserves
+    `h1-h6, p, ul/ol/li, strong/em, a[href], code, pre`; strips macro
+    metadata (`ac:parameter`) but keeps panel/expand body text so embedded
+    requirements survive
+  - `fetch_pr_atlassian_context` — top-level: returns the formatted block
+    or `""` if no clients / no refs / all fetches fail (safe to splice
+    unconditionally)
+- [x] **ADO router wiring** (`integrations/azure_devops/router.py`):
+  fetches before Brain instantiation, passes `ticket_context=` through
+  `pr_brain_factory`. Fail-soft: any exception logs a warning and the
+  Brain falls back to diff-only reasoning.
+- [x] **Brain integration** (`agent_loop/pr_brain.py`):
+  - Coordinator's system query gets `## Linked tickets & docs
+    (authoritative requirements)` block injected
+  - Phase 9.16 `build_pr_context_prefix(ticket_context=...)` carries the
+    same block into the cache-stable P11 verifier prefix — one fetch,
+    every downstream call benefits
+- [x] **Coordinator skill update**
+  (`config/skills/pr_brain_coordinator.md`): teaches the coordinator to
+  (a) anchor invariants (turn each acceptance criterion into a
+  `dispatch_subagent` check), (b) calibrate severity (criterion break is
+  always `critical`), (c) catch intent drift (one critical finding when
+  the diff plainly doesn't do what the ticket says). Explicit guard
+  against false-positive "ticket says X, can't see X in the diff" —
+  must confirm X is missing from the codebase, not just from the diff.
+- [x] **Service-account REST endpoints** for ad-hoc queries:
+  `/api/integrations/jira/readonly/{whoami,issue/{key}}` and
+  `/api/integrations/confluence/readonly/{whoami,page,page/{id},space/{key}}`.
+  Useful for debugging and future Teams-bot use.
+- [x] **Config plumbing** (`config.py`, `main.py`):
+  `AtlassianReadonlySecretsConfig {site_url, email, api_token}` with
+  `CONDUCTOR_ATLASSIAN_READONLY_{SITE_URL,EMAIL,TOKEN}` env-var
+  overrides. Lifespan instantiates both readonly clients only if all
+  three secrets are set; otherwise leaves them `None` and the ADO router
+  no-ops.
+- [x] **Ticket standard doc** (`docs/JIRA_TICKET_STANDARD.md`): the spec
+  for both human authors and AI agents (Claude Code, future
+  auto-drafters). Pins the four-section shape (Context / Scope /
+  Acceptance criteria / Out of scope), worked example, anti-patterns,
+  and rules for agents drafting tickets ("never invent ungrounded
+  acceptance criteria", "write predicates not tasks").
+
+**Why service-account, not 3LO.** 3LO requires per-user consent and
+expires; the ADO webhook runs without a session. A service account is the
+cleanest match for "fetch ticket bodies during automated review". Real
+credentials live in `conductor.secrets.local.yaml` (gitignored); the
+committed `conductor.secrets.yaml` carries empty placeholders only.
+
+**Failure modes & mitigations.**
+- Ticket body empty / generic → reviewer falls back to diff alone, no
+  signal lost.
+- Confluence URL points to a space without a `pageId` → falls back to
+  the space's homepage (often the design index).
+- ADF / storage XHTML truncated past `max_chars_per_item` (default
+  4000 chars) → `[…truncated…]` marker preserved so the LLM knows
+  there's more.
+- Jira / Confluence outage → `try/except` per ref, individual failures
+  appear as `_(fetch failed: ...)_` blocks; the rest of the context
+  still flows through.
+
+**Not yet:**
+- [ ] Eval pass measuring whether ticket context actually shifts severity
+  calibration — needs a corpus of PRs with linked tickets where the
+  diff genuinely violates an acceptance criterion.
+- [ ] Use from the Teams summarizer / `/jira` flow — currently
+  enrichment is wired into the ADO review path only.
+- [ ] Caching at the ticket level (right now every review re-fetches
+  even if the same ticket was queried minutes ago). Would belong in the
+  Fact Vault or a dedicated Atlassian-cache TTL store.
+
 ### Dependency Graph
 ```
 7.0 (DB Foundation) ──> 7.1 (Jira OAuth) ──┬──> 7.2 (Jira API) ──┬──> 7.4 (Ticket UI)
@@ -1812,6 +1909,7 @@ Bridge the gap between AI Summaries and actionable outcomes. Applies to both Ext
 | **Phase 9.13+: v2s mandatory dispatch (path + content tiers, coordinator cardinal rule)** | **✅ Complete** | **Sprint 17** |
 | **Phase 9.13+: v2u Phase 2 reorder (P13 first, LLM signature-focus, 60s timeout)** | **✅ Complete** | **Sprint 17** |
 | **Phase 7.8.5: PR Splitter (single-shot, teach-not-command rationales)** | **✅ Complete** | **Sprint 17** |
+| **Phase 7.8.6: Atlassian readonly enrichment (Jira + Confluence ticket context for PR Brain)** | **✅ Complete** | **Sprint 18** |
 | **Phase 9.9.3: Structured Note-Taking for sub-agents** | **✅ Complete** | **Sprint 18** |
 | **Phase 9.16: Forked Agent Pattern (P11 verifier cache reuse)** | **✅ Complete** | **Sprint 18** |
 | **Phase 9.17: Brain Lifecycle Hooks (4 extension points)** | **✅ Complete** | **Sprint 18** |

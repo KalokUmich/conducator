@@ -2460,8 +2460,11 @@ Variables not set will fall back to the dev defaults in the YAML file.
 | `CONDUCTOR_POSTGRES_PASSWORD` | postgres.password | 默认 conductor |
 | `DATABASE_URL` | 完整连接 URL（覆盖 host/port/db 配置） | 二选一 |
 | **Integrations** | | |
-| `CONDUCTOR_JIRA_CLIENT_ID` | jira.client_id | Jira 集成时必须 |
-| `CONDUCTOR_JIRA_CLIENT_SECRET` | jira.client_secret | Jira 集成时必须 |
+| `CONDUCTOR_JIRA_CLIENT_ID` | jira.client_id | Jira 3LO 集成时必须 |
+| `CONDUCTOR_JIRA_CLIENT_SECRET` | jira.client_secret | Jira 3LO 集成时必须 |
+| `CONDUCTOR_ATLASSIAN_READONLY_SITE_URL` | atlassian_readonly.site_url | PR Brain 工单上下文 enrichment（服务账号路径，Jira + Confluence 共用） |
+| `CONDUCTOR_ATLASSIAN_READONLY_EMAIL` | atlassian_readonly.email | 同上，服务账号邮箱 |
+| `CONDUCTOR_ATLASSIAN_READONLY_TOKEN` | atlassian_readonly.api_token | 同上，classic API token（非 OAuth scoped token） |
 | `CONDUCTOR_GOOGLE_CLIENT_ID` | google_sso.client_id | Google SSO 时必须 |
 | `CONDUCTOR_GOOGLE_CLIENT_SECRET` | google_sso.client_secret | Google SSO 时必须 |
 | `CONDUCTOR_NGROK_AUTHTOKEN` | ngrok.authtoken | Ngrok 时必须 |

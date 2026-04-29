@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .models import CreateIssueRequest, RefreshTokenRequest
+from .readonly_client import JiraReadonlyClient
 from .service import JiraOAuthService
 
 logger = logging.getLogger(__name__)
@@ -353,4 +355,51 @@ async def create_issue(request: Request, req: CreateIssueRequest) -> dict:
         raise HTTPException(status_code=401, detail=str(e)) from e
     except Exception as e:
         logger.error("Failed to create Jira issue: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ---------------------------------------------------------------------------
+# Read-only service-account path (Basic auth, no user consent)
+# ---------------------------------------------------------------------------
+
+
+def _get_readonly_client(request: Request) -> JiraReadonlyClient:
+    client = getattr(request.app.state, "jira_readonly_client", None)
+    if client is None or not client.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Jira readonly client not configured — set jira_readonly.{site_url,email,api_token} in secrets.",
+        )
+    return client
+
+
+@router.get("/readonly/whoami")
+async def readonly_whoami(request: Request) -> dict:
+    """Verify the service-account token works. Returns the bot profile."""
+    client = _get_readonly_client(request)
+    try:
+        profile = await client.myself()
+        return {
+            "ok": True,
+            "account_id": profile.get("accountId"),
+            "email": profile.get("emailAddress"),
+            "display_name": profile.get("displayName"),
+        }
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
+    except Exception as e:
+        logger.error("Jira readonly whoami failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/readonly/issue/{key}")
+async def readonly_get_issue(key: str, request: Request) -> dict:
+    """Read a single ticket by key (e.g. DEV-18691) using the service account."""
+    client = _get_readonly_client(request)
+    try:
+        return await client.get_issue(key)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text) from e
+    except Exception as e:
+        logger.error("Jira readonly get_issue(%s) failed: %s", key, e)
         raise HTTPException(status_code=500, detail=str(e)) from e

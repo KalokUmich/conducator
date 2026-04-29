@@ -596,6 +596,7 @@ class PRBrainOrchestrator:
         task_id: Optional[str] = None,
         pr_title: str = "",
         pr_description: str = "",
+        ticket_context: str = "",
     ):
         self._provider = provider
         self._explorer_provider = explorer_provider
@@ -611,6 +612,11 @@ class PRBrainOrchestrator:
         # claims?" not just "is this diff pattern-wise suspicious?".
         self._pr_title = pr_title or ""
         self._pr_description = pr_description or ""
+        # Pre-fetched Jira tickets + Confluence pages referenced by this PR,
+        # already flattened to markdown by the ADO router. Injected into
+        # both the coordinator query and the P11 verifier prefix so a single
+        # fetch serves every downstream call.
+        self._ticket_context = ticket_context or ""
 
         # Phase 9.15 — task-scoped Fact Vault. Sub-agent tool calls are
         # routed through a CachedToolExecutor so identical grep / read_file /
@@ -1541,6 +1547,16 @@ class PRBrainOrchestrator:
             )
             lines.append("")
 
+        # Jira tickets + Confluence pages referenced by this PR, pre-fetched
+        # via the readonly service-account path. The coordinator treats
+        # these as authoritative statement of *requirements* — see the
+        # pr_brain_coordinator skill for how to use them.
+        if self._ticket_context:
+            lines.append("## Linked tickets & docs (authoritative requirements)")
+            lines.append("")
+            lines.append(self._ticket_context)
+            lines.append("")
+
         lines.append("## Files in diff")
         lines.append("")
         for f in pr_context.files:
@@ -2013,6 +2029,7 @@ class PRBrainOrchestrator:
             pr_title=self._pr_title,
             pr_description=self._pr_description,
             file_diffs_text=diff_text,
+            ticket_context=self._ticket_context,
         )
         return f"{skill_text}\n\n{ctx_prefix}".strip()
 

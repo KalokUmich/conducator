@@ -224,6 +224,29 @@ async def review_pull_request(
                 diff_spec=diff_spec,
             )
 
+            # Fetch Jira tickets + Confluence pages referenced by this PR
+            # before invoking the Brain. Readonly clients are optional; if
+            # they're unset or no refs are found, ticket_context is "" and
+            # the Brain falls back to diff-only reasoning.
+            ticket_context = ""
+            try:
+                from app.integrations.atlassian.enrichment import fetch_pr_atlassian_context
+
+                ticket_context = await fetch_pr_atlassian_context(
+                    jira=getattr(request.app.state, "jira_readonly_client", None),
+                    confluence=getattr(request.app.state, "confluence_readonly_client", None),
+                    source_branch=source_branch,
+                    pr_title=pr_data.get("title", "") or "",
+                    pr_description=pr_data.get("description", "") or "",
+                )
+                if ticket_context:
+                    logger.info(
+                        "[AzureDevOps] Atlassian context fetched: %d chars",
+                        len(ticket_context),
+                    )
+            except Exception as e:
+                logger.warning("[AzureDevOps] Atlassian context fetch failed: %s", e)
+
             # Step 3: Full review via PRBrainOrchestrator. ``task_id`` makes
             # the scratchpad SQLite filename traceable back to this PR when
             # multiple reviews run concurrently.
@@ -232,6 +255,7 @@ async def review_pull_request(
                 worktree_path, diff_spec, task_id=task_id,
                 pr_title=pr_data.get("title", "") or "",
                 pr_description=pr_data.get("description", "") or "",
+                ticket_context=ticket_context,
             )
 
             # Collect results from the streaming pipeline

@@ -103,6 +103,33 @@ to verify, then add that to your Plan as a `dispatch_subagent` check.
 Findings come from dispatched sub-agents, not from your own grep
 output. See "The cardinal rule" above.
 
+**When `## Linked tickets & docs` is present in your input**, treat it as the
+authoritative statement of *what this PR should do*. It's pre-fetched from Jira
+and Confluence — the ticket body, acceptance criteria, and referenced design
+docs. Use it to:
+
+- **Anchor invariants.** Turn each acceptance criterion into a falsifiable
+  assertion you'll check via `dispatch_subagent`. E.g. ticket says "refund
+  must be idempotent by external_id" → check becomes "does the refund path
+  upsert on external_id, or insert-only?"
+- **Calibrate severity.** A defect that breaks an explicit acceptance
+  criterion is always `critical` regardless of how rare the path looks. A
+  defect that violates an implicit assumption (not in ticket) stays at its
+  usual severity band.
+- **Catch intent drift.** If the diff plainly doesn't do what the ticket
+  says (new endpoint documented but never registered, feature flag
+  mentioned but never read), emit ONE finding of severity `critical` with
+  category `correctness`.
+
+What this block is **not**: a review checklist, a spec to grade the PR
+against line-by-line, or a source of "nice-to-have" suggestions. Stated
+goals that the PR reasonably satisfies → no finding. Do **not** emit
+findings like "the ticket mentions X but I can't see X in the diff" unless
+you've confirmed X is actually missing from the codebase (not just absent
+from the diff). Many requirements are satisfied by unchanged code.
+
+If the block is absent, skip this entirely — diff + PR intent are sufficient.
+
 ### 2. Plan
 
 Decompose into concrete investigations. Each becomes one `dispatch_subagent`

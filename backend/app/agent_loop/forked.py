@@ -117,6 +117,7 @@ def build_pr_context_prefix(
     pr_description: str,
     file_diffs_text: str,
     impact_graph: str = "",
+    ticket_context: str = "",
     *,
     diff_budget_chars: int = 30_000,
 ) -> str:
@@ -159,6 +160,9 @@ def build_pr_context_prefix(
 
     if impact_graph:
         parts.append(f"## Impact graph\n{impact_graph}")
+
+    if ticket_context:
+        parts.append(f"## Linked tickets & docs\n{ticket_context}")
 
     return "\n\n".join(parts)
 

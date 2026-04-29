@@ -69,6 +69,9 @@ _ENV_SECRETS_MAP = {
     "CONDUCTOR_MOONSHOT_BASE_URL": ("ai_providers", "moonshot", "base_url"),
     "CONDUCTOR_JIRA_CLIENT_ID": ("jira", "client_id"),
     "CONDUCTOR_JIRA_CLIENT_SECRET": ("jira", "client_secret"),
+    "CONDUCTOR_ATLASSIAN_READONLY_EMAIL": ("atlassian_readonly", "email"),
+    "CONDUCTOR_ATLASSIAN_READONLY_TOKEN": ("atlassian_readonly", "api_token"),
+    "CONDUCTOR_ATLASSIAN_READONLY_SITE_URL": ("atlassian_readonly", "site_url"),
     "CONDUCTOR_TEAMS_APP_ID": ("teams", "app_id"),
     "CONDUCTOR_TEAMS_APP_PASSWORD": ("teams", "app_password"),
     "CONDUCTOR_TEAMS_APP_TENANT_ID": ("teams", "app_tenant_id"),
@@ -545,6 +548,20 @@ class JiraSecretsConfig(BaseModel):
     client_secret: str = ""
 
 
+class AtlassianReadonlySecretsConfig(BaseModel):
+    """Atlassian API token credentials (Basic auth, read-only) — shared Jira + Confluence.
+
+    Classic (non-scoped) API tokens are account-level, so one token serves both
+    products on the same Atlassian Cloud site. Separate from the 3LO flow used
+    by the extension — this path needs no user consent and is used for
+    server-side flows (PR review, webhook, summarizer).
+    """
+
+    site_url: str = ""
+    email: str = ""
+    api_token: str = ""
+
+
 class TeamsSettings(BaseModel):
     """Microsoft Teams bot integration toggle (from conductor.settings.yaml).
 
@@ -657,6 +674,7 @@ class ConductorConfig(BaseModel):
     google_sso_secrets: GoogleSSOSecretsConfig = Field(default_factory=GoogleSSOSecretsConfig)
     jira: JiraSettings = Field(default_factory=JiraSettings)
     jira_secrets: JiraSecretsConfig = Field(default_factory=JiraSecretsConfig)
+    atlassian_readonly: AtlassianReadonlySecretsConfig = Field(default_factory=AtlassianReadonlySecretsConfig)
     teams: TeamsSettings = Field(default_factory=TeamsSettings)
     teams_secrets: TeamsSecretsConfig = Field(default_factory=TeamsSecretsConfig)
     azure_devops: AzureDevOpsSettings = Field(default_factory=AzureDevOpsSettings)
@@ -774,6 +792,13 @@ def load_config(
         client_secret=_env("CONDUCTOR_JIRA_CLIENT_SECRET", jira_sec.get("client_secret", "")),
     )
 
+    atl_ro_sec = secrets_raw.get("atlassian_readonly", {})
+    atlassian_readonly_cfg = AtlassianReadonlySecretsConfig(
+        site_url=_env("CONDUCTOR_ATLASSIAN_READONLY_SITE_URL", atl_ro_sec.get("site_url", "")),
+        email=_env("CONDUCTOR_ATLASSIAN_READONLY_EMAIL", atl_ro_sec.get("email", "")),
+        api_token=_env("CONDUCTOR_ATLASSIAN_READONLY_TOKEN", atl_ro_sec.get("api_token", "")),
+    )
+
     teams_data = raw.get("teams", {})
     teams_cfg = TeamsSettings(enabled=teams_data.get("enabled", False))
 
@@ -862,6 +887,7 @@ def load_config(
         change_limits=change_limits_cfg,
         jira=jira_cfg,
         jira_secrets=jira_secrets_cfg,
+        atlassian_readonly=atlassian_readonly_cfg,
         teams=teams_cfg,
         teams_secrets=teams_secrets_cfg,
         azure_devops=ado_cfg,

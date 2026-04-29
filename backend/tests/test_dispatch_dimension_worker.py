@@ -15,7 +15,7 @@ _dispatch_agent returning canned JSON.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -26,7 +26,6 @@ from app.agent_loop.pr_brain import (
     _dimension_dispatch_cap,
 )
 from app.code_tools.schemas import DispatchDimensionWorkerParams, ToolResult
-
 
 # ---------------------------------------------------------------------------
 # Pydantic schema validation
@@ -128,7 +127,9 @@ class TestDimensionDispatchCap:
 def _make_pr_context_with_files(paths):
     """Build a PRContext-ish object with .business_logic_files() -> files."""
     from app.code_review.models import (
-        ChangedFile, FileCategory, PRContext,
+        ChangedFile,
+        FileCategory,
+        PRContext,
     )
     files = [
         ChangedFile(

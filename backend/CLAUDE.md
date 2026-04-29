@@ -58,10 +58,18 @@ backend/app/
 ├── repo_graph/              # AST-based symbol extraction + dependency graph
 ├── git_workspace/           # Git workspace management (Model A)
 └── integrations/            # External service integrations
-    └── jira/                # Jira OAuth 3LO + REST API
-        ├── service.py       # JiraOAuthService — OAuth token lifecycle + API calls
-        ├── models.py        # JiraTokenPair, JiraProject, JiraIssue, CreateIssueRequest
-        └── router.py        # /api/integrations/jira/* endpoints
+    ├── jira/                # Jira OAuth 3LO + REST API + readonly service-account path
+    │   ├── service.py       # JiraOAuthService — 3LO token lifecycle + API calls
+    │   ├── readonly_client.py  # Phase 7.8.6 — Basic-auth client (service account, no user consent)
+    │   ├── models.py        # JiraTokenPair, JiraProject, JiraIssue, CreateIssueRequest
+    │   └── router.py        # /api/integrations/jira/* (incl. /readonly/whoami, /readonly/issue/{key})
+    ├── confluence/          # Phase 7.8.6 — Confluence v2 readonly client
+    │   ├── readonly_client.py  # ConfluenceReadonlyClient (page-by-id, page-by-url, space homepage)
+    │   └── router.py        # /api/integrations/confluence/readonly/{whoami,page,page/{id},space/{key}}
+    └── atlassian/           # Phase 7.8.6 — cross-product PR enrichment
+        └── enrichment.py    # fetch_pr_atlassian_context — extracts ticket keys + Confluence URLs from PR
+                             # metadata, fetches via readonly clients, flattens ADF + storage XHTML to
+                             # markdown-lite, returns one block ready to splice into coordinator context
 ```
 
 ## Brain Orchestrator (Agentic Code Intelligence)
@@ -166,6 +174,8 @@ Key designs:
 **Brain lifecycle hooks** (Phase 9.17, `app/agent_loop/lifecycle.py`): `register_hook(name, callback)` + `fire_hook(name, orchestrator, data)` for 4 extension points: `on_survey_complete` (after Phase 1 pre-compute), `on_dispatch_complete` (coordinator returned draft, before precision filter), `on_synthesize_complete` (findings + synthesis ready), `on_task_end` (cleanup beginning, fires BEFORE scratchpad delete so consumers can read vault one last time). Fire-and-forget — callback exceptions are logged and swallowed, never crash the Brain.
 
 **PR-review scratchpad** (Phase 9.15, `app/scratchpad/`): On each PR review start, `PRBrainOrchestrator` opens a per-session SQLite at `~/.conductor/scratchpad/{task_id}-{uuid}.sqlite` and wraps the tool executor with `CachedToolExecutor`. Sub-agent tool calls are transparently deduplicated via exact-key lookup or range-intersection (read_file 100-150 satisfies later 101-130). `search_facts` lets sub-agents query the vault metadata directly. Session file + WAL sidecars are deleted on `cleanup()`. Human-readable `task_id` (e.g. `ado-MyProject-pr-12345`) is folded into the filename so concurrent PR reviews are traceable in activity logs.
+
+**Atlassian readonly enrichment** (Phase 7.8.6, `app/integrations/atlassian/enrichment.py`): The Azure DevOps review router pre-fetches Jira tickets and Confluence pages referenced by the PR before instantiating the Brain, then passes the formatted block as `ticket_context=` to the orchestrator. The Brain splices it into both (a) the coordinator's system context under `## Linked tickets & docs (authoritative requirements)` and (b) the cache-stable PR-context prefix used by Phase 9.16 forked verifier calls — one fetch serves every downstream LLM. Ticket keys (`[A-Z]+-\d+`) are harvested from branch / title / description; Confluence URLs from description only. ADF (Jira v3 description) and Confluence storage XHTML are flattened to markdown-lite to drop ~40% structural overhead. Auth is account-level Basic (one classic API token covers both products), independent of the existing 3LO flow used by the extension. Service-account REST endpoints are also exposed at `/api/integrations/{jira,confluence}/readonly/*` for direct queries (whoami, get issue, get page, space homepage).
 
 **Tree-sitter scan hardening** (Phase 9.18, `app/repo_graph/parse_pool.py`): File parses run in an isolated subprocess (`forkserver` start method on POSIX) so the main process can `SIGKILL` the worker if it exceeds `CONDUCTOR_PARSE_TIMEOUT_S` (default 60s). Required because tree-sitter's Python binding holds the GIL through the C parse — no in-process timeout mechanism can interrupt it. Paired `_estimate_jsx_depth` heuristic routes large `.tsx` files with deep nesting (>15 levels, >20KB) straight to the regex extractor, bypassing the first-encounter SIGKILL budget. Parser uses `tree-sitter 0.25` + `tree-sitter-language-pack 1.6` (replaced the abandoned `tree-sitter-languages`).
 

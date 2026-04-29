@@ -308,6 +308,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.jira_allowed_projects = set()
         logger.info("Jira integration: disabled")
 
+    # Atlassian readonly clients (Basic auth, shared account-level token) —
+    # one classic API token drives both Jira and Confluence. Independent of 3LO.
+    atl_ro = conductor_cfg.atlassian_readonly
+    if atl_ro.site_url and atl_ro.email and atl_ro.api_token:
+        from .integrations.confluence.readonly_client import ConfluenceReadonlyClient
+        from .integrations.jira.readonly_client import JiraReadonlyClient
+
+        app.state.jira_readonly_client = JiraReadonlyClient(
+            site_url=atl_ro.site_url, email=atl_ro.email, api_token=atl_ro.api_token,
+        )
+        app.state.confluence_readonly_client = ConfluenceReadonlyClient(
+            site_url=atl_ro.site_url, email=atl_ro.email, api_token=atl_ro.api_token,
+        )
+        logger.info("Atlassian readonly clients: enabled (site=%s, email=%s)", atl_ro.site_url, atl_ro.email)
+    else:
+        app.state.jira_readonly_client = None
+        app.state.confluence_readonly_client = None
+        logger.info("Atlassian readonly clients: disabled")
+
     # ---- Azure DevOps ----
     if conductor_cfg.azure_devops.enabled and conductor_cfg.azure_devops_secrets.pat:
         from .integrations.azure_devops.mcp_client import AzureDevOpsClient
@@ -341,6 +360,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 task_id: Optional[str] = None,
                 pr_title: str = "",
                 pr_description: str = "",
+                ticket_context: str = "",
             ) -> PRBrainOrchestrator:
                 return PRBrainOrchestrator(
                     provider=agent_provider,
@@ -354,6 +374,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     task_id=task_id,
                     pr_title=pr_title,
                     pr_description=pr_description,
+                    ticket_context=ticket_context,
                 )
 
             app.state.pr_brain_factory = _make_pr_brain
@@ -517,6 +538,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     from .files.router import router as files_router
     from .git_workspace.router import router as git_workspace_router
     from .integrations.azure_devops.router import router as azure_devops_router
+    from .integrations.confluence.router import router as confluence_router
     from .integrations.jira.router import router as jira_router
     from .integrations.teams.router import router as teams_router
     from .langextract.router import router as langextract_router
@@ -546,6 +568,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.include_router(langextract_router)
     app.include_router(brain_router)
     app.include_router(jira_router)
+    app.include_router(confluence_router)
     app.include_router(azure_devops_router)
     app.include_router(teams_router)
     if _browser_router is not None:

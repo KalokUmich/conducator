@@ -164,6 +164,7 @@ Current prototype includes:
 - **PR Brain v2** — coordinator-worker (agent-as-tool) PR review: a Sonnet coordinator surveys the diff, dispatches scope-bounded workers (scoped `dispatch_subagent` + dimension-sliced `dispatch_dimension_worker`) from 7 role templates, classifies severity itself, and runs deterministic post-passes (P8 reflection against Phase 2 facts, P11 per-finding verifier, P13 phantom-symbol scanners for Python/Go/Java, P14 stub-caller detector, diff-scope filter). Mandatory-dispatch detector (Tier 1 path + Tier 2 `+`-line content) forces security/reliability coverage on auth/crypto/migration PRs regardless of survey.
 - **Fact Vault** (short-term memory per PR review — task-scoped SQLite cache shared across sub-agents; Phase 9.15)
 - **Hardened tree-sitter scan** — subprocess-isolated parsing with SIGKILL-on-timeout + JSX-depth heuristic; tree-sitter upgraded to 0.25 / language-pack (Phase 9.18)
+- **Atlassian readonly enrichment** — PR Brain pre-fetches linked Jira tickets + Confluence pages via a service-account API token (one classic token covers both products), splices the flattened body into the coordinator's context so severity calibrates against acceptance criteria and intent drift is caught (Phase 7.8.6); see [`docs/JIRA_TICKET_STANDARD.md`](docs/JIRA_TICKET_STANDARD.md) for the ticket shape this expects
 - Isolated Git workspaces per room
 - **Task Board**: TODO dependency markers (`{jira:TICKET#N|after:M|blocked:OTHER}`), Epic-grouped Jira tickets, drag-and-drop AI Working Space
 - **Chat persistence**: write-through micro-batch Postgres + Redis hot cache
@@ -308,6 +309,7 @@ npm run compile
 - **PR Brain v2** —— 协调-worker（agent-as-tool）PR 评审：Sonnet coordinator 扫描 diff，从 7 个 role 模板分发 scope-bounded worker（按文件范围的 `dispatch_subagent` + 按 bug 类别的 `dispatch_dimension_worker`），自己分类 severity，并运行确定性后置检查（P8 现存事实反思、P11 逐条 finding 验证、P13 Python/Go/Java 幻觉符号扫描器、P14 stub 调用检测、diff-scope 过滤）。强制分发检测器（Tier 1 路径 + Tier 2 `+` 行内容）在 auth/crypto/migration PR 上强制 security/reliability 覆盖。
 - **Fact Vault**（PR review 会话级短期记忆 —— 任务作用域 SQLite 缓存，跨 sub-agent 共享；Phase 9.15）
 - **硬化的 tree-sitter 扫描** —— 子进程隔离解析 + SIGKILL 超时 + JSX 嵌套深度启发式；tree-sitter 升级到 0.25 + language-pack（Phase 9.18）
+- **Atlassian 只读富化** —— PR Brain 用服务账号 API token（一把 classic token 通吃 Jira + Confluence）预拉取 PR 关联的 Jira 工单和 Confluence 设计文档，把铺平后的正文塞进 coordinator 上下文，让 severity 按 acceptance criteria 校准、并能抓到 intent drift（Phase 7.8.6）；工单形态规范见 [`docs/JIRA_TICKET_STANDARD.md`](docs/JIRA_TICKET_STANDARD.md)
 - 每个房间独立的 Git 工作区
 - **任务面板**：TODO 依赖标记（`{jira:TICKET#N|after:M|blocked:OTHER}`）、Epic 分组 Jira 票、拖拽 AI 工作区
 - **聊天持久化**：写穿透 micro-batch Postgres + Redis 热缓存
